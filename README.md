@@ -1,6 +1,10 @@
-# 🧰 Google Workspace AI Toolbox
+<p align="center">
+  <img src="public/logo.svg" alt="Google Workspace AI Toolbox" width="80" />
+</p>
 
-I got tired of clicking through the Google Admin Console for the same handful of tasks every week. So I built this.
+<h1 align="center">Google Workspace AI Toolbox</h1>
+
+<p align="center">I got tired of clicking through the Google Admin Console for the same handful of tasks every week. So I built this.</p>
 
 It's a simple web app that wraps the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`) with a clean UI. No more hunting through menus to delegate a mailbox or share a calendar — just pick the task, fill in the emails, and go.
 
