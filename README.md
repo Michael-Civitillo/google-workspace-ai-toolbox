@@ -1,17 +1,17 @@
-# Google Workspace Admin
+# 🛠️ Google Workspace Admin
 
 I got tired of clicking through the Google Admin Console for the same handful of tasks every week. So I built this.
 
 It's a simple web app that wraps the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`) with a clean UI. No more hunting through menus to delegate a mailbox or share a calendar — just pick the task, fill in the emails, and go.
 
-## What it does
+## ✨ What it does
 
-- **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama.
-- **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
-- **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
-- **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
+- 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama.
+- 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
+- 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
+- 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
 
-## Getting started
+## 🚀 Getting started
 
 You'll need:
 - Node.js 18+
@@ -35,9 +35,9 @@ npm install
 npm run dev
 ```
 
-Hit [http://localhost:3000](http://localhost:3000) and you're in.
+Hit [http://localhost:3000](http://localhost:3000) and you're in. 🎉
 
-## Auth setup (the important part)
+## 🔐 Auth setup (the important part)
 
 The app runs `gws` commands on the server side. For real admin work, you'll want a **service account with domain-wide delegation** so you can act on behalf of any user in your org:
 
@@ -52,14 +52,14 @@ The app runs `gws` commands on the server side. For real admin work, you'll want
    export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/service-account.json
    ```
 
-## Built with
+## 🧰 Built with
 
 - [Next.js](https://nextjs.org/) 15
 - [Tailwind CSS](https://tailwindcss.com/) v4
 - [shadcn/ui](https://ui.shadcn.com/)
 - [gws CLI](https://github.com/googleworkspace/cli)
 
-## Dev stuff
+## 💻 Dev stuff
 
 ```bash
 npm run dev     # fire it up
@@ -67,6 +67,6 @@ npm run build   # production build
 npm run lint    # check your work
 ```
 
-## License
+## 📄 License
 
 MIT — do whatever you want with it.
