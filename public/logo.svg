@@ -1,31 +1,43 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
   <defs>
-    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6366F1"/>
-      <stop offset="100%" stop-color="#8B5CF6"/>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="50%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
     </linearGradient>
-    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#F472B6"/>
-      <stop offset="100%" stop-color="#EC4899"/>
-    </linearGradient>
-    <linearGradient id="grad3" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#34D399"/>
-      <stop offset="100%" stop-color="#10B981"/>
-    </linearGradient>
-    <linearGradient id="grad4" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="wand" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#FBBF24"/>
       <stop offset="100%" stop-color="#F59E0B"/>
     </linearGradient>
   </defs>
+
   <!-- Background rounded square -->
-  <rect x="2" y="2" width="36" height="36" rx="10" fill="url(#grad1)"/>
-  <!-- Grid of 4 rounded tiles — toolbox feel -->
-  <rect x="7" y="7" width="11" height="11" rx="3" fill="url(#grad2)"/>
-  <rect x="22" y="7" width="11" height="11" rx="3" fill="url(#grad4)"/>
-  <rect x="7" y="22" width="11" height="11" rx="3" fill="url(#grad3)"/>
-  <rect x="22" y="22" width="11" height="11" rx="3" fill="white" opacity="0.25"/>
-  <!-- Sparkle / AI accent on bottom-right tile -->
-  <path d="M27.5 25 L28.2 27.3 L30.5 28 L28.2 28.7 L27.5 31 L26.8 28.7 L24.5 28 L26.8 27.3 Z" fill="white" opacity="0.9"/>
-  <!-- Subtle shine -->
-  <rect x="7" y="7" width="26" height="2" rx="1" fill="white" opacity="0.15"/>
+  <rect x="2" y="2" width="36" height="36" rx="10" fill="url(#bg)"/>
+
+  <!-- Magic wand (diagonal, bottom-left to upper-right) -->
+  <rect x="8" y="18.5" width="22" height="3.5" rx="1.75" transform="rotate(-40 19 20)" fill="url(#wand)"/>
+  <!-- Wand tip (star shape) -->
+  <circle cx="28" cy="10.5" r="2.5" fill="white" opacity="0.95"/>
+
+  <!-- AI atom/sparkle symbol at wand tip -->
+  <!-- Center dot -->
+  <circle cx="28" cy="10.5" r="1" fill="#7C3AED"/>
+  <!-- Orbital rings -->
+  <ellipse cx="28" cy="10.5" rx="4" ry="1.5" fill="none" stroke="white" stroke-width="0.7" opacity="0.7" transform="rotate(-20 28 10.5)"/>
+  <ellipse cx="28" cy="10.5" rx="4" ry="1.5" fill="none" stroke="white" stroke-width="0.7" opacity="0.5" transform="rotate(40 28 10.5)"/>
+
+  <!-- Sparkles scattered around wand -->
+  <!-- Large sparkle top-right -->
+  <path d="M33 16 L33.5 17.5 L35 18 L33.5 18.5 L33 20 L32.5 18.5 L31 18 L32.5 17.5 Z" fill="#F472B6" opacity="0.9"/>
+  <!-- Medium sparkle mid-left -->
+  <path d="M10 11 L10.4 12.2 L11.6 12.6 L10.4 13 L10 14.2 L9.6 13 L8.4 12.6 L9.6 12.2 Z" fill="#34D399" opacity="0.85"/>
+  <!-- Small sparkle bottom -->
+  <path d="M15 28 L15.3 28.9 L16.2 29.2 L15.3 29.5 L15 30.4 L14.7 29.5 L13.8 29.2 L14.7 28.9 Z" fill="#FBBF24" opacity="0.8"/>
+  <!-- Tiny sparkle top-left -->
+  <path d="M13 7 L13.2 7.7 L13.9 7.9 L13.2 8.1 L13 8.8 L12.8 8.1 L12.1 7.9 L12.8 7.7 Z" fill="white" opacity="0.6"/>
+  <!-- Small sparkle right -->
+  <path d="M34 25 L34.2 25.7 L34.9 25.9 L34.2 26.1 L34 26.8 L33.8 26.1 L33.1 25.9 L33.8 25.7 Z" fill="#A78BFA" opacity="0.7"/>
+
+  <!-- Subtle glow behind wand tip -->
+  <circle cx="28" cy="10.5" r="5.5" fill="white" opacity="0.08"/>
 </svg>
