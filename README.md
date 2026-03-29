@@ -4,12 +4,34 @@ I got tired of clicking through the Google Admin Console for the same handful of
 
 It's a simple web app that wraps the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`) with a clean UI. No more hunting through menus to delegate a mailbox or share a calendar — just pick the task, fill in the emails, and go.
 
+![Dashboard](docs/screenshots/dashboard.png)
+
 ## ✨ What it does
 
 - 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama.
 - 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
+
+<details>
+<summary>📸 More screenshots</summary>
+
+### Email Delegation
+![Email Delegation](docs/screenshots/email-delegation.png)
+
+### Calendar Delegation
+![Calendar Delegation](docs/screenshots/calendar-delegation.png)
+
+### Calendar Transfer
+![Calendar Transfer](docs/screenshots/calendar-transfer.png)
+
+### Email Transfer
+![Email Transfer](docs/screenshots/email-transfer.png)
+
+### Setup
+![Setup](docs/screenshots/setup.png)
+
+</details>
 
 ## 🚀 Getting started
 
