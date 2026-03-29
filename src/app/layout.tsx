@@ -16,8 +16,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Google Workspace Admin",
-  description: "Modern admin console for day-to-day Google Workspace tasks",
+  title: "Google Workspace AI Toolbox",
+  description: "Modern toolbox for day-to-day Google Workspace admin tasks",
 };
 
 export default function RootLayout({

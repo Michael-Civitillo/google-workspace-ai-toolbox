@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import Image from "next/image";
 import {
   LayoutDashboard,
   Mail,
@@ -9,7 +10,6 @@ import {
   ArrowRightLeft,
   Globe,
   Settings,
-  Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -58,12 +58,16 @@ export function Sidebar() {
     <aside className="fixed inset-y-0 left-0 w-64 bg-card border-r border-border flex flex-col z-50">
       <div className="p-6 border-b border-border">
         <div className="flex items-center gap-3">
-          <div className="h-9 w-9 rounded-lg bg-primary flex items-center justify-center">
-            <Shield className="h-5 w-5 text-primary-foreground" />
-          </div>
+          <Image
+            src="/logo.svg"
+            alt="GWS AI Toolbox"
+            width={36}
+            height={36}
+            className="rounded-lg"
+          />
           <div>
             <h1 className="text-sm font-semibold tracking-tight">
-              Workspace Admin
+              AI Toolbox
             </h1>
             <p className="text-xs text-muted-foreground">Google Workspace</p>
           </div>

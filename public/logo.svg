@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+  <!-- Google-inspired colorful toolbox icon -->
+  <!-- Blue base -->
+  <rect x="4" y="16" width="32" height="20" rx="4" fill="#4285F4"/>
+  <!-- Green bottom-right accent -->
+  <rect x="20" y="26" width="16" height="10" rx="0 0 4 0" fill="#34A853"/>
+  <!-- Yellow bottom-left accent -->
+  <rect x="4" y="26" width="16" height="10" rx="0 0 0 4" fill="#FBBC04"/>
+  <!-- Red handle -->
+  <rect x="12" y="6" width="16" height="14" rx="3" fill="#EA4335"/>
+  <rect x="16" y="4" width="8" height="6" rx="2" fill="#EA4335"/>
+  <rect x="18" y="4" width="4" height="4" rx="1" fill="white" opacity="0.3"/>
+  <!-- Toolbox latch -->
+  <rect x="16" y="20" width="8" height="5" rx="1.5" fill="white" opacity="0.9"/>
+  <!-- Shine effect -->
+  <rect x="6" y="18" width="12" height="2" rx="1" fill="white" opacity="0.2"/>
+</svg>

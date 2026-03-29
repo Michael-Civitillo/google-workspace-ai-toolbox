@@ -1,4 +1,4 @@
-# 🛠️ Google Workspace Admin
+# 🧰 Google Workspace AI Toolbox
 
 I got tired of clicking through the Google Admin Console for the same handful of tasks every week. So I built this.
 
@@ -52,8 +52,8 @@ gws auth setup
 gws auth login -s gmail,calendar
 
 # Then run this thing
-git clone https://github.com/Michael-Civitillo/google-workspace-admin.git
-cd google-workspace-admin
+git clone https://github.com/Michael-Civitillo/google-workspace-ai-toolbox.git
+cd google-workspace-ai-toolbox
 npm install
 npm run dev
 ```
