@@ -12,6 +12,7 @@ const pages = [
   { name: "calendar-delegation", path: "/calendar-delegation", delay: 500 },
   { name: "calendar-transfer", path: "/calendar-transfer", delay: 500 },
   { name: "email-transfer", path: "/email-transfer", delay: 500 },
+  { name: "domain-change", path: "/domain-change", delay: 500 },
   { name: "setup", path: "/setup", delay: 1500 },
 ];
 
