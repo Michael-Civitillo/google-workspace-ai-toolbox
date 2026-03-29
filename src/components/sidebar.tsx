@@ -9,6 +9,9 @@ import {
   CalendarDays,
   ArrowRightLeft,
   Globe,
+  Sparkles,
+  Layers,
+  Shield,
   Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -43,6 +46,21 @@ const navigation = [
     name: "Domain Change",
     href: "/domain-change",
     icon: Globe,
+  },
+  {
+    name: "AI Command",
+    href: "/ai-command",
+    icon: Sparkles,
+  },
+  {
+    name: "Bulk Operations",
+    href: "/bulk-operations",
+    icon: Layers,
+  },
+  {
+    name: "User Audit",
+    href: "/audit",
+    icon: Shield,
   },
   {
     name: "Setup",
