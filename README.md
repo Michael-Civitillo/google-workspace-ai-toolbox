@@ -29,6 +29,9 @@ It's a simple web app that wraps the [Google Workspace CLI](https://github.com/g
 ### Email Transfer
 ![Email Transfer](docs/screenshots/email-transfer.png)
 
+### Domain Change
+![Domain Change](docs/screenshots/domain-change.png)
+
 ### Setup
 ![Setup](docs/screenshots/setup.png)
 
