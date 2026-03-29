@@ -1,71 +1,72 @@
 # Google Workspace Admin
 
-A modern web app for day-to-day Google Workspace administration tasks. Built with Next.js and powered by the [Google Workspace CLI](https://github.com/googleworkspace/cli).
+I got tired of clicking through the Google Admin Console for the same handful of tasks every week. So I built this.
 
-## Features
+It's a simple web app that wraps the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`) with a clean UI. No more hunting through menus to delegate a mailbox or share a calendar — just pick the task, fill in the emails, and go.
 
-- **Email Delegation** — Grant mailbox access to another user without sharing passwords
-- **Calendar Delegation** — Share calendar access with configurable permission levels
-- **Calendar Transfer** — Transfer calendar ownership between users (offboarding, role changes)
-- **Email Transfer** — Set up automatic email forwarding between users
+## What it does
 
-## Prerequisites
+- **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama.
+- **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
+- **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
+- **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
 
-- [Node.js](https://nodejs.org/) 18+
-- [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`)
-- A Google Workspace admin account with appropriate API scopes
+## Getting started
 
-## Quick Start
+You'll need:
+- Node.js 18+
+- The [gws CLI](https://github.com/googleworkspace/cli)
+- A Google Workspace admin account
 
 ```bash
-# Install the gws CLI
+# Grab the gws CLI
 npm install -g @googleworkspace/cli
 
-# Authenticate (requires gcloud CLI)
+# Auth up (easiest way, needs gcloud)
 gws auth setup
 
-# Or authenticate manually with required scopes
+# Or do it manually
 gws auth login -s gmail,calendar
 
-# Clone and run this app
+# Then run this thing
 git clone https://github.com/Michael-Civitillo/google-workspace-admin.git
 cd google-workspace-admin
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to access the admin console.
+Hit [http://localhost:3000](http://localhost:3000) and you're in.
 
-## Authentication
+## Auth setup (the important part)
 
-This app executes `gws` CLI commands server-side. Authentication is handled by the CLI itself. For admin use, a **service account with domain-wide delegation** is recommended:
+The app runs `gws` commands on the server side. For real admin work, you'll want a **service account with domain-wide delegation** so you can act on behalf of any user in your org:
 
 1. Create a service account in your GCP project
-2. Enable domain-wide delegation in the Google Admin Console
-3. Grant the required OAuth scopes:
+2. Turn on domain-wide delegation in the Admin Console
+3. Add these OAuth scopes:
    - `https://www.googleapis.com/auth/gmail.settings.sharing`
    - `https://www.googleapis.com/auth/gmail.settings.basic`
    - `https://www.googleapis.com/auth/calendar`
-4. Point the CLI to your service account key:
+4. Tell the CLI where to find it:
    ```bash
    export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/service-account.json
    ```
 
-## Tech Stack
+## Built with
 
-- [Next.js](https://nextjs.org/) 15 (App Router)
+- [Next.js](https://nextjs.org/) 15
 - [Tailwind CSS](https://tailwindcss.com/) v4
-- [shadcn/ui](https://ui.shadcn.com/) components
-- [Google Workspace CLI](https://github.com/googleworkspace/cli) for API operations
+- [shadcn/ui](https://ui.shadcn.com/)
+- [gws CLI](https://github.com/googleworkspace/cli)
 
-## Development
+## Dev stuff
 
 ```bash
-npm run dev     # Start dev server
-npm run build   # Production build
-npm run lint    # Run ESLint
+npm run dev     # fire it up
+npm run build   # production build
+npm run lint    # check your work
 ```
 
 ## License
 
-MIT
+MIT — do whatever you want with it.
