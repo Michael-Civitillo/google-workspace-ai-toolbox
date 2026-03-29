@@ -9,6 +9,9 @@ import {
   CalendarDays,
   ArrowRightLeft,
   Globe,
+  Sparkles,
+  Layers,
+  Shield,
   CheckCircle2,
   XCircle,
   Loader2,
@@ -61,6 +64,33 @@ const tasks = [
     icon: Globe,
     color: "text-rose-600",
     bg: "bg-rose-50",
+  },
+];
+
+const aiTasks = [
+  {
+    title: "AI Command",
+    description: "Type what you need in plain English — the AI handles the rest",
+    href: "/ai-command",
+    icon: Sparkles,
+    color: "text-violet-600",
+    bg: "bg-violet-50",
+  },
+  {
+    title: "Bulk Operations",
+    description: "Paste a list of tasks and run them all at once",
+    href: "/bulk-operations",
+    icon: Layers,
+    color: "text-indigo-600",
+    bg: "bg-indigo-50",
+  },
+  {
+    title: "User Audit",
+    description: "Get a full access report for any user — email, calendar, forwarding",
+    href: "/audit",
+    icon: Shield,
+    color: "text-pink-600",
+    bg: "bg-pink-50",
   },
 ];
 
@@ -137,7 +167,39 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* Task Cards */}
+      {/* AI Features */}
+      <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+        <Sparkles className="h-5 w-5 text-violet-500" />
+        AI-Powered
+      </h2>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        {aiTasks.map((task) => (
+          <Link key={task.href} href={task.href}>
+            <Card className="h-full transition-all hover:shadow-md hover:border-violet-200 cursor-pointer group">
+              <CardHeader className="pb-3">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`h-10 w-10 rounded-lg ${task.bg} flex items-center justify-center`}
+                  >
+                    <task.icon className={`h-5 w-5 ${task.color}`} />
+                  </div>
+                  <CardTitle className="text-base group-hover:text-violet-600 transition-colors">
+                    {task.title}
+                  </CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {task.description}
+                </p>
+              </CardContent>
+            </Card>
+          </Link>
+        ))}
+      </div>
+
+      {/* Admin Tasks */}
+      <h2 className="text-lg font-semibold mb-3">Admin Tasks</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {tasks.map((task) => (
           <Link key={task.href} href={task.href}>

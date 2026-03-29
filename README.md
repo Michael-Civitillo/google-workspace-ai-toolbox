@@ -14,6 +14,12 @@ It's a simple web app that wraps the [Google Workspace CLI](https://github.com/g
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Handy when you've got 50 domains and someone needs to move.
 
+### AI-Powered (Gemini)
+
+- ✨ **AI Command** — Type what you need in plain English. "Give sarah access to john's mailbox" → it parses the intent, shows you what it'll do, and waits for your OK.
+- 📋 **Bulk Operations** — Paste a list of tasks (one per line, however you want) and the AI breaks them into individual operations you can run all at once.
+- 🛡️ **User Audit** — Enter a user's email and get a full AI-generated report: who has access to their mailbox, calendar sharing rules, forwarding config, and security flags.
+
 <details>
 <summary>📸 More screenshots</summary>
 
@@ -84,11 +90,17 @@ The app runs `gws` commands on the server side. For real admin work, you'll want
    export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/service-account.json
    ```
 
+For the AI features, you'll also need a [Gemini API key](https://aistudio.google.com/apikey):
+```bash
+export GOOGLE_GENERATIVE_AI_API_KEY=your-key-here
+```
+
 ## 🧰 Built with
 
 - [Next.js](https://nextjs.org/) 15
 - [Tailwind CSS](https://tailwindcss.com/) v4
 - [shadcn/ui](https://ui.shadcn.com/)
+- [Vercel AI SDK](https://sdk.vercel.ai/) + [Gemini](https://ai.google.dev/)
 - [gws CLI](https://github.com/googleworkspace/cli)
 
 ## 💻 Dev stuff

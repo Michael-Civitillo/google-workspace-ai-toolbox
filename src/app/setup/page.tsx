@@ -219,6 +219,38 @@ export default function Setup() {
                   4
                 </div>
                 <h3 className="text-sm font-semibold">
+                  Set Up Gemini (for AI features)
+                </h3>
+              </div>
+              <p className="text-sm text-muted-foreground ml-8">
+                Get a free API key from{" "}
+                <a
+                  href="https://aistudio.google.com/apikey"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline"
+                >
+                  Google AI Studio
+                </a>{" "}
+                and set it:
+              </p>
+              <code className="block ml-8 p-3 rounded-lg bg-muted text-sm font-mono">
+                export GOOGLE_GENERATIVE_AI_API_KEY=your-key-here
+              </code>
+              <p className="text-xs text-muted-foreground ml-8">
+                Powers the AI Command, Bulk Operations, and User Audit features.
+              </p>
+            </div>
+
+            <Separator />
+
+            {/* Step 5 */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <div className="h-6 w-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-semibold">
+                  5
+                </div>
+                <h3 className="text-sm font-semibold">
                   Verify Connection
                 </h3>
               </div>
