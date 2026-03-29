@@ -8,6 +8,7 @@ import {
   Mail,
   CalendarDays,
   ArrowRightLeft,
+  Globe,
   CheckCircle2,
   XCircle,
   Loader2,
@@ -52,6 +53,14 @@ const tasks = [
     icon: ArrowRightLeft,
     color: "text-amber-600",
     bg: "bg-amber-50",
+  },
+  {
+    title: "Domain Change",
+    description: "Switch a user's primary email to a different domain in your tenant",
+    href: "/domain-change",
+    icon: Globe,
+    color: "text-rose-600",
+    bg: "bg-rose-50",
   },
 ];
 

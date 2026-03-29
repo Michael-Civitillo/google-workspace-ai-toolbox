@@ -7,6 +7,7 @@ import {
   Mail,
   CalendarDays,
   ArrowRightLeft,
+  Globe,
   Settings,
   Shield,
 } from "lucide-react";
@@ -37,6 +38,11 @@ const navigation = [
     name: "Email Transfer",
     href: "/email-transfer",
     icon: ArrowRightLeft,
+  },
+  {
+    name: "Domain Change",
+    href: "/domain-change",
+    icon: Globe,
   },
   {
     name: "Setup",

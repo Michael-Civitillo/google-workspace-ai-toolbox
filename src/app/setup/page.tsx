@@ -206,6 +206,7 @@ export default function Setup() {
               <ul className="ml-8 space-y-1 text-sm text-muted-foreground list-disc list-inside">
                 <li>Gmail API</li>
                 <li>Google Calendar API</li>
+                <li>Admin SDK API (for Domain Change feature)</li>
               </ul>
             </div>
 

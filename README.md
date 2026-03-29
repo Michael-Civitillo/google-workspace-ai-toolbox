@@ -12,6 +12,7 @@ It's a simple web app that wraps the [Google Workspace CLI](https://github.com/g
 - 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
+- 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Handy when you've got 50 domains and someone needs to move.
 
 <details>
 <summary>📸 More screenshots</summary>
@@ -69,7 +70,13 @@ The app runs `gws` commands on the server side. For real admin work, you'll want
    - `https://www.googleapis.com/auth/gmail.settings.sharing`
    - `https://www.googleapis.com/auth/gmail.settings.basic`
    - `https://www.googleapis.com/auth/calendar`
-4. Tell the CLI where to find it:
+   - `https://www.googleapis.com/auth/admin.directory.user` (for Domain Change)
+   - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (for Domain Change)
+4. Set an admin email for impersonation (Domain Change needs this):
+   ```bash
+   export GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@yourdomain.com
+   ```
+5. Tell the CLI where to find it:
    ```bash
    export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/path/to/service-account.json
    ```
