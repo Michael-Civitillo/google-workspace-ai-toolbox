@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
+import { ThemeToggle } from "./theme-toggle";
 
 const navigation = [
   {
@@ -129,8 +130,9 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="p-4 border-t border-border">
-        <p className="text-xs text-muted-foreground">
+      <div className="p-3 border-t border-border space-y-1">
+        <ThemeToggle />
+        <p className="text-xs text-muted-foreground px-3 pb-1">
           Powered by{" "}
           <a
             href="https://github.com/googleworkspace/cli"
