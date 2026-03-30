@@ -1,10 +1,10 @@
-<p align="center">
+<p align="left">
   <img src="public/logo.svg" alt="Google Workspace AI Toolbox" width="80" />
 </p>
 
 <h1 align="left">Google Workspace AI Toolbox</h1>
 
-<p align="center">
+<p align="left">
   <strong>If you grew up on <a href="https://github.com/GAM-team/GAM">GAM</a>, this is what comes next.</strong><br/>
   A modern web UI for Google Workspace admin tasks — powered by Google's official <a href="https://github.com/googleworkspace/cli">Workspace CLI</a> and Gemini AI.
 </p>
