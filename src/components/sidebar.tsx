@@ -13,8 +13,10 @@ import {
   Layers,
   Shield,
   Settings,
+  Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { TenantSwitcher } from "./tenant-switcher";
 
 const navigation = [
   {
@@ -67,6 +69,11 @@ const navigation = [
     href: "/setup",
     icon: Settings,
   },
+  {
+    name: "Tenants",
+    href: "/tenants",
+    icon: Building2,
+  },
 ];
 
 export function Sidebar() {
@@ -90,6 +97,13 @@ export function Sidebar() {
             <p className="text-xs text-muted-foreground">Google Workspace</p>
           </div>
         </div>
+      </div>
+
+      <div className="px-3 py-2 border-b border-border">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 px-1">
+          Tenant
+        </p>
+        <TenantSwitcher />
       </div>
 
       <nav className="flex-1 p-3 space-y-1">
