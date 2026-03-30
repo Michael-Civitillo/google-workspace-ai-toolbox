@@ -2,7 +2,7 @@
   <img src="public/logo.svg" alt="Google Workspace AI Toolbox" width="80" />
 </p>
 
-<h1 align="center">Google Workspace AI Toolbox</h1>
+<h1 align="left">Google Workspace AI Toolbox</h1>
 
 <p align="center">
   <strong>If you grew up on <a href="https://github.com/GAM-team/GAM">GAM</a>, this is what comes next.</strong><br/>
