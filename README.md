@@ -131,6 +131,12 @@ npm run build   # production build
 npm run lint    # check your work
 ```
 
+## ⚠️ Heads up
+
+This tool makes real changes to real Google Workspace accounts. Mistakes can lock people out, break email routing, or cause other headaches that are annoying to undo. Use it carefully, test in a sandbox first, and make sure whoever's running it knows what they're doing.
+
+**This is provided as-is. No warranty, no guarantees, not my problem if something goes wrong.** You're responsible for what you do with it.
+
 ## 📄 License
 
 MIT — do whatever you want with it.
