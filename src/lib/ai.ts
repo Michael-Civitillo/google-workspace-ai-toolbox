@@ -10,6 +10,14 @@ export function getModel() {
   const activeTenant = getActiveTenant();
   const apiKey =
     activeTenant?.geminiApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(
+      "No Gemini API key configured. Set one on the Tenants page or set " +
+        "GOOGLE_GENERATIVE_AI_API_KEY."
+    );
+  }
+
   const provider = createGoogleGenerativeAI({ apiKey });
   return provider("gemini-2.0-flash");
 }

@@ -20,10 +20,10 @@ export async function PUT(
     }
 
     const updates: Record<string, unknown> = {};
-    if (name !== undefined) updates.name = name.trim();
+    if (name !== undefined) updates.name = String(name).trim();
     if (color !== undefined) updates.color = color;
-    if (credentialsFile !== undefined) updates.credentialsFile = credentialsFile;
-    if (adminEmail !== undefined) updates.adminEmail = adminEmail;
+    if (credentialsFile !== undefined) updates.credentialsFile = String(credentialsFile);
+    if (adminEmail !== undefined) updates.adminEmail = String(adminEmail);
     if (geminiApiKey !== undefined)
       updates.geminiApiKey = geminiApiKey || undefined;
 

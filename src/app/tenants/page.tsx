@@ -161,20 +161,27 @@ export default function TenantsPage() {
       )
     )
       return;
-    const res = await fetch(`/api/tenants/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      load();
-    } else {
-      const data = await res.json();
-      setError(data.error ?? "Failed to delete tenant");
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/tenants/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        load();
+      } else {
+        const data = await res.json();
+        setError(data.error ?? "Failed to delete tenant");
+      }
+    } finally {
+      setSaving(false);
     }
   }
 
   async function handleActivate(id: string) {
     setSwitching(id);
     try {
-      await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
-      setState((prev) => ({ ...prev, activeTenantId: id }));
+      const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
+      if (res.ok) {
+        setState((prev) => ({ ...prev, activeTenantId: id }));
+      }
     } finally {
       setSwitching(null);
     }
