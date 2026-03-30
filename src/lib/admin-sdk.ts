@@ -1,11 +1,12 @@
 import { google } from "googleapis";
 import { readFileSync } from "fs";
+import { getActiveTenant } from "./tenants";
 
 /**
  * Get an authenticated Admin SDK Directory client.
  *
- * Uses the same service account credentials as the gws CLI
- * (via GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE env var).
+ * Uses credentials from the active tenant if configured, falling back to
+ * GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE / GOOGLE_WORKSPACE_ADMIN_EMAIL env vars.
  *
  * Requires the Admin SDK Directory API enabled in GCP and
  * domain-wide delegation with the scope:
@@ -13,12 +14,15 @@ import { readFileSync } from "fs";
  * https://www.googleapis.com/auth/admin.directory.domain.readonly
  */
 function getAdminClient(adminEmail?: string) {
-  const credFile = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
+  const activeTenant = getActiveTenant();
+  const credFile =
+    activeTenant?.credentialsFile ||
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
 
   if (!credFile) {
     throw new Error(
-      "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE is not set. " +
-        "Point it to your service account JSON key file."
+      "No credentials configured. Add a tenant on the Tenants page or set " +
+        "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE."
     );
   }
 
@@ -32,7 +36,10 @@ function getAdminClient(adminEmail?: string) {
       "https://www.googleapis.com/auth/admin.directory.domain.readonly",
     ],
     // Service account needs to impersonate an admin to use Directory API
-    subject: adminEmail || process.env.GOOGLE_WORKSPACE_ADMIN_EMAIL,
+    subject:
+      adminEmail ||
+      activeTenant?.adminEmail ||
+      process.env.GOOGLE_WORKSPACE_ADMIN_EMAIL,
   });
 
   return google.admin({ version: "directory_v1", auth });

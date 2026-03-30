@@ -34,6 +34,9 @@ yarn-error.log*
 .env*
 !.env.example
 
+# Tenant configuration (contains paths to credentials — keep local)
+tenants.json
+
 # vercel
 .vercel
 
