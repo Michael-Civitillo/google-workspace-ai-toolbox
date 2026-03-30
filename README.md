@@ -22,6 +22,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Handy when you've got 50 domains and someone needs to move.
+- 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Nothing carries over between tenants.
 
 ### AI-Powered (Gemini)
 
@@ -103,6 +104,16 @@ For the AI features, you'll also need a [Gemini API key](https://aistudio.google
 ```bash
 export GOOGLE_GENERATIVE_AI_API_KEY=your-key-here
 ```
+
+> **Tip:** If you're using multi-tenant support, you can set credentials per tenant directly in the UI instead of relying on env vars.
+
+## 🏢 Multiple tenants (Production, Sandbox, etc.)
+
+Got more than one Workspace environment? Go to **Tenants** in the sidebar and add each one with its own service account and admin email. The active tenant is always visible in the sidebar — switch between them with one click.
+
+Each tenant is fully isolated: every command, delegation, audit, and transfer targets whichever tenant is active at the time. Nothing bleeds over.
+
+Tenant config is saved to `tenants.json` locally (gitignored — your credential paths stay on your machine).
 
 ## 🧰 Built with
 
