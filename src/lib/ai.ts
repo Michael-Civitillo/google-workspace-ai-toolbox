@@ -1,11 +1,17 @@
-import { google } from "@ai-sdk/google";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { getActiveTenant } from "./tenants";
 
 /**
  * Get the configured Gemini model.
- * Set GOOGLE_GENERATIVE_AI_API_KEY in your environment.
+ * Uses the active tenant's geminiApiKey if set, otherwise falls back to
+ * the GOOGLE_GENERATIVE_AI_API_KEY environment variable.
  */
 export function getModel() {
-  return google("gemini-2.0-flash");
+  const activeTenant = getActiveTenant();
+  const apiKey =
+    activeTenant?.geminiApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  const provider = createGoogleGenerativeAI({ apiKey });
+  return provider("gemini-2.0-flash");
 }
 
 /**

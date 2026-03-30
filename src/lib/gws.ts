@@ -1,5 +1,6 @@
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getActiveTenant } from "./tenants";
 
 const execAsync = promisify(exec);
 
@@ -16,13 +17,16 @@ export interface GwsResult {
 export async function gws(args: string[]): Promise<GwsResult> {
   const command = `gws ${args.join(" ")}`;
 
+  const activeTenant = getActiveTenant();
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (activeTenant?.credentialsFile) {
+    env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = activeTenant.credentialsFile;
+  }
+
   try {
     const { stdout, stderr } = await execAsync(command, {
       timeout: 30000,
-      env: {
-        ...process.env,
-        // Inherit any gws auth env vars
-      },
+      env,
     });
 
     if (stderr && !stdout) {
