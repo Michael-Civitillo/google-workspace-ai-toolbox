@@ -44,10 +44,11 @@ export function TenantSwitcher() {
     setSwitching(true);
     setOpen(false);
     try {
-      await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
-      setState((prev) => ({ ...prev, activeTenantId: id }));
-      // Reload the current page to flush any cached data
-      router.refresh();
+      const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
+      if (res.ok) {
+        setState((prev) => ({ ...prev, activeTenantId: id }));
+        router.refresh();
+      }
     } finally {
       setSwitching(false);
     }
@@ -87,6 +88,9 @@ export function TenantSwitcher() {
       <button
         onClick={() => setOpen((v) => !v)}
         disabled={switching}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Active tenant: ${activeTenant?.name ?? "none"}. Click to switch.`}
         className={cn(
           "w-full flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors text-left",
           colorClasses.bg,
@@ -110,7 +114,7 @@ export function TenantSwitcher() {
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-lg shadow-md overflow-hidden">
+        <div role="menu" className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-lg shadow-md overflow-hidden">
           <div className="p-1 space-y-0.5">
             {state.tenants.map((tenant) => {
               const tc = TENANT_COLOR_CLASSES[tenant.color as TenantColor];

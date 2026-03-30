@@ -1,8 +1,8 @@
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import { getActiveTenant } from "./tenants";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface GwsResult {
   success: boolean;
@@ -15,8 +15,6 @@ export interface GwsResult {
  * Execute a gws CLI command and return parsed JSON output.
  */
 export async function gws(args: string[]): Promise<GwsResult> {
-  const command = `gws ${args.join(" ")}`;
-
   const activeTenant = getActiveTenant();
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (activeTenant?.credentialsFile) {
@@ -24,7 +22,7 @@ export async function gws(args: string[]): Promise<GwsResult> {
   }
 
   try {
-    const { stdout, stderr } = await execAsync(command, {
+    const { stdout, stderr } = await execFileAsync("gws", args, {
       timeout: 30000,
       env,
     });
@@ -55,12 +53,13 @@ export async function checkGwsStatus(): Promise<{
   authenticated: boolean;
 }> {
   try {
-    const { stdout } = await execAsync("gws --version", { timeout: 5000 });
+    const { stdout } = await execFileAsync("gws", ["--version"], {
+      timeout: 5000,
+    });
     const version = stdout.trim();
 
-    // Try a simple auth check
     try {
-      await execAsync("gws auth export", { timeout: 5000 });
+      await execFileAsync("gws", ["auth", "export"], { timeout: 5000 });
       return { installed: true, version, authenticated: true };
     } catch {
       return { installed: true, version, authenticated: false };
