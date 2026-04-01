@@ -1,0 +1,63 @@
+{
+  "session_id": "session-1775074223",
+  "parent_session_id": null,
+  "state": "stopped",
+  "started_at": "2026-04-01T20:10:23Z",
+  "updated_at": "2026-04-01T20:11:42Z",
+  "event_seq": 6,
+  "last_event_id": "event-000006",
+  "state_version": 1,
+  "cwd": "/home/evan/git/google-workspace-ai-toolbox",
+  "project_name": "google-workspace-ai-toolbox",
+  "resumed_at": "2026-04-01T20:10:23Z",
+  "git": {
+    "branch": "main",
+    "uncommitted_changes": 2,
+    "last_commit": "82c56d7"
+  },
+  "plans": {
+    "exists": false,
+    "last_modified": 0,
+    "wip_tasks": 0,
+    "todo_tasks": 0,
+    "pending_tasks": 0,
+    "completed_tasks": 0
+  },
+  "orchestration": {
+    "max_state_retries": 3,
+    "retry_backoff_seconds": 10
+  },
+  "prompt_seq": 1,
+  "intent": "literal",
+  "changes_this_session": [
+    {
+      "file": "src/lib/tenants.shared.ts",
+      "action": "Write",
+      "timestamp": "2026-04-01T20:11:00Z",
+      "important": false
+    },
+    {
+      "file": "src/lib/tenants.ts",
+      "action": "Write",
+      "timestamp": "2026-04-01T20:11:27Z",
+      "important": false
+    },
+    {
+      "file": "src/components/tenant-switcher.tsx",
+      "action": "Edit",
+      "timestamp": "2026-04-01T20:11:34Z",
+      "important": false
+    },
+    {
+      "file": "src/app/tenants/page.tsx",
+      "action": "Edit",
+      "timestamp": "2026-04-01T20:11:36Z",
+      "important": false
+    }
+  ],
+  "last_message_length": 532,
+  "last_message_hash": "32c124d72076ca2d",
+  "ended_at": "2026-04-01T20:11:42Z",
+  "duration_minutes": 1,
+  "memory_logged": true
+}
