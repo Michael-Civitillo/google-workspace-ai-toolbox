@@ -1,0 +1,7 @@
+{"type":"session.start","ts":"2026-04-01T20:10:23Z","state":"initialized","data":{"cc_session_id":"6008e871-f646-4bb9-8014-a3efc4ff70f9"}}
+{"id":"event-000001","type":"session.resume","ts":"2026-04-01T20:10:23Z","state":"initialized"}
+{"id":"event-000002","type":"tool.write","ts":"2026-04-01T20:11:00Z","state":"initialized","data":{"file_path":"/home/evan/git/google-workspace-ai-toolbox/src/lib/tenants.shared.ts"}}
+{"id":"event-000003","type":"tool.write","ts":"2026-04-01T20:11:27Z","state":"initialized","data":{"file_path":"/home/evan/git/google-workspace-ai-toolbox/src/lib/tenants.ts"}}
+{"id":"event-000004","type":"tool.edit","ts":"2026-04-01T20:11:34Z","state":"initialized","data":{"file_path":"/home/evan/git/google-workspace-ai-toolbox/src/components/tenant-switcher.tsx"}}
+{"id":"event-000005","type":"tool.edit","ts":"2026-04-01T20:11:36Z","state":"initialized","data":{"file_path":"/home/evan/git/google-workspace-ai-toolbox/src/app/tenants/page.tsx"}}
+{"id":"event-000006","type":"session.stop","ts":"2026-04-01T20:11:42Z","state":"stopped"}
