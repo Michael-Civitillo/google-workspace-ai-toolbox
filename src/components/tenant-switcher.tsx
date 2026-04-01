@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, Building2, PlusCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { TENANT_COLOR_CLASSES, type Tenant, type TenantColor } from "@/lib/tenants";
+import { TENANT_COLOR_CLASSES, type Tenant, type TenantColor } from "@/lib/tenants.shared";
 
 interface TenantSwitcherState {
   tenants: Tenant[];
