@@ -31,7 +31,7 @@ import {
   TENANT_COLOR_CLASSES,
   type Tenant,
   type TenantColor,
-} from "@/lib/tenants.shared";
+} from "@/lib/tenants";
 
 interface TenantsState {
   tenants: Tenant[];
