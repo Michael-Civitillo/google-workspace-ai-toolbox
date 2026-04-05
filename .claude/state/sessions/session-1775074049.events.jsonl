@@ -1,4 +1,0 @@
-{"type":"session.start","ts":"2026-04-01T20:07:29Z","state":"initialized","data":{"cc_session_id":"a83b2c46-80b2-424b-bb8c-0078a3623dea"}}
-{"id":"event-000001","type":"session.resume","ts":"2026-04-01T20:07:29Z","state":"initialized"}
-{"id":"event-000002","type":"tool.bash","ts":"2026-04-01T20:07:40Z","state":"initialized","data":{"command":"ls /home/evan/git/google-workspace-ai-toolbox/"}}
-{"id":"event-000003","type":"session.stop","ts":"2026-04-01T20:07:56Z","state":"stopped"}
