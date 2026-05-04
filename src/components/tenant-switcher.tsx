@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ChevronDown, Building2, PlusCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TENANT_COLOR_CLASSES, type Tenant, type TenantColor } from "@/lib/tenants";
+import { setCurrentTenantId, subscribeTenantId } from "@/lib/tenant-client";
 
 interface TenantSwitcherState {
   tenants: Tenant[];
@@ -28,12 +29,18 @@ export function TenantSwitcher() {
           tenants: data.tenants ?? [],
           activeTenantId: data.activeTenantId ?? null,
         });
+        setCurrentTenantId(data.activeTenantId ?? null);
       })
       .catch(() => {});
   }, []);
 
   useEffect(() => {
     load();
+    // Stay in sync if another component updates the current tenant id.
+    const unsub = subscribeTenantId((id) => {
+      setState((prev) => (prev.activeTenantId === id ? prev : { ...prev, activeTenantId: id }));
+    });
+    return unsub;
   }, [load]);
 
   const activeTenant =
@@ -47,6 +54,7 @@ export function TenantSwitcher() {
       const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
       if (res.ok) {
         setState((prev) => ({ ...prev, activeTenantId: id }));
+        setCurrentTenantId(id);
         router.refresh();
       }
     } finally {

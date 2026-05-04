@@ -1,86 +1,128 @@
 import { NextRequest, NextResponse } from "next/server";
-import { gws } from "@/lib/gws";
+import { gws, tenantFromRequest } from "@/lib/gws";
+import { requireEmail, ValidationError } from "@/lib/validate";
+import { audit } from "@/lib/audit";
 
-/**
- * List email delegates for a user.
- * GET /api/gws/email-delegation?user=user@domain.com
- */
 export async function GET(request: NextRequest) {
-  const user = request.nextUrl.searchParams.get("user");
+  try {
+    const tenant = tenantFromRequest(request);
+    const userParam = request.nextUrl.searchParams.get("user");
+    const user = requireEmail(userParam, "user");
 
-  if (!user) {
-    return NextResponse.json(
-      { error: "user parameter is required" },
-      { status: 400 }
+    const result = await gws(
+      [
+        "gmail",
+        "users",
+        "settings",
+        "delegates",
+        "list",
+        `--userId=${user}`,
+      ],
+      tenant
     );
+    return NextResponse.json(result);
+  } catch (e) {
+    return errorResponse(e);
   }
-
-  const result = await gws([
-    "gmail",
-    "users",
-    "settings",
-    "delegates",
-    "list",
-    `--userId=${user}`,
-  ]);
-
-  return NextResponse.json(result);
 }
 
-/**
- * Add an email delegate.
- * POST /api/gws/email-delegation
- * Body: { user: string, delegate: string }
- */
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { user, delegate } = body;
+  let body: Record<string, unknown> = {};
+  try {
+    body = await request.json();
+  } catch {}
+  let tenant = null;
+  try {
+    tenant = tenantFromRequest(request, body);
+    const user = requireEmail(body.user, "user");
+    const delegate = requireEmail(body.delegate, "delegate");
+    if (user === delegate) {
+      throw new ValidationError("Mailbox owner and delegate must be different users");
+    }
 
-  if (!user || !delegate) {
-    return NextResponse.json(
-      { error: "user and delegate are required" },
-      { status: 400 }
+    const result = await gws(
+      [
+        "gmail",
+        "users",
+        "settings",
+        "delegates",
+        "create",
+        `--userId=${user}`,
+        `--delegateEmail=${delegate}`,
+      ],
+      tenant
     );
+
+    audit({
+      action: "email_delegation.add",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: { user, delegate },
+      outcome: result.success ? "success" : "error",
+      error: result.error,
+    });
+    return NextResponse.json(result);
+  } catch (e) {
+    audit({
+      action: "email_delegation.add",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: body,
+      outcome: "error",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return errorResponse(e);
   }
-
-  const result = await gws([
-    "gmail",
-    "users",
-    "settings",
-    "delegates",
-    "create",
-    `--userId=${user}`,
-    `--delegateEmail=${delegate}`,
-  ]);
-
-  return NextResponse.json(result);
 }
 
-/**
- * Remove an email delegate.
- * DELETE /api/gws/email-delegation
- * Body: { user: string, delegate: string }
- */
 export async function DELETE(request: NextRequest) {
-  const body = await request.json();
-  const { user, delegate } = body;
+  let body: Record<string, unknown> = {};
+  try {
+    body = await request.json();
+  } catch {}
+  let tenant = null;
+  try {
+    tenant = tenantFromRequest(request, body);
+    const user = requireEmail(body.user, "user");
+    const delegate = requireEmail(body.delegate, "delegate");
 
-  if (!user || !delegate) {
-    return NextResponse.json(
-      { error: "user and delegate are required" },
-      { status: 400 }
+    const result = await gws(
+      [
+        "gmail",
+        "users",
+        "settings",
+        "delegates",
+        "delete",
+        `--userId=${user}`,
+        `--delegateEmail=${delegate}`,
+      ],
+      tenant
     );
+
+    audit({
+      action: "email_delegation.remove",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: { user, delegate },
+      outcome: result.success ? "success" : "error",
+      error: result.error,
+    });
+    return NextResponse.json(result);
+  } catch (e) {
+    audit({
+      action: "email_delegation.remove",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: body,
+      outcome: "error",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return errorResponse(e);
   }
+}
 
-  const result = await gws([
-    "gmail",
-    "users",
-    "settings",
-    "delegates",
-    "delete",
-    `--userId=${user}`,
-    `--delegateEmail=${delegate}`,
-  ]);
-
-  return NextResponse.json(result);
+function errorResponse(e: unknown) {
+  const message = e instanceof Error ? e.message : "Unexpected error";
+  const status = e instanceof ValidationError ? 400 : 500;
+  return NextResponse.json({ success: false, error: message }, { status });
 }

@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateObject } from "ai";
 import { z } from "zod";
-import { getModel, ADMIN_ACTIONS } from "@/lib/ai";
+import {
+  getModel,
+  ADMIN_ACTIONS,
+  ACTION_PARAM_SCHEMAS,
+  isKnownAction,
+  type ActionId,
+} from "@/lib/ai";
+import { tenantFromRequest } from "@/lib/gws";
 
 const ParsedCommandSchema = z.object({
   action: z.string().describe("The action ID from the available actions list"),
@@ -18,18 +25,17 @@ const ParsedCommandSchema = z.object({
     .describe("Brief plain-English explanation of what this will do"),
 });
 
-/**
- * Parse a natural language command into a structured admin action.
- * POST /api/ai/parse-command
- * Body: { command: string }
- */
 export async function POST(request: NextRequest) {
+  let body: Record<string, unknown> = {};
   try {
-    const { command } = await request.json();
-
-    if (!command) {
+    body = await request.json();
+  } catch {}
+  try {
+    const tenant = tenantFromRequest(request, body);
+    const command = body.command;
+    if (!command || typeof command !== "string") {
       return NextResponse.json(
-        { error: "command is required" },
+        { success: false, error: "command is required" },
         { status: 400 }
       );
     }
@@ -40,7 +46,7 @@ export async function POST(request: NextRequest) {
     ).join("\n");
 
     const { object } = await generateObject({
-      model: getModel(),
+      model: getModel(tenant),
       schema: ParsedCommandSchema,
       prompt: `You are a Google Workspace admin assistant. Parse the following natural language command into a structured action.
 
@@ -58,18 +64,37 @@ Important rules:
 - For calendar roles: "view" or "read" = reader, "edit" or "write" = writer, "full control" or "own" = owner, "free/busy" = freeBusyReader
 - Default calendar role to "reader" if not specified
 - Default email forwarding action to "keep" if not specified
-- Extract email addresses from the text. If only a first name is used, leave the email field with just the name and a note
+- Use ONLY the parameter names shown for each action — do not invent fields
+- Every email-shaped value MUST be a complete, valid email (e.g. user@domain.com), never a first name or partial
 
-User command: "${command}"`,
+User command: ${JSON.stringify(command)}`,
     });
 
-    // Find the matching action details
+    if (!isKnownAction(object.action)) {
+      return NextResponse.json({
+        success: false,
+        error: `AI returned unknown action "${object.action}"`,
+      });
+    }
+
+    // Validate params against the per-action schema. If validation fails we
+    // still return the parsed action so the UI can surface the issue, but
+    // mark `validParams: false` so the frontend won't allow execution.
+    const schema = ACTION_PARAM_SCHEMAS[object.action as ActionId];
+    const parsed = schema.safeParse(object.params);
+
     const actionDef = ADMIN_ACTIONS.find((a) => a.id === object.action);
 
     return NextResponse.json({
       success: true,
       data: {
         ...object,
+        validParams: parsed.success,
+        validationError: parsed.success
+          ? null
+          : parsed.error.issues
+              .map((i) => `${i.path.join(".")}: ${i.message}`)
+              .join("; "),
         actionDetails: actionDef
           ? {
               name: actionDef.name,
@@ -82,6 +107,9 @@ User command: "${command}"`,
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to parse command";
-    return NextResponse.json({ success: false, error: message });
+    return NextResponse.json(
+      { success: false, error: message },
+      { status: 500 }
+    );
   }
 }

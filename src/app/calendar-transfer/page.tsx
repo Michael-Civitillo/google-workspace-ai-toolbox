@@ -19,11 +19,14 @@ import {
   ArrowRight,
   AlertTriangle,
 } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 export default function CalendarTransfer() {
   const [sourceUser, setSourceUser] = useState("");
   const [targetUser, setTargetUser] = useState("");
   const [calendarId, setCalendarId] = useState("");
+  const [removeSourceAccess, setRemoveSourceAccess] = useState(false);
+  const [removeConfirmation, setRemoveConfirmation] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error" | "warning";
@@ -38,24 +41,27 @@ export default function CalendarTransfer() {
     const effectiveCalendarId = calendarId || sourceUser;
 
     try {
-      const res = await fetch("/api/gws/calendar-transfer", {
+      const res = await tfetch("/api/gws/calendar-transfer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceUser,
           targetUser,
           calendarId: effectiveCalendarId,
+          removeSourceAccess,
+          removeConfirmation: removeSourceAccess ? removeConfirmation : undefined,
         }),
       });
       const result = await res.json();
 
       if (result.success) {
         const note = result.data?.note || "Transfer completed";
-        const isPartial = note.includes("was not removed");
+        const isPartial = note.includes("was NOT removed") || note.includes("was not removed");
         setMessage({
           type: isPartial ? "warning" : "success",
           text: note,
         });
+        setRemoveConfirmation("");
       } else {
         setMessage({
           type: "error",
@@ -68,6 +74,11 @@ export default function CalendarTransfer() {
       setLoading(false);
     }
   };
+
+  const effectiveCalendarId = calendarId || sourceUser;
+  const removeConfirmOk =
+    !removeSourceAccess ||
+    removeConfirmation.trim().toLowerCase() === effectiveCalendarId.toLowerCase();
 
   return (
     <>
@@ -109,8 +120,7 @@ export default function CalendarTransfer() {
               Transfer Calendar Ownership
             </CardTitle>
             <CardDescription>
-              Grants owner-level access to the target user and optionally removes
-              the source user&apos;s access.
+              Grants owner-level access to the target user. Source user keeps access by default.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -157,11 +167,45 @@ export default function CalendarTransfer() {
               </p>
             </div>
 
+            <div className="rounded-lg border p-4 space-y-3">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={removeSourceAccess}
+                  onChange={(e) => setRemoveSourceAccess(e.target.checked)}
+                  className="mt-1"
+                />
+                <span className="text-sm">
+                  <span className="font-medium">Also remove the source user&apos;s access</span>
+                  <span className="block text-xs text-muted-foreground mt-1">
+                    Off by default. For primary calendars Google rejects this anyway. For
+                    <strong> secondary</strong> calendars, this WILL revoke the source user — they
+                    will lose access immediately.
+                  </span>
+                </span>
+              </label>
+              {removeSourceAccess && (
+                <div className="space-y-2 pl-7">
+                  <Label htmlFor="removeConfirm" className="text-xs">
+                    Type the calendar ID to confirm removal
+                  </Label>
+                  <Input
+                    id="removeConfirm"
+                    value={removeConfirmation}
+                    onChange={(e) => setRemoveConfirmation(e.target.value)}
+                    placeholder={effectiveCalendarId || "calendar id"}
+                    className="font-mono text-sm"
+                  />
+                </div>
+              )}
+            </div>
+
             <Alert className="border-amber-200 bg-amber-50">
               <AlertTriangle className="h-4 w-4 text-amber-600" />
               <AlertDescription className="text-amber-800 text-sm">
-                This action will grant full ownership to the target user.
-                Primary calendars cannot have their original owner removed.
+                Granting owner access is reversible (you can remove the ACL
+                later). Removing the source user&apos;s access on a secondary
+                calendar is harder to undo if the calendar has no other owners.
               </AlertDescription>
             </Alert>
 
@@ -169,7 +213,7 @@ export default function CalendarTransfer() {
               className="w-full"
               size="lg"
               onClick={transferCalendar}
-              disabled={!sourceUser || !targetUser || loading}
+              disabled={!sourceUser || !targetUser || loading || !removeConfirmOk}
             >
               {loading ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getTenants,
-  getActiveTenantId,
-  addTenant,
-  TENANT_COLORS,
-  type TenantColor,
-} from "@/lib/tenants";
+import { getTenants, getActiveTenantId, addTenant } from "@/lib/tenants-server";
+import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 
 export async function GET() {
   const tenants = getTenants();
@@ -37,7 +32,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "invalid color" }, { status: 400 });
     }
 
-    const tenant = addTenant({
+    const tenant = await addTenant({
       name: name.trim(),
       color: (color as TenantColor) || "blue",
       credentialsFile,

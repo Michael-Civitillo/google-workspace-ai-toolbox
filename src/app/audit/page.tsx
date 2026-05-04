@@ -15,6 +15,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
 import { Search, Loader2, Shield, FileText } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 export default function Audit() {
   const [user, setUser] = useState("");
@@ -32,7 +33,7 @@ export default function Audit() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/ai/audit", {
+      const res = await tfetch("/api/ai/audit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user }),

@@ -1,17 +1,15 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { listDomains } from "@/lib/admin-sdk";
+import { tenantFromRequest } from "@/lib/gws";
 
-/**
- * List all domains in the tenant.
- * GET /api/admin/domains
- */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const domains = await listDomains();
+    const tenant = tenantFromRequest(request);
+    const domains = await listDomains(tenant);
     return NextResponse.json({ success: true, data: domains });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to list domains";
-    return NextResponse.json({ success: false, error: message });
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }

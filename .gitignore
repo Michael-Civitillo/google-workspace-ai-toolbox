@@ -36,6 +36,10 @@ yarn-error.log*
 
 # Tenant configuration (contains paths to credentials — keep local)
 tenants.json
+tenants.json.tmp
+
+# Append-only audit log of all mutating actions
+audit.log
 
 # vercel
 .vercel

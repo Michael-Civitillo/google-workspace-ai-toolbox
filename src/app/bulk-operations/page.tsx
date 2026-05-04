@@ -22,7 +22,9 @@ import {
   CheckCircle2,
   XCircle,
   Circle,
+  AlertTriangle,
 } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 interface BulkOperation {
   action: string;
@@ -31,14 +33,25 @@ interface BulkOperation {
   description: string;
   endpoint?: string;
   method?: string;
+  knownAction: boolean;
+  validParams: boolean;
+  validationError: string | null;
 }
 
-type OpStatus = "pending" | "running" | "success" | "error";
+type OpStatus = "pending" | "running" | "success" | "error" | "skipped";
 
 interface OpResult {
   status: OpStatus;
   message?: string;
 }
+
+const DESTRUCTIVE_ACTIONS = new Set([
+  "domain_change",
+  "calendar_transfer",
+  "email_transfer",
+  "email_delegation_remove",
+  "calendar_delegation_remove",
+]);
 
 export default function BulkOperations() {
   const [text, setText] = useState("");
@@ -47,6 +60,7 @@ export default function BulkOperations() {
   const [parsing, setParsing] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<Record<number, OpResult>>({});
+  const [confirm, setConfirm] = useState("");
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -59,9 +73,10 @@ export default function BulkOperations() {
     setResults({});
     setMessage(null);
     setSummary("");
+    setConfirm("");
 
     try {
-      const res = await fetch("/api/ai/bulk-parse", {
+      const res = await tfetch("/api/ai/bulk-parse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
@@ -84,31 +99,71 @@ export default function BulkOperations() {
     }
   };
 
+  const runnableOps = operations.filter(
+    (op) =>
+      op.knownAction &&
+      op.validParams &&
+      !DESTRUCTIVE_ACTIONS.has(op.action) &&
+      !!op.endpoint &&
+      !!op.method
+  );
+  const destructiveCount = operations.filter((op) =>
+    DESTRUCTIVE_ACTIONS.has(op.action)
+  ).length;
+  const invalidCount = operations.filter(
+    (op) => !op.knownAction || !op.validParams
+  ).length;
+
   const runAll = async () => {
+    if (confirm !== `RUN ${runnableOps.length}`) {
+      setMessage({
+        type: "error",
+        text: `Type "RUN ${runnableOps.length}" exactly to confirm running these operations.`,
+      });
+      return;
+    }
     setRunning(true);
     setMessage(null);
     const newResults: Record<number, OpResult> = {};
 
     for (let i = 0; i < operations.length; i++) {
       const op = operations[i];
-      newResults[i] = { status: "running" };
-      setResults({ ...newResults });
-
-      if (!op.endpoint || !op.method) {
+      if (!op.knownAction) {
+        newResults[i] = { status: "skipped", message: "Unknown action — skipped" };
+        setResults({ ...newResults });
+        continue;
+      }
+      if (!op.validParams) {
         newResults[i] = {
-          status: "error",
-          message: "Unknown action",
+          status: "skipped",
+          message: `Invalid params — skipped (${op.validationError ?? "validation failed"})`,
         };
         setResults({ ...newResults });
         continue;
       }
+      if (DESTRUCTIVE_ACTIONS.has(op.action)) {
+        newResults[i] = {
+          status: "skipped",
+          message:
+            "Destructive action — skipped. Run it from the dedicated page where typed confirmation is required.",
+        };
+        setResults({ ...newResults });
+        continue;
+      }
+      if (!op.endpoint || !op.method) {
+        newResults[i] = { status: "error", message: "Unknown endpoint" };
+        setResults({ ...newResults });
+        continue;
+      }
+
+      newResults[i] = { status: "running" };
+      setResults({ ...newResults });
 
       try {
         const fetchOptions: RequestInit = {
           method: op.method,
           headers: { "Content-Type": "application/json" },
         };
-
         let url = op.endpoint;
         if (op.method === "GET") {
           const params = new URLSearchParams(op.params);
@@ -116,10 +171,8 @@ export default function BulkOperations() {
         } else {
           fetchOptions.body = JSON.stringify(op.params);
         }
-
-        const res = await fetch(url, fetchOptions);
+        const res = await tfetch(url, fetchOptions);
         const result = await res.json();
-
         newResults[i] = {
           status: result.success ? "success" : "error",
           message: result.success
@@ -127,12 +180,8 @@ export default function BulkOperations() {
             : result.error || "Failed",
         };
       } catch {
-        newResults[i] = {
-          status: "error",
-          message: "Request failed",
-        };
+        newResults[i] = { status: "error", message: "Request failed" };
       }
-
       setResults({ ...newResults });
     }
 
@@ -142,12 +191,16 @@ export default function BulkOperations() {
     const errorCount = Object.values(newResults).filter(
       (r) => r.status === "error"
     ).length;
+    const skipped = Object.values(newResults).filter(
+      (r) => r.status === "skipped"
+    ).length;
 
     setMessage({
       type: errorCount === 0 ? "success" : "error",
-      text: `Finished: ${successCount} succeeded, ${errorCount} failed out of ${operations.length} operations.`,
+      text: `Finished: ${successCount} succeeded, ${errorCount} failed, ${skipped} skipped out of ${operations.length} operations.`,
     });
     setRunning(false);
+    setConfirm("");
   };
 
   const statusIcon = (status: OpStatus) => {
@@ -158,6 +211,8 @@ export default function BulkOperations() {
         return <XCircle className="h-4 w-4 text-red-500" />;
       case "running":
         return <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />;
+      case "skipped":
+        return <AlertTriangle className="h-4 w-4 text-amber-500" />;
       default:
         return <Circle className="h-4 w-4 text-muted-foreground" />;
     }
@@ -167,7 +222,7 @@ export default function BulkOperations() {
     <>
       <PageHeader
         title="Bulk Operations"
-        description="Paste a list of tasks in plain text. The AI breaks it down and runs them all."
+        description="Paste a list of tasks in plain text. The AI breaks it down and runs the safe ones. Destructive operations are skipped — run those from their own pages."
         badge="Gemini"
       />
 
@@ -190,7 +245,6 @@ export default function BulkOperations() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Input */}
         <Card>
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
@@ -204,7 +258,7 @@ export default function BulkOperations() {
           </CardHeader>
           <CardContent className="space-y-4">
             <Textarea
-              placeholder={`Example:\nDelegate alex@company.com's email to manager@company.com\nDelegate jordan@company.com's email to manager@company.com\nShare alex@company.com's calendar with manager@company.com as editor\nForward alex@company.com's email to newhire@company.com\nChange jordan@company.com's domain to subsidiary.com`}
+              placeholder={`Example:\nDelegate alex@company.com's email to manager@company.com\nDelegate jordan@company.com's email to manager@company.com\nShare alex@company.com's calendar with manager@company.com as editor`}
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={12}
@@ -225,10 +279,9 @@ export default function BulkOperations() {
           </CardContent>
         </Card>
 
-        {/* Operations List */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <div>
                 <CardTitle className="text-lg">
                   Operations{" "}
@@ -239,17 +292,9 @@ export default function BulkOperations() {
                   )}
                 </CardTitle>
                 {summary && (
-                  <CardDescription className="mt-1">
-                    {summary}
-                  </CardDescription>
+                  <CardDescription className="mt-1">{summary}</CardDescription>
                 )}
               </div>
-              {operations.length > 0 && !running && (
-                <Button size="sm" onClick={runAll}>
-                  <Play className="mr-1 h-3.5 w-3.5" />
-                  Run All
-                </Button>
-              )}
             </div>
           </CardHeader>
           <CardContent>
@@ -259,43 +304,118 @@ export default function BulkOperations() {
                 Operations&quot; to get started.
               </div>
             ) : (
-              <div className="space-y-2">
-                {operations.map((op, i) => (
-                  <div key={i}>
-                    <div className="flex items-start gap-3 p-3 rounded-lg border bg-muted/30">
-                      <div className="mt-0.5">
-                        {results[i]
-                          ? statusIcon(results[i].status)
-                          : statusIcon("pending")}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Badge
-                            variant="outline"
-                            className="text-xs shrink-0"
-                          >
-                            {op.actionName || op.action}
-                          </Badge>
+              <div className="space-y-3">
+                {(invalidCount > 0 || destructiveCount > 0) && (
+                  <Alert className="border-amber-200 bg-amber-50">
+                    <AlertTriangle className="h-4 w-4 text-amber-600" />
+                    <AlertDescription className="text-amber-800 text-xs">
+                      {invalidCount > 0 && (
+                        <p>
+                          {invalidCount} operation{invalidCount === 1 ? "" : "s"} failed
+                          validation and will be skipped.
+                        </p>
+                      )}
+                      {destructiveCount > 0 && (
+                        <p>
+                          {destructiveCount} destructive operation
+                          {destructiveCount === 1 ? "" : "s"} (transfers, domain
+                          change, removes) will be skipped — run them from their
+                          dedicated pages.
+                        </p>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="space-y-2">
+                  {operations.map((op, i) => {
+                    const isDestructive = DESTRUCTIVE_ACTIONS.has(op.action);
+                    const status: OpStatus =
+                      results[i]?.status ??
+                      (!op.knownAction || !op.validParams || isDestructive
+                        ? "skipped"
+                        : "pending");
+                    return (
+                      <div key={i}>
+                        <div className="flex items-start gap-3 p-3 rounded-lg border bg-muted/30">
+                          <div className="mt-0.5">{statusIcon(status)}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <Badge
+                                variant="outline"
+                                className="text-xs shrink-0"
+                              >
+                                {op.actionName || op.action}
+                              </Badge>
+                              {isDestructive && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-xs bg-amber-50 text-amber-700 border-amber-200"
+                                >
+                                  destructive — skipped
+                                </Badge>
+                              )}
+                              {!op.validParams && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-xs bg-red-50 text-red-700 border-red-200"
+                                >
+                                  invalid params
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-sm">{op.description}</p>
+                            {op.validationError && (
+                              <p className="text-xs mt-1 text-red-600">
+                                {op.validationError}
+                              </p>
+                            )}
+                            {results[i]?.message && (
+                              <p
+                                className={`text-xs mt-1 ${
+                                  results[i].status === "error"
+                                    ? "text-red-600"
+                                    : results[i].status === "skipped"
+                                      ? "text-amber-700"
+                                      : "text-emerald-600"
+                                }`}
+                              >
+                                {results[i].message}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        <p className="text-sm">{op.description}</p>
-                        {results[i]?.message && (
-                          <p
-                            className={`text-xs mt-1 ${
-                              results[i].status === "error"
-                                ? "text-red-600"
-                                : "text-emerald-600"
-                            }`}
-                          >
-                            {results[i].message}
-                          </p>
+                        {i < operations.length - 1 && (
+                          <Separator className="my-1 opacity-0" />
                         )}
                       </div>
+                    );
+                  })}
+                </div>
+
+                {runnableOps.length > 0 && !running && (
+                  <div className="space-y-2 pt-2 border-t">
+                    <p className="text-xs text-muted-foreground">
+                      Type <code className="bg-muted px-1 rounded">RUN {runnableOps.length}</code> to confirm running {runnableOps.length} operation{runnableOps.length === 1 ? "" : "s"}.
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        value={confirm}
+                        onChange={(e) => setConfirm(e.target.value)}
+                        placeholder={`RUN ${runnableOps.length}`}
+                        className="flex-1 h-9 px-3 rounded-md border bg-background text-sm font-mono"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={runAll}
+                        disabled={confirm !== `RUN ${runnableOps.length}`}
+                      >
+                        <Play className="mr-1 h-3.5 w-3.5" />
+                        Run
+                      </Button>
                     </div>
-                    {i < operations.length - 1 && (
-                      <Separator className="my-1 opacity-0" />
-                    )}
                   </div>
-                ))}
+                )}
               </div>
             )}
           </CardContent>
