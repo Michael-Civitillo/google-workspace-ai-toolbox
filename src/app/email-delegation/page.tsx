@@ -16,6 +16,7 @@ import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { Mail, Loader2, Trash2, UserPlus, Search } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 interface Delegate {
   delegateEmail: string;
@@ -40,7 +41,7 @@ export default function EmailDelegation() {
     setMessage(null);
 
     try {
-      const res = await fetch(
+      const res = await tfetch(
         `/api/gws/email-delegation?user=${encodeURIComponent(user)}`
       );
       const result = await res.json();
@@ -66,7 +67,7 @@ export default function EmailDelegation() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/gws/email-delegation", {
+      const res = await tfetch("/api/gws/email-delegation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user, delegate }),
@@ -95,7 +96,7 @@ export default function EmailDelegation() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/gws/email-delegation", {
+      const res = await tfetch("/api/gws/email-delegation", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user, delegate: delegateEmail }),

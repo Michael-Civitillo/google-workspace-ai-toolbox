@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Card,
   CardContent,
@@ -20,17 +20,47 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { PageHeader } from "@/components/page-header";
-import { ArrowRightLeft, Loader2, ArrowRight, Info } from "lucide-react";
+import { ArrowRightLeft, Loader2, ArrowRight, Info, AlertTriangle } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 export default function EmailTransfer() {
   const [sourceUser, setSourceUser] = useState("");
   const [targetUser, setTargetUser] = useState("");
   const [action, setAction] = useState("keep");
+  const [confirmExternal, setConfirmExternal] = useState("");
+  const [verifiedDomains, setVerifiedDomains] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  useEffect(() => {
+    tfetch("/api/admin/domains")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.data)) {
+          setVerifiedDomains(
+            data.data
+              .filter((d: { verified: boolean; domainName: string }) => d.verified)
+              .map((d: { domainName: string }) => d.domainName.toLowerCase())
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const targetDomain = targetUser.includes("@")
+    ? targetUser.split("@")[1].toLowerCase()
+    : "";
+  const isExternal =
+    !!targetDomain &&
+    verifiedDomains.length > 0 &&
+    !verifiedDomains.includes(targetDomain);
+
+  const externalConfirmOk =
+    !isExternal ||
+    confirmExternal.trim().toLowerCase() === targetUser.trim().toLowerCase();
 
   const transferEmail = async () => {
     if (!sourceUser || !targetUser) return;
@@ -38,10 +68,15 @@ export default function EmailTransfer() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/gws/email-transfer", {
+      const res = await tfetch("/api/gws/email-transfer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceUser, targetUser, action }),
+        body: JSON.stringify({
+          sourceUser,
+          targetUser,
+          action,
+          confirmExternal: isExternal ? confirmExternal : undefined,
+        }),
       });
       const result = await res.json();
 
@@ -50,6 +85,7 @@ export default function EmailTransfer() {
           type: "success",
           text: `Email forwarding set up from ${sourceUser} to ${targetUser}. New emails will be forwarded automatically.`,
         });
+        setConfirmExternal("");
       } else {
         setMessage({
           type: "error",
@@ -147,6 +183,31 @@ export default function EmailTransfer() {
               </p>
             </div>
 
+            {isExternal && (
+              <Alert className="border-red-200 bg-red-50">
+                <AlertTriangle className="h-4 w-4 text-red-600" />
+                <AlertDescription className="text-red-800 text-sm space-y-2">
+                  <p>
+                    <strong>{targetDomain}</strong> is NOT one of your tenant&apos;s
+                    verified domains. Forwarding email outside your tenant can
+                    leak data — make sure this is intentional.
+                  </p>
+                  <div className="space-y-1 pt-1">
+                    <Label htmlFor="confirm-ext" className="text-xs">
+                      Type <code className="bg-white/50 px-1 rounded">{targetUser}</code> to confirm external forwarding
+                    </Label>
+                    <Input
+                      id="confirm-ext"
+                      value={confirmExternal}
+                      onChange={(e) => setConfirmExternal(e.target.value)}
+                      placeholder={targetUser}
+                      className="font-mono text-sm bg-white"
+                    />
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
+
             <Alert className="border-blue-200 bg-blue-50">
               <Info className="h-4 w-4 text-blue-600" />
               <AlertDescription className="text-blue-800 text-sm">
@@ -161,7 +222,7 @@ export default function EmailTransfer() {
               className="w-full"
               size="lg"
               onClick={transferEmail}
-              disabled={!sourceUser || !targetUser || loading}
+              disabled={!sourceUser || !targetUser || loading || !externalConfirmOk}
             >
               {loading ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

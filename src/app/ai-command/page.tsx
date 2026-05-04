@@ -21,19 +21,31 @@ import {
   CheckCircle2,
   AlertTriangle,
   Play,
+  XCircle,
 } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 interface ParsedAction {
   action: string;
   params: Record<string, string>;
   confidence: number;
   explanation: string;
+  validParams: boolean;
+  validationError: string | null;
   actionDetails: {
     name: string;
     endpoint: string;
     method: string;
   } | null;
 }
+
+const DESTRUCTIVE_ACTIONS = new Set([
+  "domain_change",
+  "calendar_transfer",
+  "email_transfer",
+  "email_delegation_remove",
+  "calendar_delegation_remove",
+]);
 
 export default function AICommand() {
   const [command, setCommand] = useState("");
@@ -52,7 +64,7 @@ export default function AICommand() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/ai/parse-command", {
+      const res = await tfetch("/api/ai/parse-command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command }),
@@ -71,8 +83,13 @@ export default function AICommand() {
     }
   };
 
+  const isDestructive = !!parsed && DESTRUCTIVE_ACTIONS.has(parsed.action);
+  const canRun =
+    !!parsed && parsed.validParams && !!parsed.actionDetails && !isDestructive;
+
   const executeAction = async () => {
-    if (!parsed?.actionDetails) return;
+    if (!parsed?.actionDetails || !parsed.validParams) return;
+    if (isDestructive) return;
     setExecuting(true);
     setMessage(null);
 
@@ -91,7 +108,7 @@ export default function AICommand() {
         fetchOptions.body = JSON.stringify(parsed.params);
       }
 
-      const res = await fetch(url, fetchOptions);
+      const res = await tfetch(url, fetchOptions);
       const result = await res.json();
 
       if (result.success) {
@@ -148,7 +165,6 @@ export default function AICommand() {
       )}
 
       <div className="max-w-3xl space-y-6">
-        {/* Command Input */}
         <Card>
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
@@ -180,7 +196,6 @@ export default function AICommand() {
               {[
                 "Delegate jane@co.com's email to mike@co.com",
                 "Share alice@co.com's calendar with bob@co.com as editor",
-                "Forward all email from old@co.com to new@co.com",
                 "Who has access to ceo@co.com's calendar?",
               ].map((example) => (
                 <button
@@ -195,7 +210,6 @@ export default function AICommand() {
           </CardContent>
         </Card>
 
-        {/* Parsed Result */}
         {parsed && (
           <Card className="border-violet-200">
             <CardHeader>
@@ -234,7 +248,28 @@ export default function AICommand() {
                 </div>
               </div>
 
-              {parsed.confidence < 0.7 && (
+              {!parsed.validParams && (
+                <Alert className="border-red-200 bg-red-50">
+                  <XCircle className="h-4 w-4 text-red-600" />
+                  <AlertDescription className="text-red-800 text-sm">
+                    Parameters didn&apos;t pass validation: {parsed.validationError ?? "unknown error"}.
+                    Refusing to execute. Rephrase your command and try again.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {isDestructive && (
+                <Alert className="border-amber-200 bg-amber-50">
+                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                  <AlertDescription className="text-amber-800 text-sm">
+                    This is a destructive action ({parsed.action}). Run it from
+                    its dedicated page so you get the proper typed-confirmation
+                    safeguards.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {parsed.validParams && parsed.confidence < 0.7 && !isDestructive && (
                 <Alert className="border-amber-200 bg-amber-50">
                   <AlertTriangle className="h-4 w-4 text-amber-600" />
                   <AlertDescription className="text-amber-800 text-sm">
@@ -249,7 +284,7 @@ export default function AICommand() {
                   className="flex-1"
                   size="lg"
                   onClick={executeAction}
-                  disabled={executing}
+                  disabled={executing || !canRun}
                 >
                   {executing ? (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -270,7 +305,6 @@ export default function AICommand() {
           </Card>
         )}
 
-        {/* How it works */}
         {!parsed && !parsing && (
           <Card>
             <CardContent className="pt-6">
@@ -283,8 +317,9 @@ export default function AICommand() {
                   <p>
                     Type what you want in plain English. The AI parses your
                     intent, shows you exactly what it&apos;ll do, and waits for
-                    your confirmation before executing. Nothing runs without
-                    your OK.
+                    your confirmation before executing. Destructive actions
+                    (domain changes, transfers, removals) only run from their
+                    dedicated pages where typed confirmation is required.
                   </p>
                 </div>
               </div>

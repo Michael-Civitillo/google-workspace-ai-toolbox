@@ -1,15 +1,14 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { getActiveTenant } from "./tenants";
+import type { Tenant } from "./tenant-types";
 
 /**
- * Get the configured Gemini model.
- * Uses the active tenant's geminiApiKey if set, otherwise falls back to
+ * Get the configured Gemini model for a specific tenant.
+ * Uses the tenant's geminiApiKey if set, otherwise falls back to
  * the GOOGLE_GENERATIVE_AI_API_KEY environment variable.
  */
-export function getModel() {
-  const activeTenant = getActiveTenant();
+export function getModel(tenant: Tenant | null) {
   const apiKey =
-    activeTenant?.geminiApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    tenant?.geminiApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 
   if (!apiKey) {
     throw new Error(
@@ -81,7 +80,7 @@ export const ADMIN_ACTIONS = [
   {
     id: "calendar_transfer",
     name: "Transfer Calendar",
-    description: "Transfer calendar ownership from one user to another",
+    description: "Transfer calendar ownership from one user to another (does NOT remove the source user's access — the AI must never opt into removeSourceAccess)",
     params: ["sourceUser", "targetUser", "calendarId (optional, defaults to primary)"],
     endpoint: "/api/gws/calendar-transfer",
     method: "POST",
@@ -109,3 +108,63 @@ export const ADMIN_ACTIONS = [
 ] as const;
 
 export type ActionId = (typeof ADMIN_ACTIONS)[number]["id"];
+
+/**
+ * Per-action parameter schemas. The AI can hallucinate any field name; we use
+ * these to (a) validate that all required fields are present and well-formed,
+ * (b) pick out only the fields the API actually accepts so unrelated keys
+ * don't sneak through, and (c) reject anything that isn't a valid email.
+ */
+import { z } from "zod";
+import { isValidEmail } from "./validate";
+
+const email = () =>
+  z.string().refine(isValidEmail, { message: "must be a valid email address" });
+
+const role = z.enum(["freeBusyReader", "reader", "writer", "owner"]);
+const forwardAction = z.enum(["keep", "archive", "trash", "markRead"]);
+
+export const ACTION_PARAM_SCHEMAS: Record<ActionId, z.ZodSchema> = {
+  email_delegation_add: z.object({
+    user: email(),
+    delegate: email(),
+  }),
+  email_delegation_remove: z.object({
+    user: email(),
+    delegate: email(),
+  }),
+  email_delegation_list: z.object({
+    user: email(),
+  }),
+  calendar_delegation_add: z.object({
+    calendarId: email(),
+    delegateEmail: email(),
+    role,
+  }),
+  calendar_delegation_remove: z.object({
+    calendarId: email(),
+    ruleId: z.string().min(1),
+  }),
+  calendar_delegation_list: z.object({
+    calendarId: email(),
+  }),
+  calendar_transfer: z.object({
+    sourceUser: email(),
+    targetUser: email(),
+    calendarId: z.string().min(1).optional(),
+  }),
+  email_transfer: z.object({
+    sourceUser: email(),
+    targetUser: email(),
+    action: forwardAction.optional(),
+  }),
+  domain_change: z.object({
+    currentEmail: email(),
+    newDomain: z.string().min(1),
+    newUsername: z.string().optional(),
+  }),
+};
+
+export function isKnownAction(id: string): id is ActionId {
+  return ADMIN_ACTIONS.some((a) => a.id === id);
+}

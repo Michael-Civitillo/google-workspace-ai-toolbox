@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { setActiveTenant } from "@/lib/tenants";
+import { setActiveTenant } from "@/lib/tenants-server";
 
 export async function POST(
   _req: NextRequest,
@@ -7,7 +7,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    setActiveTenant(id);
+    await setActiveTenant(id);
     return NextResponse.json({ success: true, activeTenantId: id });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

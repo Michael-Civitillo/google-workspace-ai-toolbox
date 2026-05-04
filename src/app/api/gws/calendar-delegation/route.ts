@@ -1,82 +1,129 @@
 import { NextRequest, NextResponse } from "next/server";
-import { gws } from "@/lib/gws";
+import { gws, tenantFromRequest } from "@/lib/gws";
+import { requireEmail, ValidationError } from "@/lib/validate";
+import { audit } from "@/lib/audit";
 
-/**
- * List calendar ACL rules (delegates) for a user.
- * GET /api/gws/calendar-delegation?calendarId=user@domain.com
- */
+const ALLOWED_ROLES = new Set(["freeBusyReader", "reader", "writer", "owner"]);
+
 export async function GET(request: NextRequest) {
-  const calendarId = request.nextUrl.searchParams.get("calendarId");
-
-  if (!calendarId) {
-    return NextResponse.json(
-      { error: "calendarId parameter is required" },
-      { status: 400 }
+  try {
+    const tenant = tenantFromRequest(request);
+    const calendarId = requireEmail(
+      request.nextUrl.searchParams.get("calendarId"),
+      "calendarId"
     );
+
+    const result = await gws(
+      ["calendar", "acl", "list", `--calendarId=${calendarId}`],
+      tenant
+    );
+    return NextResponse.json(result);
+  } catch (e) {
+    return errorResponse(e);
   }
-
-  const result = await gws([
-    "calendar",
-    "acl",
-    "list",
-    `--calendarId=${calendarId}`,
-  ]);
-
-  return NextResponse.json(result);
 }
 
-/**
- * Add a calendar delegate (ACL rule).
- * POST /api/gws/calendar-delegation
- * Body: { calendarId: string, delegateEmail: string, role: string }
- */
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { calendarId, delegateEmail, role } = body;
+  let body: Record<string, unknown> = {};
+  try {
+    body = await request.json();
+  } catch {}
+  let tenant = null;
+  try {
+    tenant = tenantFromRequest(request, body);
+    const calendarId = requireEmail(body.calendarId, "calendarId");
+    const delegateEmail = requireEmail(body.delegateEmail, "delegateEmail");
+    const role = String(body.role || "");
+    if (!ALLOWED_ROLES.has(role)) {
+      throw new ValidationError(
+        `role must be one of: ${[...ALLOWED_ROLES].join(", ")}`
+      );
+    }
 
-  if (!calendarId || !delegateEmail || !role) {
-    return NextResponse.json(
-      { error: "calendarId, delegateEmail, and role are required" },
-      { status: 400 }
+    const result = await gws(
+      [
+        "calendar",
+        "acl",
+        "insert",
+        `--calendarId=${calendarId}`,
+        `--role=${role}`,
+        `--scope.type=user`,
+        `--scope.value=${delegateEmail}`,
+      ],
+      tenant
     );
+
+    audit({
+      action: "calendar_delegation.add",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: { calendarId, delegateEmail, role },
+      outcome: result.success ? "success" : "error",
+      error: result.error,
+    });
+    return NextResponse.json(result);
+  } catch (e) {
+    audit({
+      action: "calendar_delegation.add",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: body,
+      outcome: "error",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return errorResponse(e);
   }
-
-  const result = await gws([
-    "calendar",
-    "acl",
-    "insert",
-    `--calendarId=${calendarId}`,
-    `--role=${role}`,
-    `--scope.type=user`,
-    `--scope.value=${delegateEmail}`,
-  ]);
-
-  return NextResponse.json(result);
 }
 
-/**
- * Remove a calendar delegate (ACL rule).
- * DELETE /api/gws/calendar-delegation
- * Body: { calendarId: string, ruleId: string }
- */
 export async function DELETE(request: NextRequest) {
-  const body = await request.json();
-  const { calendarId, ruleId } = body;
+  let body: Record<string, unknown> = {};
+  try {
+    body = await request.json();
+  } catch {}
+  let tenant = null;
+  try {
+    tenant = tenantFromRequest(request, body);
+    const calendarId = requireEmail(body.calendarId, "calendarId");
+    const ruleId = String(body.ruleId || "");
+    if (!ruleId.trim()) {
+      throw new ValidationError("ruleId is required");
+    }
 
-  if (!calendarId || !ruleId) {
-    return NextResponse.json(
-      { error: "calendarId and ruleId are required" },
-      { status: 400 }
+    const result = await gws(
+      [
+        "calendar",
+        "acl",
+        "delete",
+        `--calendarId=${calendarId}`,
+        `--ruleId=${ruleId}`,
+      ],
+      tenant
     );
+
+    audit({
+      action: "calendar_delegation.remove",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: { calendarId, ruleId },
+      outcome: result.success ? "success" : "error",
+      error: result.error,
+    });
+    return NextResponse.json(result);
+  } catch (e) {
+    audit({
+      action: "calendar_delegation.remove",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: body,
+      outcome: "error",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return errorResponse(e);
   }
+}
 
-  const result = await gws([
-    "calendar",
-    "acl",
-    "delete",
-    `--calendarId=${calendarId}`,
-    `--ruleId=${ruleId}`,
-  ]);
-
-  return NextResponse.json(result);
+function errorResponse(e: unknown) {
+  const message = e instanceof Error ? e.message : "Unexpected error";
+  const status = e instanceof ValidationError ? 400 : 500;
+  return NextResponse.json({ success: false, error: message }, { status });
 }

@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 import { DM_Sans, JetBrains_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/sidebar";
+import { AppShell } from "@/components/app-shell";
 import { ThemeProvider } from "@/components/theme-provider";
+import { TenantBootstrap } from "@/components/tenant-bootstrap";
 import "./globals.css";
 
 const dmSans = DM_Sans({
@@ -42,10 +44,9 @@ export default function RootLayout({
       <body className="min-h-full flex">
         <ThemeProvider>
           <TooltipProvider>
+            <TenantBootstrap />
             <Sidebar />
-            <main className="flex-1 ml-64 bg-muted/30 min-h-screen">
-              <div className="p-8">{children}</div>
-            </main>
+            <AppShell>{children}</AppShell>
           </TooltipProvider>
         </ThemeProvider>
       </body>

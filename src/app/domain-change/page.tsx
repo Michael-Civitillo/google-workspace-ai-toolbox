@@ -31,6 +31,7 @@ import {
   User,
   Mail,
 } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 interface UserInfo {
   primaryEmail: string;
@@ -60,6 +61,7 @@ export default function DomainChange() {
   const [domains, setDomains] = useState<DomainInfo[]>([]);
   const [selectedDomain, setSelectedDomain] = useState("");
   const [newUsername, setNewUsername] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
   const [loadingDomains, setLoadingDomains] = useState(true);
   const [changing, setChanging] = useState(false);
@@ -68,9 +70,8 @@ export default function DomainChange() {
     text: string;
   } | null>(null);
 
-  // Load domains on mount
   useEffect(() => {
-    fetch("/api/admin/domains")
+    tfetch("/api/admin/domains")
       .then((res) => res.json())
       .then((result) => {
         if (result.success && result.data) {
@@ -86,16 +87,16 @@ export default function DomainChange() {
     setLookingUp(true);
     setMessage(null);
     setUser(null);
+    setConfirm("");
 
     try {
-      const res = await fetch(
+      const res = await tfetch(
         `/api/admin/user?email=${encodeURIComponent(email)}`
       );
       const result = await res.json();
 
       if (result.success && result.data) {
         setUser(result.data);
-        // Pre-fill the username portion
         const username = result.data.primaryEmail.split("@")[0];
         setNewUsername(username);
       } else {
@@ -113,35 +114,42 @@ export default function DomainChange() {
 
   const changeDomain = async () => {
     if (!user || !selectedDomain) return;
+    if (confirm.trim().toLowerCase() !== user.primaryEmail.toLowerCase()) {
+      setMessage({
+        type: "error",
+        text: "Type the user's current email exactly to confirm.",
+      });
+      return;
+    }
+
     setChanging(true);
     setMessage(null);
 
-    const username = newUsername || user.primaryEmail.split("@")[0];
-    const newEmail = `${username}@${selectedDomain}`;
-
     try {
-      const res = await fetch("/api/admin/change-domain", {
+      const res = await tfetch("/api/admin/change-domain", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           currentEmail: user.primaryEmail,
           newDomain: selectedDomain,
           newUsername: newUsername || undefined,
+          confirm,
         }),
       });
       const result = await res.json();
 
       if (result.success) {
+        const verified = result.data?.verifiedNewPrimary;
         setMessage({
           type: "success",
-          text: `Done! ${user.primaryEmail} is now ${newEmail}. The old address is kept as an alias automatically.`,
+          text: `Done. Google now reports primary email as ${verified}. The old address is kept as an alias.`,
         });
-        // Update displayed user info
         setUser({
           ...user,
-          primaryEmail: newEmail,
+          primaryEmail: verified || result.data?.newEmail || user.primaryEmail,
         });
-        setEmail(newEmail);
+        setEmail(verified || result.data?.newEmail || user.primaryEmail);
+        setConfirm("");
       } else {
         setMessage({
           type: "error",
@@ -158,10 +166,13 @@ export default function DomainChange() {
   const currentDomain = user?.primaryEmail.split("@")[1] || "";
   const previewEmail = `${newUsername || user?.primaryEmail.split("@")[0] || "user"}@${selectedDomain || "domain.com"}`;
 
-  // Filter out the user's current domain from the target list
   const availableDomains = domains.filter(
     (d) => d.domainName !== currentDomain && d.verified
   );
+
+  const confirmMatches =
+    !!user &&
+    confirm.trim().toLowerCase() === user.primaryEmail.toLowerCase();
 
   return (
     <>
@@ -190,7 +201,6 @@ export default function DomainChange() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* User Lookup */}
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
@@ -202,7 +212,6 @@ export default function DomainChange() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            {/* Step 1: Lookup */}
             <div className="space-y-2">
               <Label htmlFor="email">User Email</Label>
               <div className="flex gap-2">
@@ -227,7 +236,6 @@ export default function DomainChange() {
               </div>
             </div>
 
-            {/* User found */}
             {user && (
               <>
                 <div className="p-4 rounded-lg border bg-muted/30 space-y-3">
@@ -290,7 +298,6 @@ export default function DomainChange() {
 
                 <Separator />
 
-                {/* Step 2: Pick domain */}
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <Label>New Domain</Label>
@@ -326,7 +333,6 @@ export default function DomainChange() {
                     )}
                   </div>
 
-                  {/* Optional: change username too */}
                   <div className="space-y-2">
                     <Label htmlFor="newUsername">
                       Username{" "}
@@ -342,7 +348,6 @@ export default function DomainChange() {
                     />
                   </div>
 
-                  {/* Preview */}
                   {selectedDomain && (
                     <div className="flex items-center gap-3 p-4 rounded-lg border-2 border-dashed">
                       <span className="text-sm font-medium text-muted-foreground">
@@ -361,15 +366,28 @@ export default function DomainChange() {
                       The user&apos;s old email address will automatically
                       become an alias, so they&apos;ll still receive mail at
                       their previous address. They&apos;ll need to sign in with
-                      the new address going forward.
+                      the new address going forward. <strong>This action is irreversible from this tool</strong> — undo through the Google Admin Console only.
                     </AlertDescription>
                   </Alert>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="confirm">
+                      Type <code className="bg-muted px-1 rounded">{user.primaryEmail}</code> to confirm
+                    </Label>
+                    <Input
+                      id="confirm"
+                      value={confirm}
+                      onChange={(e) => setConfirm(e.target.value)}
+                      placeholder={user.primaryEmail}
+                      className="font-mono"
+                    />
+                  </div>
 
                   <Button
                     className="w-full"
                     size="lg"
                     onClick={changeDomain}
-                    disabled={!selectedDomain || changing}
+                    disabled={!selectedDomain || changing || !confirmMatches}
                   >
                     {changing ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -384,7 +402,6 @@ export default function DomainChange() {
           </CardContent>
         </Card>
 
-        {/* Domain list sidebar */}
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Your Domains</CardTitle>

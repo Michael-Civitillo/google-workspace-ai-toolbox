@@ -80,6 +80,8 @@ const navigation = [
 export function Sidebar() {
   const pathname = usePathname();
 
+  if (pathname === "/login") return null;
+
   return (
     <aside className="fixed inset-y-0 left-0 w-64 bg-card border-r border-border flex flex-col z-50">
       <div className="p-6 border-b border-border">

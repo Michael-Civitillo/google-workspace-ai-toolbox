@@ -23,6 +23,7 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { CalendarDays, Loader2, Trash2, UserPlus, Search } from "lucide-react";
+import { tfetch } from "@/lib/tenant-client";
 
 interface AclRule {
   id: string;
@@ -66,7 +67,7 @@ export default function CalendarDelegation() {
     setMessage(null);
 
     try {
-      const res = await fetch(
+      const res = await tfetch(
         `/api/gws/calendar-delegation?calendarId=${encodeURIComponent(calendarId)}`
       );
       const result = await res.json();
@@ -92,7 +93,7 @@ export default function CalendarDelegation() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/gws/calendar-delegation", {
+      const res = await tfetch("/api/gws/calendar-delegation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ calendarId, delegateEmail, role }),
@@ -121,7 +122,7 @@ export default function CalendarDelegation() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/gws/calendar-delegation", {
+      const res = await tfetch("/api/gws/calendar-delegation", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ calendarId, ruleId }),

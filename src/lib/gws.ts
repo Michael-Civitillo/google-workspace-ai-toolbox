@@ -1,6 +1,8 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { getActiveTenant } from "./tenants";
+import type { NextRequest } from "next/server";
+import { resolveTenant } from "./tenants-server";
+import type { Tenant } from "./tenant-types";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,13 +14,40 @@ export interface GwsResult {
 }
 
 /**
- * Execute a gws CLI command and return parsed JSON output.
+ * Resolve which tenant a request is targeting.
+ *
+ * Order of precedence:
+ *   1. `x-tenant-id` request header
+ *   2. `tenantId` query param
+ *   3. `tenantId` field on the JSON body (already-parsed copy passed in by caller)
+ *   4. persisted active tenant (legacy / bootstrap fallback)
+ *
+ * Throws if a tenantId is supplied but doesn't match a known tenant — we must
+ * never silently fall back to "whatever's active" when the client thought it
+ * was targeting something specific.
  */
-export async function gws(args: string[]): Promise<GwsResult> {
-  const activeTenant = getActiveTenant();
+export function tenantFromRequest(
+  request: NextRequest,
+  body?: Record<string, unknown> | null
+): Tenant | null {
+  const headerId = request.headers.get("x-tenant-id");
+  const queryId = request.nextUrl.searchParams.get("tenantId");
+  const bodyId =
+    body && typeof body.tenantId === "string" ? body.tenantId : null;
+  const id = headerId || queryId || bodyId || null;
+  return resolveTenant(id);
+}
+
+/**
+ * Execute a gws CLI command using the supplied tenant's credentials.
+ */
+export async function gws(
+  args: string[],
+  tenant: Tenant | null
+): Promise<GwsResult> {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  if (activeTenant?.credentialsFile) {
-    env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = activeTenant.credentialsFile;
+  if (tenant?.credentialsFile) {
+    env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = tenant.credentialsFile;
   }
 
   try {

@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  updateTenant,
-  deleteTenant,
-  TENANT_COLORS,
-  type TenantColor,
-} from "@/lib/tenants";
+import { updateTenant, deleteTenant } from "@/lib/tenants-server";
+import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 
 export async function PUT(
   req: NextRequest,
@@ -27,7 +23,7 @@ export async function PUT(
     if (geminiApiKey !== undefined)
       updates.geminiApiKey = geminiApiKey || undefined;
 
-    const tenant = updateTenant(id, updates as Parameters<typeof updateTenant>[1]);
+    const tenant = await updateTenant(id, updates as Parameters<typeof updateTenant>[1]);
     return NextResponse.json({ tenant });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -41,7 +37,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    deleteTenant(id);
+    await deleteTenant(id);
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
