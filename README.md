@@ -113,6 +113,40 @@ npm run dev
 
 Hit [http://localhost:3000](http://localhost:3000), log in with your `APP_PASSWORD`, and you're in. 🎉
 
+### 🪟 Windows 11 (PowerShell)
+
+Same flow, just different env-var syntax. Open **PowerShell** (or Windows Terminal):
+
+```powershell
+# Install Node.js 18+ from https://nodejs.org and the gws CLI:
+npm install -g @googleworkspace/cli
+
+# Auth up
+gws auth setup    # needs gcloud (winget install Google.CloudSDK)
+# or:
+gws auth login -s gmail,calendar
+
+# Clone and install
+git clone https://github.com/Michael-Civitillo/google-workspace-ai-toolbox.git
+cd google-workspace-ai-toolbox
+npm install
+
+# Required: password gate (current PowerShell session only)
+$env:APP_PASSWORD = "something-long-and-random"
+
+# Optional: service-account / Gemini setup
+$env:GOOGLE_WORKSPACE_ADMIN_EMAIL = "admin@yourdomain.com"
+$env:GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = "C:\path\to\service-account.json"
+$env:GOOGLE_GENERATIVE_AI_API_KEY = "your-key-here"
+
+# Fire it up
+npm run dev
+```
+
+To make env vars persist across sessions, use the **Settings → System → About → Advanced system settings → Environment Variables** dialog, or run `setx APP_PASSWORD "..."` in PowerShell (closes/reopens the terminal to take effect).
+
+If you'd rather use **Command Prompt** (`cmd.exe`), swap `$env:NAME = "value"` for `set NAME=value`. **Git Bash** uses the same `export NAME=value` syntax shown in the macOS/Linux instructions above.
+
 ## 🔐 Auth setup (the important part)
 
 The app runs `gws` commands and `googleapis` SDK calls on the server side. For real admin work, you'll want a **service account with domain-wide delegation** so you can act on behalf of any user in your org:

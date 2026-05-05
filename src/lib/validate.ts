@@ -64,6 +64,8 @@ export class ValidationError extends Error {
   }
 }
 
+import path from "node:path";
+
 /**
  * Reject service-account credential paths that look unsafe.
  *
@@ -74,43 +76,46 @@ export class ValidationError extends Error {
  *     part of the file content.
  *   - Reading a service-account key for a tenant they shouldn't access.
  *
- * Rules: must be absolute, must end in .json, no `..` segments, no embedded
- * NUL bytes, no control characters. If GWS_CREDENTIALS_DIR is set, the path
- * must live inside that directory.
+ * Rules: must be absolute (POSIX or Windows), must end in .json, no `..`
+ * segments, no embedded NUL bytes, no control characters. If
+ * GWS_CREDENTIALS_DIR is set, the path must live inside that directory.
  */
 export function validateCredentialsFilePath(p: unknown): string {
   if (typeof p !== "string" || !p.trim()) {
     throw new ValidationError("credentialsFile is required");
   }
-  const path = p.trim();
-  if (path.includes("\0") || /[\r\n]/.test(path)) {
+  const raw = p.trim();
+  if (raw.includes("\0") || /[\r\n]/.test(raw)) {
     throw new ValidationError("credentialsFile contains illegal characters");
   }
-  if (!path.startsWith("/")) {
+  if (!path.isAbsolute(raw)) {
     throw new ValidationError(
-      "credentialsFile must be an absolute path (starting with /)"
+      "credentialsFile must be an absolute path"
     );
   }
-  if (path.split("/").some((seg) => seg === "..")) {
+  // Reject `..` segments using either separator.
+  if (raw.split(/[\\/]/).some((seg) => seg === "..")) {
     throw new ValidationError(
       "credentialsFile must not contain `..` path segments"
     );
   }
-  if (!path.toLowerCase().endsWith(".json")) {
+  if (!raw.toLowerCase().endsWith(".json")) {
     throw new ValidationError(
       "credentialsFile must point to a .json service-account key"
     );
   }
+  // Normalise to the OS-native form for consistent storage and the
+  // GWS_CREDENTIALS_DIR check below.
+  const resolved = path.resolve(raw);
   const allowedDir = process.env.GWS_CREDENTIALS_DIR;
   if (allowedDir) {
-    const normalisedDir = allowedDir.endsWith("/")
-      ? allowedDir
-      : allowedDir + "/";
-    if (!path.startsWith(normalisedDir)) {
+    const allowedResolved = path.resolve(allowedDir);
+    const rel = path.relative(allowedResolved, resolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
       throw new ValidationError(
         `credentialsFile must live under ${allowedDir} (set by GWS_CREDENTIALS_DIR)`
       );
     }
   }
-  return path;
+  return resolved;
 }
