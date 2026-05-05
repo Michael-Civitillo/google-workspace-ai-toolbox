@@ -6,15 +6,15 @@ type Status = "success" | "error" | "pending" | "idle";
 const statusConfig: Record<Status, { label: string; className: string }> = {
   success: {
     label: "Success",
-    className: "bg-emerald-100 text-emerald-800 border-emerald-200",
+    className: "bg-emerald-100 text-emerald-800 dark:text-emerald-300 border-emerald-200",
   },
   error: {
     label: "Error",
-    className: "bg-red-100 text-red-800 border-red-200",
+    className: "bg-red-100 text-red-800 dark:text-red-300 border-red-200",
   },
   pending: {
     label: "Running...",
-    className: "bg-amber-100 text-amber-800 border-amber-200",
+    className: "bg-amber-100 text-amber-800 dark:text-amber-300 border-amber-200",
   },
   idle: {
     label: "Ready",

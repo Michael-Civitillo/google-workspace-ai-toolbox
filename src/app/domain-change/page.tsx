@@ -183,13 +183,13 @@ export default function DomainChange() {
         <Alert
           className={`mb-6 ${
             message.type === "error"
-              ? "border-red-200 bg-red-50"
-              : "border-emerald-200 bg-emerald-50"
+              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
+              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
           }`}
         >
           <AlertDescription
             className={
-              message.type === "error" ? "text-red-800" : "text-emerald-800"
+              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
             }
           >
             {message.text}
@@ -258,7 +258,7 @@ export default function DomainChange() {
                       {user.suspended && (
                         <Badge
                           variant="outline"
-                          className="bg-red-50 text-red-700 border-red-200"
+                          className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
                         >
                           Suspended
                         </Badge>
@@ -357,9 +357,9 @@ export default function DomainChange() {
                     </div>
                   )}
 
-                  <Alert className="border-amber-200 bg-amber-50">
+                  <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
                     <AlertTriangle className="h-4 w-4 text-amber-600" />
-                    <AlertDescription className="text-amber-800 text-sm">
+                    <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
                       The user&apos;s old email address will automatically
                       become an alias, so they&apos;ll still receive mail at
                       their previous address. They&apos;ll need to sign in with
@@ -432,7 +432,7 @@ export default function DomainChange() {
                         variant="outline"
                         className={
                           d.verified
-                            ? "bg-emerald-50 text-emerald-700 border-emerald-200 text-xs"
+                            ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50 text-xs"
                             : "bg-zinc-100 text-zinc-600 border-zinc-200 text-xs"
                         }
                       >

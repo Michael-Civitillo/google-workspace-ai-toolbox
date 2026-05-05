@@ -30,8 +30,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### AI-powered (Gemini)
 
-- ✨ **AI Command** — Type what you need in plain English. *"Give sarah access to john's mailbox"* → it parses the intent, validates the params, shows you what it'll do, and waits for your OK.
-- 📋 **Bulk Operations** — Paste a list of tasks (one per line, however you want) and the AI breaks them into individual operations you can run all at once, with per-row status.
+- ✨ **AI Command** (right on the dashboard) — Type what you need in plain English. *"Give sarah access to john's mailbox"* → it parses the intent, validates the params, shows you what it'll do, and waits for your OK. No menu hunting, no extra clicks.
 - 🛡️ **User Audit** — Enter a user's email and get a full AI-generated report: who has access to their mailbox, calendar sharing rules, forwarding config, and security flags.
 
 ### Safety & ops
@@ -42,14 +41,20 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 📜 **Audit log** — Append-only JSON-lines log of every mutation, with secrets redacted (`AUDIT_LOG_PATH` env var to control location).
 - 🧪 **Atomic tenant config writes** — `tenants.json` is written via tmp-file + rename with an in-process mutex so a crash mid-write can't corrupt your config.
 
+### Polish
+
+- 🌗 **Dark mode** — Auto-detects your system preference, persists across reloads, one-click toggle in the sidebar.
+- 🪟 **Cross-platform** — Tested on macOS, Linux, and Windows 11 (handles `gws.cmd` shim, CRLF line endings, AV-related file lock retries).
+
+<details>
+<summary>🌗 Dashboard in dark mode</summary>
+
+![Dashboard — dark mode](docs/screenshots/dashboard-dark.png)
+
+</details>
+
 <details>
 <summary>📸 More screenshots</summary>
-
-### AI Command
-![AI Command](docs/screenshots/ai-command.png)
-
-### Bulk Operations
-![Bulk Operations](docs/screenshots/bulk-operations.png)
 
 ### User Audit
 ![User Audit](docs/screenshots/audit.png)
@@ -207,8 +212,8 @@ Tenant config is saved to `tenants.json` locally (gitignored — your credential
 - [Tailwind CSS](https://tailwindcss.com/) v4
 - [shadcn/ui](https://ui.shadcn.com/) + [@base-ui/react](https://base-ui.com/)
 - [Vercel AI SDK](https://sdk.vercel.ai/) + [Gemini](https://ai.google.dev/)
-- [googleapis](https://www.npmjs.com/package/googleapis) (Admin SDK, Drive, Data Transfer)
-- [gws CLI](https://github.com/googleworkspace/cli)
+- [googleapis](https://www.npmjs.com/package/googleapis) — direct Gmail, Calendar, Admin SDK, Drive, and Data Transfer calls (no CLI hop, fewer args quirks)
+- [gws CLI](https://github.com/googleworkspace/cli) — used for everything outside the Google APIs we wrap directly
 - Web Crypto API (Edge-runtime safe HMAC sessions)
 
 ## 💻 Dev stuff
@@ -217,7 +222,7 @@ Tenant config is saved to `tenants.json` locally (gitignored — your credential
 npm run dev          # fire it up
 npm run build        # production build
 npm run lint         # check your work
-npm run screenshots  # regenerate docs/screenshots/* (needs dev server running + APP_PASSWORD set)
+npm run screenshots  # regenerate docs/screenshots/* in light + dark modes (needs dev server + APP_PASSWORD)
 ```
 
 ## ⚠️ Heads up

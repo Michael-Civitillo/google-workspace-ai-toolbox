@@ -46,7 +46,7 @@ const roleBadgeColors: Record<string, string> = {
   freeBusyReader: "bg-zinc-100 text-zinc-700 border-zinc-200",
   reader: "bg-blue-100 text-blue-700 border-blue-200",
   writer: "bg-amber-100 text-amber-700 border-amber-200",
-  owner: "bg-violet-100 text-violet-700 border-violet-200",
+  owner: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
 };
 
 export default function CalendarDelegation() {
@@ -166,11 +166,11 @@ export default function CalendarDelegation() {
 
       {message && (
         <Alert
-          className={`mb-6 ${message.type === "error" ? "border-red-200 bg-red-50" : "border-emerald-200 bg-emerald-50"}`}
+          className={`mb-6 ${message.type === "error" ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40" : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"}`}
         >
           <AlertDescription
             className={
-              message.type === "error" ? "text-red-800" : "text-emerald-800"
+              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
             }
           >
             {message.text}

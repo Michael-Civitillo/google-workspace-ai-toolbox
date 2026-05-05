@@ -334,8 +334,8 @@ export default function Offboarding() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 bg-red-50">
-          <AlertDescription className="text-red-800">{error}</AlertDescription>
+        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
+          <AlertDescription className="text-red-800 dark:text-red-300">{error}</AlertDescription>
         </Alert>
       )}
 
@@ -396,7 +396,7 @@ export default function Offboarding() {
                     {preflight.user.suspended && (
                       <Badge
                         variant="outline"
-                        className="bg-red-50 text-red-700 border-red-200 text-xs"
+                        className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50 text-xs"
                       >
                         Already suspended
                       </Badge>
@@ -412,9 +412,9 @@ export default function Offboarding() {
                 </div>
 
                 {preflight.user.isAdmin && (
-                  <Alert className="border-red-200 bg-red-50">
+                  <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
                     <AlertTriangle className="h-4 w-4 text-red-600" />
-                    <AlertDescription className="text-red-800 text-sm">
+                    <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
                       This user is a <strong>super admin</strong>. Demote their
                       admin role in the Google Admin Console first — the
                       toolbox refuses to suspend an admin.
@@ -480,7 +480,7 @@ export default function Offboarding() {
                             {s.emphasis && (
                               <Badge
                                 variant="outline"
-                                className="text-xs bg-amber-50 text-amber-700 border-amber-200"
+                                className="text-xs bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50"
                               >
                                 high impact
                               </Badge>
