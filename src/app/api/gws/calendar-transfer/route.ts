@@ -1,20 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { gws, tenantFromRequest } from "@/lib/gws";
+import { tenantFromRequest } from "@/lib/gws";
+import { buildCalendarClient } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 
 export async function GET(request: NextRequest) {
   try {
     const tenant = tenantFromRequest(request);
-    const user = requireEmail(
-      request.nextUrl.searchParams.get("user"),
-      "user"
-    );
-    const result = await gws(
-      ["calendar", "calendarList", "list", `--calendarId=${user}`],
-      tenant
-    );
-    return NextResponse.json(result);
+    const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
+
+    const cal = buildCalendarClient(tenant, user);
+    const res = await cal.calendarList.list();
+    return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
     return errorResponse(e);
   }
@@ -23,15 +20,10 @@ export async function GET(request: NextRequest) {
 /**
  * Transfer calendar ownership.
  *
- * Two distinct steps, the second of which is OPT-IN. The previous version of
- * this route always tried to remove the source user's access after granting
- * the new owner — which silently revoked the source user from secondary
- * calendars (where Google does allow the deletion). That's an irreversible
- * action that should never run by default.
- *
- * Now: only grant ownership unless `removeSourceAccess: true` is supplied
- * AND the additional confirmation flag matches the calendarId — i.e. the
- * caller has typed the calendar they intend to remove access from.
+ * Two distinct steps, the second of which is OPT-IN. Only grant ownership
+ * unless `removeSourceAccess: true` is supplied AND removeConfirmation matches
+ * the calendarId — i.e. the caller has typed the calendar they intend to
+ * remove access from.
  */
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown> = {};
@@ -66,31 +58,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 1: Grant owner access to the target user.
-    const grantResult = await gws(
-      [
-        "calendar",
-        "acl",
-        "insert",
-        `--calendarId=${calendarId}`,
-        `--role=owner`,
-        `--scope.type=user`,
-        `--scope.value=${targetUser}`,
-      ],
-      tenant
-    );
-
-    if (!grantResult.success) {
+    const cal = buildCalendarClient(tenant, sourceUser);
+    let grantData: unknown;
+    try {
+      const res = await cal.acl.insert({
+        calendarId,
+        requestBody: { role: "owner", scope: { type: "user", value: targetUser } },
+      });
+      grantData = res.data;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       audit({
         action: "calendar_transfer.grant",
         tenantId: tenant?.id ?? null,
         tenantName: tenant?.name ?? null,
         params: { sourceUser, targetUser, calendarId },
         outcome: "error",
-        error: grantResult.error,
+        error: msg,
       });
       return NextResponse.json({
         success: false,
-        error: `Failed to grant ownership: ${grantResult.error}`,
+        error: `Failed to grant ownership: ${msg}`,
         step: "grant_ownership",
       });
     }
@@ -107,7 +95,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         data: {
-          granted: grantResult.data,
+          granted: grantData,
           removed: null,
           note: `Ownership granted to ${targetUser}. Source user's access was NOT removed.`,
         },
@@ -115,34 +103,30 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 2 (opt-in only): Remove the source user's access.
-    const removeResult = await gws(
-      [
-        "calendar",
-        "acl",
-        "delete",
-        `--calendarId=${calendarId}`,
-        `--ruleId=user:${sourceUser}`,
-      ],
-      tenant
-    );
+    let removeError: string | undefined;
+    try {
+      await cal.acl.delete({ calendarId, ruleId: `user:${sourceUser}` });
+    } catch (e) {
+      removeError = e instanceof Error ? e.message : String(e);
+    }
 
     audit({
       action: "calendar_transfer.remove_source",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
       params: { sourceUser, calendarId },
-      outcome: removeResult.success ? "success" : "error",
-      error: removeResult.error,
+      outcome: removeError ? "error" : "success",
+      error: removeError,
     });
 
     return NextResponse.json({
       success: true,
       data: {
-        granted: grantResult.data,
-        removed: removeResult.success ? removeResult.data : null,
-        note: removeResult.success
-          ? `Ownership granted to ${targetUser} and source user's access removed.`
-          : `Ownership granted, but source user's access was NOT removed (Google rejected the deletion — primary calendars cannot have their owner removed). Source user still has access.`,
+        granted: grantData,
+        removed: removeError ? null : true,
+        note: removeError
+          ? `Ownership granted, but source user's access was NOT removed (Google rejected the deletion — primary calendars cannot have their owner removed). Source user still has access.`
+          : `Ownership granted to ${targetUser} and source user's access removed.`,
       },
     });
   } catch (e) {
