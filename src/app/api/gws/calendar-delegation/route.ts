@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { gws, tenantFromRequest } from "@/lib/gws";
+import { tenantFromRequest } from "@/lib/gws";
+import { buildCalendarClient } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 
@@ -13,11 +14,9 @@ export async function GET(request: NextRequest) {
       "calendarId"
     );
 
-    const result = await gws(
-      ["calendar", "acl", "list", `--calendarId=${calendarId}`],
-      tenant
-    );
-    return NextResponse.json(result);
+    const cal = buildCalendarClient(tenant, calendarId);
+    const res = await cal.acl.list({ calendarId });
+    return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
     return errorResponse(e);
   }
@@ -40,28 +39,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await gws(
-      [
-        "calendar",
-        "acl",
-        "insert",
-        `--calendarId=${calendarId}`,
-        `--role=${role}`,
-        `--scope.type=user`,
-        `--scope.value=${delegateEmail}`,
-      ],
-      tenant
-    );
+    const cal = buildCalendarClient(tenant, calendarId);
+    const res = await cal.acl.insert({
+      calendarId,
+      requestBody: { role, scope: { type: "user", value: delegateEmail } },
+    });
 
     audit({
       action: "calendar_delegation.add",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
       params: { calendarId, delegateEmail, role },
-      outcome: result.success ? "success" : "error",
-      error: result.error,
+      outcome: "success",
     });
-    return NextResponse.json(result);
+    return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
     audit({
       action: "calendar_delegation.add",
@@ -89,26 +80,17 @@ export async function DELETE(request: NextRequest) {
       throw new ValidationError("ruleId is required");
     }
 
-    const result = await gws(
-      [
-        "calendar",
-        "acl",
-        "delete",
-        `--calendarId=${calendarId}`,
-        `--ruleId=${ruleId}`,
-      ],
-      tenant
-    );
+    const cal = buildCalendarClient(tenant, calendarId);
+    await cal.acl.delete({ calendarId, ruleId });
 
     audit({
       action: "calendar_delegation.remove",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
       params: { calendarId, ruleId },
-      outcome: result.success ? "success" : "error",
-      error: result.error,
+      outcome: "success",
     });
-    return NextResponse.json(result);
+    return NextResponse.json({ success: true });
   } catch (e) {
     audit({
       action: "calendar_delegation.remove",

@@ -8,6 +8,18 @@ import {
   emailDomain,
 } from "./validate";
 
+export function buildGmailClient(tenant: Tenant | null, impersonateEmail: string, scopes: string[]) {
+  const auth = buildAuth(tenant, impersonateEmail, scopes);
+  return google.gmail({ version: "v1", auth });
+}
+
+export function buildCalendarClient(tenant: Tenant | null, impersonateEmail: string) {
+  const auth = buildAuth(tenant, impersonateEmail, [
+    "https://www.googleapis.com/auth/calendar",
+  ]);
+  return google.calendar({ version: "v3", auth });
+}
+
 const ADMIN_API_TIMEOUT_MS = 30_000;
 
 const SCOPES = {

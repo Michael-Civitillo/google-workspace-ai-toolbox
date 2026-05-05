@@ -1,23 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import { gws, tenantFromRequest } from "@/lib/gws";
+import { tenantFromRequest } from "@/lib/gws";
+import { buildGmailClient } from "@/lib/admin-sdk";
 import { listDomains } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError, emailDomain } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 
+const GMAIL_SETTINGS_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.settings.sharing",
+];
+
 const ALLOWED_ACTIONS = new Set(["keep", "archive", "trash", "markRead"]);
+
+const DISPOSITION_MAP: Record<string, string> = {
+  keep: "leaveInInbox",
+  archive: "archive",
+  trash: "trash",
+  markRead: "markRead",
+};
 
 export async function GET(request: NextRequest) {
   try {
     const tenant = tenantFromRequest(request);
-    const user = requireEmail(
-      request.nextUrl.searchParams.get("user"),
-      "user"
-    );
-    const result = await gws(
-      ["gmail", "users", "labels", "list", `--userId=${user}`],
-      tenant
-    );
-    return NextResponse.json(result);
+    const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
+    const gmail = buildGmailClient(tenant, user, GMAIL_SETTINGS_SCOPES);
+    const res = await gmail.users.labels.list({ userId: "me" });
+    return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
     return errorResponse(e);
   }
@@ -26,11 +33,9 @@ export async function GET(request: NextRequest) {
 /**
  * Set up email forwarding from source to target user.
  *
- * Auto-forwarding to an external domain is a major data-exfiltration risk —
- * the previous version of this route accepted any target email with no
- * domain check. Now: if the target domain is not one of this tenant's
- * verified domains, the caller must explicitly opt in with
- * `confirmExternal: "<target email>"` to confirm they typed it correctly.
+ * Auto-forwarding to an external domain is a major data-exfiltration risk.
+ * If the target domain is not one of this tenant's verified domains, the
+ * caller must explicitly opt in with `confirmExternal: "<target email>"`.
  */
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown> = {};
@@ -61,8 +66,7 @@ export async function POST(request: NextRequest) {
       );
       isExternal = !tenantDomains.has(emailDomain(targetUser));
     } catch (e) {
-      // If we can't enumerate domains, fail closed: treat as external. Better
-      // to require explicit confirmation than to silently forward outside.
+      // Fail closed: treat as external when we can't enumerate domains.
       isExternal = true;
       console.warn(
         "email-transfer: could not list domains, treating target as external:",
@@ -71,9 +75,10 @@ export async function POST(request: NextRequest) {
     }
 
     if (isExternal) {
-      const confirm = typeof body.confirmExternal === "string"
-        ? body.confirmExternal.trim().toLowerCase()
-        : "";
+      const confirm =
+        typeof body.confirmExternal === "string"
+          ? body.confirmExternal.trim().toLowerCase()
+          : "";
       if (confirm !== targetUser) {
         throw new ValidationError(
           `Target "${targetUser}" is outside this tenant's verified domains. Set confirmExternal to the exact target email to proceed.`
@@ -81,75 +86,63 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Step 1: Create forwarding address.
-    const forwardResult = await gws(
-      [
-        "gmail",
-        "users",
-        "settings",
-        "forwardingAddresses",
-        "create",
-        `--userId=${sourceUser}`,
-        `--forwardingEmail=${targetUser}`,
-      ],
-      tenant
-    );
+    const gmail = buildGmailClient(tenant, sourceUser, GMAIL_SETTINGS_SCOPES);
 
-    if (!forwardResult.success) {
+    // Step 1: Create forwarding address.
+    let forwardData: unknown;
+    try {
+      const res = await gmail.users.settings.forwardingAddresses.create({
+        userId: "me",
+        requestBody: { forwardingEmail: targetUser },
+      });
+      forwardData = res.data;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
       audit({
         action: "email_transfer.create_forwarding",
         tenantId: tenant?.id ?? null,
         tenantName: tenant?.name ?? null,
         params: { sourceUser, targetUser, isExternal },
         outcome: "error",
-        error: forwardResult.error,
+        error: msg,
       });
       return NextResponse.json({
         success: false,
-        error: `Failed to create forwarding address: ${forwardResult.error}`,
+        error: `Failed to create forwarding address: ${msg}`,
         step: "create_forwarding",
       });
     }
 
-    const dispositionMap: Record<string, string> = {
-      keep: "leaveInInbox",
-      archive: "archive",
-      trash: "trash",
-      markRead: "markRead",
-    };
-
     // Step 2: Enable auto-forwarding.
-    const enableResult = await gws(
-      [
-        "gmail",
-        "users",
-        "settings",
-        "updateAutoForwarding",
-        `--userId=${sourceUser}`,
-        `--enabled=true`,
-        `--emailAddress=${targetUser}`,
-        `--disposition=${dispositionMap[action]}`,
-      ],
-      tenant
-    );
+    let autoForwardData: unknown;
+    let autoForwardError: string | undefined;
+    try {
+      const res = await gmail.users.settings.updateAutoForwarding({
+        userId: "me",
+        requestBody: {
+          enabled: true,
+          emailAddress: targetUser,
+          disposition: DISPOSITION_MAP[action],
+        },
+      });
+      autoForwardData = res.data;
+    } catch (e) {
+      autoForwardError = e instanceof Error ? e.message : String(e);
+    }
 
     audit({
       action: "email_transfer.enable",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
       params: { sourceUser, targetUser, action, isExternal },
-      outcome: enableResult.success ? "success" : "error",
-      error: enableResult.error,
+      outcome: autoForwardError ? "error" : "success",
+      error: autoForwardError,
     });
 
     return NextResponse.json({
-      success: enableResult.success,
-      data: {
-        forwardingAddress: forwardResult.data,
-        autoForwarding: enableResult.data,
-        isExternal,
-      },
-      error: enableResult.success ? undefined : enableResult.error,
+      success: !autoForwardError,
+      data: { forwardingAddress: forwardData, autoForwarding: autoForwardData, isExternal },
+      error: autoForwardError,
     });
   } catch (e) {
     audit({
