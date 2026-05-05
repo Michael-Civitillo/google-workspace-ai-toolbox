@@ -501,7 +501,7 @@ function TenantFormFields({
           id="t-creds"
           value={form.credentialsFile}
           onChange={(e) => onChange("credentialsFile", e.target.value)}
-          placeholder="/path/to/service-account.json"
+          placeholder="Absolute path to .json key (e.g. /Users/me/key.json or C:\\creds\\key.json)"
           className="h-8 text-sm font-mono"
         />
       </div>
