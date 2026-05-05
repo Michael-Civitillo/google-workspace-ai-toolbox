@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { ChevronDown, Building2, PlusCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TENANT_COLOR_CLASSES, type Tenant, type TenantColor } from "@/lib/tenants";
-import { setCurrentTenantId, subscribeTenantId } from "@/lib/tenant-client";
+import {
+  setCurrentTenant,
+  setCurrentTenantId,
+  subscribeTenantId,
+} from "@/lib/tenant-client";
 
 interface TenantSwitcherState {
   tenants: Tenant[];
@@ -25,11 +29,13 @@ export function TenantSwitcher() {
     fetch("/api/tenants")
       .then((r) => r.json())
       .then((data) => {
-        setState({
-          tenants: data.tenants ?? [],
-          activeTenantId: data.activeTenantId ?? null,
-        });
-        setCurrentTenantId(data.activeTenantId ?? null);
+        const tenants: Tenant[] = data.tenants ?? [];
+        const activeId: string | null = data.activeTenantId ?? null;
+        setState({ tenants, activeTenantId: activeId });
+        setCurrentTenantId(activeId);
+        setCurrentTenant(
+          activeId ? tenants.find((t) => t.id === activeId) ?? null : null
+        );
       })
       .catch(() => {});
   }, []);
@@ -55,6 +61,7 @@ export function TenantSwitcher() {
       if (res.ok) {
         setState((prev) => ({ ...prev, activeTenantId: id }));
         setCurrentTenantId(id);
+        setCurrentTenant(state.tenants.find((t) => t.id === id) ?? null);
         router.refresh();
       }
     } finally {

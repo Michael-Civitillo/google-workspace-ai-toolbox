@@ -24,7 +24,8 @@ import {
   Circle,
   AlertTriangle,
 } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface BulkOperation {
   action: string;
@@ -54,13 +55,14 @@ const DESTRUCTIVE_ACTIONS = new Set([
 ]);
 
 export default function BulkOperations() {
+  const { tenant, id: tenantId } = useCurrentTenant();
   const [text, setText] = useState("");
   const [operations, setOperations] = useState<BulkOperation[]>([]);
   const [summary, setSummary] = useState("");
   const [parsing, setParsing] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<Record<number, OpResult>>({});
-  const [confirm, setConfirm] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -73,7 +75,7 @@ export default function BulkOperations() {
     setResults({});
     setMessage(null);
     setSummary("");
-    setConfirm("");
+    setConfirmOpen(false);
 
     try {
       const res = await tfetch("/api/ai/bulk-parse", {
@@ -115,13 +117,10 @@ export default function BulkOperations() {
   ).length;
 
   const runAll = async () => {
-    if (confirm !== `RUN ${runnableOps.length}`) {
-      setMessage({
-        type: "error",
-        text: `Type "RUN ${runnableOps.length}" exactly to confirm running these operations.`,
-      });
-      return;
-    }
+    // Capture the tenant id at the moment the user confirmed. Every subsequent
+    // request in this loop pins to that tenant — even if the user (or another
+    // tab) flips the active tenant mid-flight.
+    const pinnedTenantId = tenantId;
     setRunning(true);
     setMessage(null);
     const newResults: Record<number, OpResult> = {};
@@ -171,7 +170,7 @@ export default function BulkOperations() {
         } else {
           fetchOptions.body = JSON.stringify(op.params);
         }
-        const res = await tfetch(url, fetchOptions);
+        const res = await tfetch(url, fetchOptions, pinnedTenantId);
         const result = await res.json();
         newResults[i] = {
           status: result.success ? "success" : "error",
@@ -200,7 +199,7 @@ export default function BulkOperations() {
       text: `Finished: ${successCount} succeeded, ${errorCount} failed, ${skipped} skipped out of ${operations.length} operations.`,
     });
     setRunning(false);
-    setConfirm("");
+    setConfirmOpen(false);
   };
 
   const statusIcon = (status: OpStatus) => {
@@ -394,26 +393,19 @@ export default function BulkOperations() {
                 </div>
 
                 {runnableOps.length > 0 && !running && (
-                  <div className="space-y-2 pt-2 border-t">
-                    <p className="text-xs text-muted-foreground">
-                      Type <code className="bg-muted px-1 rounded">RUN {runnableOps.length}</code> to confirm running {runnableOps.length} operation{runnableOps.length === 1 ? "" : "s"}.
-                    </p>
-                    <div className="flex gap-2">
-                      <input
-                        value={confirm}
-                        onChange={(e) => setConfirm(e.target.value)}
-                        placeholder={`RUN ${runnableOps.length}`}
-                        className="flex-1 h-9 px-3 rounded-md border bg-background text-sm font-mono"
-                      />
-                      <Button
-                        size="sm"
-                        onClick={runAll}
-                        disabled={confirm !== `RUN ${runnableOps.length}`}
-                      >
-                        <Play className="mr-1 h-3.5 w-3.5" />
-                        Run
-                      </Button>
-                    </div>
+                  <div className="pt-2 border-t">
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      onClick={() => {
+                        setMessage(null);
+                        setConfirmOpen(true);
+                      }}
+                    >
+                      <Play className="mr-1 h-3.5 w-3.5" />
+                      Review &amp; Run {runnableOps.length} operation
+                      {runnableOps.length === 1 ? "" : "s"}
+                    </Button>
                   </div>
                 )}
               </div>
@@ -421,6 +413,39 @@ export default function BulkOperations() {
           </CardContent>
         </Card>
       </div>
+
+      {runnableOps.length > 0 && (
+        <ConfirmActionDialog
+          open={confirmOpen}
+          onOpenChange={(o) => !running && setConfirmOpen(o)}
+          title={`Run ${runnableOps.length} bulk operation${runnableOps.length === 1 ? "" : "s"}`}
+          summary={`These operations will run sequentially against the tenant pinned right now. Switching tenants mid-run will not redirect later operations.`}
+          tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+          severity="high"
+          confirmPhrase={`RUN ${runnableOps.length}`}
+          confirmLabel="Run all"
+          busy={running}
+          changes={runnableOps.slice(0, 12).map((op) => ({
+            label: op.actionName || op.action,
+            after: op.description,
+          }))}
+          warnings={
+            <>
+              {runnableOps.length > 12 && (
+                <p>
+                  Showing the first 12 of {runnableOps.length}. Scroll the
+                  operations panel to review the rest before confirming.
+                </p>
+              )}
+              <p className="mt-1">
+                Destructive operations and operations that failed validation are
+                skipped automatically.
+              </p>
+            </>
+          }
+          onConfirm={runAll}
+        />
+      )}
     </>
   );
 }

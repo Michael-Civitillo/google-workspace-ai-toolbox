@@ -16,9 +16,12 @@ const PUBLIC_PATHS = new Set([
  *
  *   2. Authenticated session for every page and API route.
  *
- *   3. CSRF defence on mutating API requests: same-origin Origin header check.
- *      Non-mutating GETs are unaffected; mutating verbs (POST/PUT/PATCH/DELETE)
- *      to /api/* must come from the same origin we serve.
+ *   3. CSRF defence on mutating API requests: same-origin Origin / Referer
+ *      header check, validated against the canonical request URL host (NOT
+ *      the client-controlled Host header). This stops an attacker from using
+ *      a forged Host header to bypass the same-origin check.
+ *
+ *   4. HSTS in production responses, so browsers refuse to fall back to HTTP.
  */
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -29,7 +32,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith("/favicon") ||
     pathname === "/logo.svg"
   ) {
-    return NextResponse.next();
+    return withSecurityHeaders(NextResponse.next());
   }
 
   const isApi = pathname.startsWith("/api/");
@@ -43,20 +46,25 @@ export async function middleware(req: NextRequest) {
   // Refuse to serve anything if no APP_PASSWORD has been configured.
   // The login page itself remains accessible so the operator can see why.
   if (!authConfigured()) {
-    if (PUBLIC_PATHS.has(pathname)) return NextResponse.next();
+    if (PUBLIC_PATHS.has(pathname)) {
+      return withSecurityHeaders(NextResponse.next());
+    }
     if (isApi) {
-      return NextResponse.json(
-        {
-          error:
-            "Server not configured: APP_PASSWORD is not set. The toolbox refuses to run mutating actions without it.",
-        },
-        { status: 503 }
+      return withSecurityHeaders(
+        NextResponse.json(
+          {
+            error:
+              "Server not configured: APP_PASSWORD is not set. The toolbox refuses to run mutating actions without it.",
+          },
+          { status: 503 }
+        )
       );
     }
-    return NextResponse.redirect(new URL("/login", req.url));
+    return withSecurityHeaders(
+      NextResponse.redirect(new URL("/login", req.url))
+    );
   }
 
-  // Public auth endpoints are always allowed past auth (still get CSRF check below).
   const isPublic = PUBLIC_PATHS.has(pathname);
 
   if (!isPublic) {
@@ -64,63 +72,105 @@ export async function middleware(req: NextRequest) {
     const ok = await verifySessionToken(token);
     if (!ok) {
       if (isApi) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        return withSecurityHeaders(
+          NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+        );
       }
       const url = new URL("/login", req.url);
-      url.searchParams.set("next", pathname);
-      return NextResponse.redirect(url);
+      // Always pass `next` as the relative pathname only — never the full
+      // request URL. The login page also re-validates this client-side.
+      const safeNext = pathname.startsWith("/") && !pathname.startsWith("//")
+        ? pathname
+        : "/";
+      url.searchParams.set("next", safeNext);
+      return withSecurityHeaders(NextResponse.redirect(url));
     }
   }
 
-  // CSRF: same-origin check on mutating API calls.
+  // CSRF: same-origin check on mutating API calls. Compare the Origin /
+  // Referer host against the *canonical* request host (req.nextUrl.host),
+  // which Next.js derives from the deployment's URL — not the client-supplied
+  // Host header, which is trivially spoofable behind a misconfigured proxy.
   if (isApi && isMutating) {
+    const expectedHost = req.nextUrl.host;
     const origin = req.headers.get("origin");
-    const host = req.headers.get("host");
+    const referer = req.headers.get("referer");
+
     if (origin) {
       let originHost: string;
       try {
         originHost = new URL(origin).host;
       } catch {
-        return NextResponse.json(
-          { error: "Invalid Origin header" },
-          { status: 400 }
+        return withSecurityHeaders(
+          NextResponse.json({ error: "Invalid Origin header" }, { status: 400 })
         );
       }
-      if (originHost !== host) {
-        return NextResponse.json(
-          { error: "Cross-origin request blocked" },
-          { status: 403 }
+      if (originHost !== expectedHost) {
+        return withSecurityHeaders(
+          NextResponse.json(
+            { error: "Cross-origin request blocked" },
+            { status: 403 }
+          )
         );
       }
-    } else {
-      // Some clients (e.g. native fetch from same-origin script in some browsers)
-      // omit Origin. Fall back to Referer if present; otherwise reject.
-      const referer = req.headers.get("referer");
-      if (!referer) {
-        return NextResponse.json(
-          { error: "Missing Origin/Referer header" },
-          { status: 403 }
-        );
-      }
+    } else if (referer) {
       let refererHost: string;
       try {
         refererHost = new URL(referer).host;
       } catch {
-        return NextResponse.json(
-          { error: "Invalid Referer header" },
-          { status: 400 }
+        return withSecurityHeaders(
+          NextResponse.json({ error: "Invalid Referer header" }, { status: 400 })
         );
       }
-      if (refererHost !== host) {
-        return NextResponse.json(
-          { error: "Cross-origin request blocked" },
-          { status: 403 }
+      if (refererHost !== expectedHost) {
+        return withSecurityHeaders(
+          NextResponse.json(
+            { error: "Cross-origin request blocked" },
+            { status: 403 }
+          )
+        );
+      }
+    } else {
+      // Some clients legitimately omit both headers (e.g. fetch with
+      // credentials: "same-origin" from same-origin script in Safari).
+      // Accept ONLY if the request appears same-origin via the Sec-Fetch-Site
+      // hint, otherwise reject.
+      const site = req.headers.get("sec-fetch-site");
+      if (site && site !== "same-origin" && site !== "none") {
+        return withSecurityHeaders(
+          NextResponse.json(
+            { error: "Cross-origin request blocked" },
+            { status: 403 }
+          )
+        );
+      }
+      if (!site) {
+        return withSecurityHeaders(
+          NextResponse.json(
+            { error: "Missing Origin/Referer header" },
+            { status: 403 }
+          )
         );
       }
     }
   }
 
-  return NextResponse.next();
+  return withSecurityHeaders(NextResponse.next());
+}
+
+function withSecurityHeaders(res: NextResponse): NextResponse {
+  // HSTS: force HTTPS for a year on production. Browsers ignore this on
+  // non-HTTPS responses, so it's safe to set unconditionally.
+  if (process.env.NODE_ENV === "production") {
+    res.headers.set(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains"
+    );
+  }
+  res.headers.set("X-Content-Type-Options", "nosniff");
+  res.headers.set("Referrer-Policy", "same-origin");
+  res.headers.set("X-Frame-Options", "DENY");
+  return res;
 }
 
 export const config = {

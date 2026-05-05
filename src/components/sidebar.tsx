@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
 import { ThemeToggle } from "./theme-toggle";
+import { LogoutButton } from "./logout-button";
 
 const navigation = [
   {
@@ -135,6 +136,7 @@ export function Sidebar() {
 
       <div className="p-3 border-t border-border space-y-1">
         <ThemeToggle />
+        <LogoutButton />
         <p className="text-xs text-muted-foreground px-3 pb-1">
           Powered by{" "}
           <a

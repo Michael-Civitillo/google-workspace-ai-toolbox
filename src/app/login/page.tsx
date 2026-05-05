@@ -9,10 +9,26 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Lock, Loader2 } from "lucide-react";
 
+/**
+ * Restrict the post-login redirect target to internal paths to prevent
+ * `?next=https://evil.com` open-redirect attacks. Anything that isn't a
+ * single leading-slash path is silently dropped to "/".
+ */
+function safeNext(raw: string | null): string {
+  if (!raw) return "/";
+  // Reject protocol-relative ("//evil.com") and absolute URLs.
+  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
+  // Reject paths containing schemes (e.g. "/foo?x=javascript:bad" is fine
+  // — that's just a query string, but a bare scheme like "javascript:..." in
+  // the path itself is dangerous).
+  if (/[\r\n]/.test(raw)) return "/";
+  return raw;
+}
+
 function LoginInner() {
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get("next") || "/";
+  const next = safeNext(params.get("next"));
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);

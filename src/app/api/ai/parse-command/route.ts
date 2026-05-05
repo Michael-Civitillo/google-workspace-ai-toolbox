@@ -25,7 +25,14 @@ const ParsedCommandSchema = z.object({
     .describe("Brief plain-English explanation of what this will do"),
 });
 
+const MAX_BODY_BYTES = 16 * 1024; // commands are short — cap to keep AI bills bounded
+const MAX_COMMAND_CHARS = 4_000;
+
 export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+  }
   let body: Record<string, unknown> = {};
   try {
     body = await request.json();
@@ -37,6 +44,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: "command is required" },
         { status: 400 }
+      );
+    }
+    if (command.length > MAX_COMMAND_CHARS) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `command too long (max ${MAX_COMMAND_CHARS} chars)`,
+        },
+        { status: 413 }
       );
     }
 

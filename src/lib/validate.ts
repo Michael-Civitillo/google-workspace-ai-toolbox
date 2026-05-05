@@ -63,3 +63,54 @@ export class ValidationError extends Error {
     this.name = "ValidationError";
   }
 }
+
+/**
+ * Reject service-account credential paths that look unsafe.
+ *
+ * Threats from a malicious-but-authenticated user:
+ *   - Path traversal: "../../etc/shadow" — Node would refuse for permissions
+ *     but error messages can leak file existence.
+ *   - Reading an unrelated file as JSON: causes a parse error that may echo
+ *     part of the file content.
+ *   - Reading a service-account key for a tenant they shouldn't access.
+ *
+ * Rules: must be absolute, must end in .json, no `..` segments, no embedded
+ * NUL bytes, no control characters. If GWS_CREDENTIALS_DIR is set, the path
+ * must live inside that directory.
+ */
+export function validateCredentialsFilePath(p: unknown): string {
+  if (typeof p !== "string" || !p.trim()) {
+    throw new ValidationError("credentialsFile is required");
+  }
+  const path = p.trim();
+  if (path.includes("\0") || /[\r\n]/.test(path)) {
+    throw new ValidationError("credentialsFile contains illegal characters");
+  }
+  if (!path.startsWith("/")) {
+    throw new ValidationError(
+      "credentialsFile must be an absolute path (starting with /)"
+    );
+  }
+  if (path.split("/").some((seg) => seg === "..")) {
+    throw new ValidationError(
+      "credentialsFile must not contain `..` path segments"
+    );
+  }
+  if (!path.toLowerCase().endsWith(".json")) {
+    throw new ValidationError(
+      "credentialsFile must point to a .json service-account key"
+    );
+  }
+  const allowedDir = process.env.GWS_CREDENTIALS_DIR;
+  if (allowedDir) {
+    const normalisedDir = allowedDir.endsWith("/")
+      ? allowedDir
+      : allowedDir + "/";
+    if (!path.startsWith(normalisedDir)) {
+      throw new ValidationError(
+        `credentialsFile must live under ${allowedDir} (set by GWS_CREDENTIALS_DIR)`
+      );
+    }
+  }
+  return path;
+}

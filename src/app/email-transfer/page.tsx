@@ -20,15 +20,29 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { PageHeader } from "@/components/page-header";
-import { ArrowRightLeft, Loader2, ArrowRight, Info, AlertTriangle } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import {
+  ArrowRightLeft,
+  ArrowRight,
+  Info,
+  AlertTriangle,
+} from "lucide-react";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
+
+const ACTION_LABELS: Record<string, string> = {
+  keep: "Keep in inbox",
+  archive: "Archive",
+  trash: "Move to trash",
+  markRead: "Mark as read",
+};
 
 export default function EmailTransfer() {
+  const { tenant, id: tenantId } = useCurrentTenant();
   const [sourceUser, setSourceUser] = useState("");
   const [targetUser, setTargetUser] = useState("");
   const [action, setAction] = useState("keep");
-  const [confirmExternal, setConfirmExternal] = useState("");
   const [verifiedDomains, setVerifiedDomains] = useState<string[]>([]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
@@ -42,7 +56,9 @@ export default function EmailTransfer() {
         if (data.success && Array.isArray(data.data)) {
           setVerifiedDomains(
             data.data
-              .filter((d: { verified: boolean; domainName: string }) => d.verified)
+              .filter(
+                (d: { verified: boolean; domainName: string }) => d.verified
+              )
               .map((d: { domainName: string }) => d.domainName.toLowerCase())
           );
         }
@@ -58,26 +74,26 @@ export default function EmailTransfer() {
     verifiedDomains.length > 0 &&
     !verifiedDomains.includes(targetDomain);
 
-  const externalConfirmOk =
-    !isExternal ||
-    confirmExternal.trim().toLowerCase() === targetUser.trim().toLowerCase();
-
   const transferEmail = async () => {
     if (!sourceUser || !targetUser) return;
     setLoading(true);
     setMessage(null);
 
     try {
-      const res = await tfetch("/api/gws/email-transfer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourceUser,
-          targetUser,
-          action,
-          confirmExternal: isExternal ? confirmExternal : undefined,
-        }),
-      });
+      const res = await tfetch(
+        "/api/gws/email-transfer",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourceUser,
+            targetUser,
+            action,
+            confirmExternal: isExternal ? targetUser : undefined,
+          }),
+        },
+        tenantId
+      );
       const result = await res.json();
 
       if (result.success) {
@@ -85,7 +101,7 @@ export default function EmailTransfer() {
           type: "success",
           text: `Email forwarding set up from ${sourceUser} to ${targetUser}. New emails will be forwarded automatically.`,
         });
-        setConfirmExternal("");
+        setConfirmOpen(false);
       } else {
         setMessage({
           type: "error",
@@ -186,24 +202,10 @@ export default function EmailTransfer() {
             {isExternal && (
               <Alert className="border-red-200 bg-red-50">
                 <AlertTriangle className="h-4 w-4 text-red-600" />
-                <AlertDescription className="text-red-800 text-sm space-y-2">
-                  <p>
-                    <strong>{targetDomain}</strong> is NOT one of your tenant&apos;s
-                    verified domains. Forwarding email outside your tenant can
-                    leak data — make sure this is intentional.
-                  </p>
-                  <div className="space-y-1 pt-1">
-                    <Label htmlFor="confirm-ext" className="text-xs">
-                      Type <code className="bg-white/50 px-1 rounded">{targetUser}</code> to confirm external forwarding
-                    </Label>
-                    <Input
-                      id="confirm-ext"
-                      value={confirmExternal}
-                      onChange={(e) => setConfirmExternal(e.target.value)}
-                      placeholder={targetUser}
-                      className="font-mono text-sm bg-white"
-                    />
-                  </div>
+                <AlertDescription className="text-red-800 text-sm">
+                  <strong>{targetDomain}</strong> is NOT one of your tenant&apos;s
+                  verified domains. Forwarding email outside your tenant can
+                  leak data.
                 </AlertDescription>
               </Alert>
             )}
@@ -221,19 +223,58 @@ export default function EmailTransfer() {
             <Button
               className="w-full"
               size="lg"
-              onClick={transferEmail}
-              disabled={!sourceUser || !targetUser || loading || !externalConfirmOk}
+              onClick={() => {
+                setMessage(null);
+                setConfirmOpen(true);
+              }}
+              disabled={!sourceUser || !targetUser}
             >
-              {loading ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <ArrowRightLeft className="mr-2 h-4 w-4" />
-              )}
-              Set Up Forwarding
+              <ArrowRightLeft className="mr-2 h-4 w-4" />
+              Review &amp; Set Up Forwarding
             </Button>
           </CardContent>
         </Card>
       </div>
+
+      {sourceUser && targetUser && (
+        <ConfirmActionDialog
+          open={confirmOpen}
+          onOpenChange={(o) => !loading && setConfirmOpen(o)}
+          title="Enable email forwarding"
+          summary={`All incoming mail to ${sourceUser} will be auto-forwarded to ${targetUser}.`}
+          tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+          severity={isExternal ? "high" : "medium"}
+          confirmPhrase={isExternal ? targetUser : undefined}
+          confirmLabel={isExternal ? "Forward externally" : "Enable forwarding"}
+          busy={loading}
+          changes={[
+            { label: "Source mailbox", after: sourceUser },
+            {
+              label: "Forward to",
+              after: targetUser,
+              emphasis: isExternal,
+            },
+            {
+              label: "After forwarding",
+              after: ACTION_LABELS[action] ?? action,
+            },
+            {
+              label: "Scope",
+              after: "Applies to NEW incoming mail only — existing mail is not moved",
+            },
+          ]}
+          warnings={
+            isExternal ? (
+              <>
+                <strong>{targetDomain}</strong> is OUTSIDE your verified tenant
+                domains. Every future email to {sourceUser} will be sent to an
+                external address. Confirm this is intentional and authorised.
+              </>
+            ) : null
+          }
+          onConfirm={transferEmail}
+        />
+      )}
     </>
   );
 }

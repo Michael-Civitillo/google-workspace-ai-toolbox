@@ -31,7 +31,8 @@ import {
   User,
   Mail,
 } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface UserInfo {
   primaryEmail: string;
@@ -56,15 +57,16 @@ interface DomainInfo {
 }
 
 export default function DomainChange() {
+  const { tenant, id: tenantId } = useCurrentTenant();
   const [email, setEmail] = useState("");
   const [user, setUser] = useState<UserInfo | null>(null);
   const [domains, setDomains] = useState<DomainInfo[]>([]);
   const [selectedDomain, setSelectedDomain] = useState("");
   const [newUsername, setNewUsername] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
   const [loadingDomains, setLoadingDomains] = useState(true);
   const [changing, setChanging] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -87,7 +89,6 @@ export default function DomainChange() {
     setLookingUp(true);
     setMessage(null);
     setUser(null);
-    setConfirm("");
 
     try {
       const res = await tfetch(
@@ -114,28 +115,28 @@ export default function DomainChange() {
 
   const changeDomain = async () => {
     if (!user || !selectedDomain) return;
-    if (confirm.trim().toLowerCase() !== user.primaryEmail.toLowerCase()) {
-      setMessage({
-        type: "error",
-        text: "Type the user's current email exactly to confirm.",
-      });
-      return;
-    }
-
     setChanging(true);
     setMessage(null);
 
     try {
-      const res = await tfetch("/api/admin/change-domain", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          currentEmail: user.primaryEmail,
-          newDomain: selectedDomain,
-          newUsername: newUsername || undefined,
-          confirm,
-        }),
-      });
+      // Pin tenantId to whatever was active when the dialog was confirmed.
+      // If the user (or another tab) switches tenants between confirm and
+      // request-completion, we still target the tenant they saw in the dialog.
+      const res = await tfetch(
+        "/api/admin/change-domain",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            currentEmail: user.primaryEmail,
+            newDomain: selectedDomain,
+            newUsername: newUsername || undefined,
+            // Server-side typed confirmation — must equal currentEmail.
+            confirm: user.primaryEmail,
+          }),
+        },
+        tenantId
+      );
       const result = await res.json();
 
       if (result.success) {
@@ -149,7 +150,7 @@ export default function DomainChange() {
           primaryEmail: verified || result.data?.newEmail || user.primaryEmail,
         });
         setEmail(verified || result.data?.newEmail || user.primaryEmail);
-        setConfirm("");
+        setConfirmOpen(false);
       } else {
         setMessage({
           type: "error",
@@ -169,10 +170,6 @@ export default function DomainChange() {
   const availableDomains = domains.filter(
     (d) => d.domainName !== currentDomain && d.verified
   );
-
-  const confirmMatches =
-    !!user &&
-    confirm.trim().toLowerCase() === user.primaryEmail.toLowerCase();
 
   return (
     <>
@@ -366,35 +363,23 @@ export default function DomainChange() {
                       The user&apos;s old email address will automatically
                       become an alias, so they&apos;ll still receive mail at
                       their previous address. They&apos;ll need to sign in with
-                      the new address going forward. <strong>This action is irreversible from this tool</strong> — undo through the Google Admin Console only.
+                      the new address going forward.{" "}
+                      <strong>This action is irreversible from this tool</strong>{" "}
+                      — undo through the Google Admin Console only.
                     </AlertDescription>
                   </Alert>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="confirm">
-                      Type <code className="bg-muted px-1 rounded">{user.primaryEmail}</code> to confirm
-                    </Label>
-                    <Input
-                      id="confirm"
-                      value={confirm}
-                      onChange={(e) => setConfirm(e.target.value)}
-                      placeholder={user.primaryEmail}
-                      className="font-mono"
-                    />
-                  </div>
 
                   <Button
                     className="w-full"
                     size="lg"
-                    onClick={changeDomain}
-                    disabled={!selectedDomain || changing || !confirmMatches}
+                    onClick={() => {
+                      setMessage(null);
+                      setConfirmOpen(true);
+                    }}
+                    disabled={!selectedDomain}
                   >
-                    {changing ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <Globe className="mr-2 h-4 w-4" />
-                    )}
-                    Change Primary Domain
+                    <Globe className="mr-2 h-4 w-4" />
+                    Review &amp; Change Primary Domain
                   </Button>
                 </div>
               </>
@@ -461,6 +446,45 @@ export default function DomainChange() {
           </CardContent>
         </Card>
       </div>
+
+      {user && selectedDomain && (
+        <ConfirmActionDialog
+          open={confirmOpen}
+          onOpenChange={(o) => !changing && setConfirmOpen(o)}
+          title="Change primary email"
+          summary="This will swap the user's primary email to the new domain. The old address becomes an alias."
+          tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+          severity="high"
+          confirmPhrase={user.primaryEmail}
+          confirmLabel="Change primary email"
+          busy={changing}
+          changes={[
+            {
+              label: "Primary email",
+              before: user.primaryEmail,
+              after: previewEmail,
+              emphasis: true,
+            },
+            {
+              label: "Old address",
+              before: user.primaryEmail,
+              after: `${user.primaryEmail} (kept as alias)`,
+            },
+            {
+              label: "Sign-in",
+              after: `User must sign in with ${previewEmail} from now on`,
+            },
+          ]}
+          warnings={
+            <>
+              Irreversible from this tool. If wrong, undo via the Google Admin
+              Console. Make sure the user is not the admin this toolbox is
+              impersonating.
+            </>
+          }
+          onConfirm={changeDomain}
+        />
+      )}
     </>
   );
 }

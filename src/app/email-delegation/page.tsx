@@ -16,7 +16,8 @@ import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { Mail, Loader2, Trash2, UserPlus, Search } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface Delegate {
   delegateEmail: string;
@@ -24,12 +25,15 @@ interface Delegate {
 }
 
 export default function EmailDelegation() {
+  const { tenant, id: tenantId } = useCurrentTenant();
   const [user, setUser] = useState("");
   const [delegate, setDelegate] = useState("");
   const [delegates, setDelegates] = useState<Delegate[]>([]);
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [confirmAddOpen, setConfirmAddOpen] = useState(false);
+  const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<string | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -67,11 +71,15 @@ export default function EmailDelegation() {
     setMessage(null);
 
     try {
-      const res = await tfetch("/api/gws/email-delegation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user, delegate }),
-      });
+      const res = await tfetch(
+        "/api/gws/email-delegation",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user, delegate }),
+        },
+        tenantId
+      );
       const result = await res.json();
 
       if (result.success) {
@@ -80,6 +88,7 @@ export default function EmailDelegation() {
           text: `Successfully added ${delegate} as a delegate for ${user}`,
         });
         setDelegate("");
+        setConfirmAddOpen(false);
         await listDelegates();
       } else {
         setMessage({ type: "error", text: result.error || "Failed to add delegate" });
@@ -96,11 +105,15 @@ export default function EmailDelegation() {
     setMessage(null);
 
     try {
-      const res = await tfetch("/api/gws/email-delegation", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user, delegate: delegateEmail }),
-      });
+      const res = await tfetch(
+        "/api/gws/email-delegation",
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user, delegate: delegateEmail }),
+        },
+        tenantId
+      );
       const result = await res.json();
 
       if (result.success) {
@@ -108,6 +121,7 @@ export default function EmailDelegation() {
           type: "success",
           text: `Successfully removed ${delegateEmail} as a delegate`,
         });
+        setConfirmRemoveTarget(null);
         await listDelegates();
       } else {
         setMessage({ type: "error", text: result.error || "Failed to remove delegate" });
@@ -189,7 +203,10 @@ export default function EmailDelegation() {
                   onChange={(e) => setDelegate(e.target.value)}
                 />
                 <Button
-                  onClick={addDelegate}
+                  onClick={() => {
+                    setMessage(null);
+                    setConfirmAddOpen(true);
+                  }}
                   disabled={!user || !delegate || adding}
                 >
                   {adding ? (
@@ -249,7 +266,10 @@ export default function EmailDelegation() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => removeDelegate(d.delegateEmail)}
+                      onClick={() => {
+                        setMessage(null);
+                        setConfirmRemoveTarget(d.delegateEmail);
+                      }}
                       disabled={removing === d.delegateEmail}
                     >
                       {removing === d.delegateEmail ? (
@@ -265,6 +285,54 @@ export default function EmailDelegation() {
           </CardContent>
         </Card>
       </div>
+
+      <ConfirmActionDialog
+        open={confirmAddOpen}
+        onOpenChange={(o) => !adding && setConfirmAddOpen(o)}
+        title="Add mailbox delegate"
+        summary={`Grant ${delegate || "—"} delegate access to ${user || "—"}'s mailbox.`}
+        tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+        severity="medium"
+        confirmLabel="Add delegate"
+        busy={adding}
+        changes={[
+          { label: "Mailbox owner", after: user },
+          { label: "New delegate", after: delegate },
+          {
+            label: "Delegate can",
+            after: "Read, send, and delete messages on behalf of the owner",
+            emphasis: true,
+          },
+          {
+            label: "Verification",
+            after: "Delegate must accept an email invitation before access activates",
+          },
+        ]}
+        onConfirm={addDelegate}
+      />
+
+      <ConfirmActionDialog
+        open={!!confirmRemoveTarget}
+        onOpenChange={(o) => !removing && !o && setConfirmRemoveTarget(null)}
+        title="Remove mailbox delegate"
+        summary={`${confirmRemoveTarget ?? ""} will lose access to ${user}'s mailbox.`}
+        tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+        severity="medium"
+        confirmLabel="Remove delegate"
+        busy={!!removing}
+        changes={[
+          { label: "Mailbox owner", after: user },
+          {
+            label: "Delegate to remove",
+            before: confirmRemoveTarget ?? "",
+            after: "no longer has access",
+            emphasis: true,
+          },
+        ]}
+        onConfirm={() => {
+          if (confirmRemoveTarget) void removeDelegate(confirmRemoveTarget);
+        }}
+      />
     </>
   );
 }
