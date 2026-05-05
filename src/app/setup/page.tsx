@@ -25,6 +25,8 @@ interface GwsStatus {
   installed: boolean;
   version?: string;
   authenticated: boolean;
+  bin?: string;
+  error?: string;
 }
 
 export default function Setup() {
@@ -92,6 +94,38 @@ export default function Setup() {
                     {status?.installed ? "Installed" : "Missing"}
                   </Badge>
                 </div>
+
+                {!status?.installed && (status?.bin || status?.error) && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs space-y-1">
+                    <p className="font-semibold text-amber-900">
+                      Diagnostic info
+                    </p>
+                    {status.bin && (
+                      <p className="text-amber-800">
+                        Tried to run:{" "}
+                        <code className="font-mono">{status.bin}</code>
+                        {status.bin !== "gws" &&
+                          status.bin !== "gws.cmd" &&
+                          " (from $GWS_BIN)"}
+                      </p>
+                    )}
+                    {status.error && (
+                      <p className="text-amber-800 break-all">
+                        Error:{" "}
+                        <code className="font-mono">{status.error}</code>
+                      </p>
+                    )}
+                    <p className="text-amber-800 pt-1">
+                      Make sure <code className="font-mono">gws --version</code>{" "}
+                      works in the same terminal you started{" "}
+                      <code className="font-mono">npm run dev</code> from. On
+                      Windows, you may need to set{" "}
+                      <code className="font-mono">$env:GWS_BIN</code> to the
+                      full path of <code className="font-mono">gws.cmd</code> or{" "}
+                      <code className="font-mono">gws.exe</code>.
+                    </p>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between p-3 rounded-lg border">
                   <div className="flex items-center gap-3">
