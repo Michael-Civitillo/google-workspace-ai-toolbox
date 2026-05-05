@@ -9,8 +9,6 @@ import {
   CalendarDays,
   ArrowRightLeft,
   Globe,
-  Sparkles,
-  Layers,
   Shield,
   Settings,
   Building2,
@@ -62,16 +60,6 @@ const navigation = [
     name: "Sharing Audit",
     href: "/sharing-audit",
     icon: Share2,
-  },
-  {
-    name: "AI Command",
-    href: "/ai-command",
-    icon: Sparkles,
-  },
-  {
-    name: "Bulk Operations",
-    href: "/bulk-operations",
-    icon: Layers,
   },
   {
     name: "User Audit",
