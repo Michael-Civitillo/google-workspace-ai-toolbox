@@ -31,15 +31,26 @@ interface GwsStatus {
 
 export default function Setup() {
   const [status, setStatus] = useState<GwsStatus | null>(null);
+  const [tenantCount, setTenantCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/gws/status")
-      .then((res) => res.json())
-      .then(setStatus)
-      .catch(() => setStatus({ installed: false, authenticated: false }))
+    Promise.all([
+      fetch("/api/gws/status")
+        .then((res) => res.json())
+        .catch(() => ({ installed: false, authenticated: false })),
+      fetch("/api/tenants")
+        .then((res) => res.json())
+        .then((d) => (Array.isArray(d?.tenants) ? d.tenants.length : 0))
+        .catch(() => 0),
+    ])
+      .then(([s, count]) => {
+        setStatus(s);
+        setTenantCount(count);
+      })
       .finally(() => setLoading(false));
   }, []);
+
 
   return (
     <>
@@ -135,11 +146,11 @@ export default function Setup() {
                       <XCircle className="h-5 w-5 text-red-500" />
                     )}
                     <div>
-                      <p className="text-sm font-medium">Authentication</p>
+                      <p className="text-sm font-medium">CLI authentication</p>
                       <p className="text-xs text-muted-foreground">
                         {status?.authenticated
-                          ? "Credentials are configured"
-                          : "No valid credentials found"}
+                          ? "gws CLI has its own credentials configured"
+                          : "gws CLI has no credentials — run gws auth login or set up a service account"}
                       </p>
                     </div>
                   </div>
@@ -154,6 +165,52 @@ export default function Setup() {
                     {status?.authenticated ? "Connected" : "Not Connected"}
                   </Badge>
                 </div>
+
+                <div className="flex items-center justify-between p-3 rounded-lg border">
+                  <div className="flex items-center gap-3">
+                    {(tenantCount ?? 0) > 0 ? (
+                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                    ) : (
+                      <XCircle className="h-5 w-5 text-red-500" />
+                    )}
+                    <div>
+                      <p className="text-sm font-medium">Toolbox tenants</p>
+                      <p className="text-xs text-muted-foreground">
+                        {tenantCount === null
+                          ? "Checking..."
+                          : tenantCount === 0
+                          ? "No tenants configured — add one to start running operations"
+                          : `${tenantCount} tenant${
+                              tenantCount === 1 ? "" : "s"
+                            } configured`}
+                      </p>
+                    </div>
+                  </div>
+                  {(tenantCount ?? 0) === 0 ? (
+                    <a
+                      href="/tenants"
+                      className="text-xs font-medium underline text-primary"
+                    >
+                      Add a tenant →
+                    </a>
+                  ) : (
+                    <Badge
+                      variant="outline"
+                      className="bg-emerald-50 text-emerald-700 border-emerald-200"
+                    >
+                      Ready
+                    </Badge>
+                  )}
+                </div>
+
+                <p className="text-xs text-muted-foreground pt-1">
+                  <strong>CLI authentication</strong> means the{" "}
+                  <code className="font-mono">gws</code> CLI itself has
+                  credentials. <strong>Toolbox tenants</strong> are what this
+                  app uses to run operations against your Workspace — each
+                  tenant points at a service account JSON and an admin email.
+                  You need at least one tenant before any feature works.
+                </p>
               </div>
             )}
           </CardContent>
