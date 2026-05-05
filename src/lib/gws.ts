@@ -6,6 +6,18 @@ import type { Tenant } from "./tenant-types";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Resolve the gws binary name for the current platform.
+ *
+ * On Windows, `npm install -g` creates a `.cmd` shim — Node's `execFile`
+ * doesn't auto-resolve extensions like the shell does, so we must spell
+ * it out. `GWS_BIN` env var lets the operator override (e.g. point at a
+ * `gws.exe` binary or a non-PATH location).
+ */
+const GWS_BIN =
+  process.env.GWS_BIN ||
+  (process.platform === "win32" ? "gws.cmd" : "gws");
+
 export interface GwsResult {
   success: boolean;
   data?: unknown;
@@ -51,7 +63,7 @@ export async function gws(
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync("gws", args, {
+    const { stdout, stderr } = await execFileAsync(GWS_BIN, args, {
       timeout: 30000,
       env,
     });
@@ -82,13 +94,13 @@ export async function checkGwsStatus(): Promise<{
   authenticated: boolean;
 }> {
   try {
-    const { stdout } = await execFileAsync("gws", ["--version"], {
+    const { stdout } = await execFileAsync(GWS_BIN, ["--version"], {
       timeout: 5000,
     });
     const version = stdout.trim();
 
     try {
-      await execFileAsync("gws", ["auth", "export"], { timeout: 5000 });
+      await execFileAsync(GWS_BIN, ["auth", "export"], { timeout: 5000 });
       return { installed: true, version, authenticated: true };
     } catch {
       return { installed: true, version, authenticated: false };
