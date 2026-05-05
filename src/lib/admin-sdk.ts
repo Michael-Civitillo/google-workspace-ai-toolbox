@@ -203,6 +203,53 @@ export async function listDomains(
   }));
 }
 
+export interface ListedUser {
+  primaryEmail: string;
+  fullName: string;
+  isAdmin: boolean;
+  suspended: boolean;
+  orgUnitPath: string;
+}
+
+/**
+ * Page through all users in the tenant. Caller passes a pageToken from a
+ * previous call to advance. Caps page size at 500 (Google's max for this
+ * call) and asks only for the fields we need so even very small tenants get
+ * snappy responses.
+ *
+ * The tenant-wide sharing audit walks every page; for very large tenants
+ * the caller should reuse pagination or chunk by orgUnit.
+ */
+export async function listUsers(
+  tenant: Tenant | null,
+  opts: { pageToken?: string; pageSize?: number } = {}
+): Promise<{ users: ListedUser[]; nextPageToken: string | null }> {
+  const { client } = getAdminClient(tenant);
+  const res = await client.users.list(
+    {
+      customer: "my_customer",
+      maxResults: Math.min(500, Math.max(1, opts.pageSize ?? 500)),
+      pageToken: opts.pageToken,
+      orderBy: "email",
+      projection: "basic",
+      // Trim payload — we only care about who exists and basic status.
+      fields:
+        "nextPageToken, users(primaryEmail, name/fullName, isAdmin, suspended, orgUnitPath)",
+    },
+    { timeout: ADMIN_API_TIMEOUT_MS }
+  );
+
+  const users: ListedUser[] = (res.data.users || []).map((u) => ({
+    primaryEmail: (u.primaryEmail || "").toLowerCase(),
+    fullName: u.name?.fullName || "",
+    isAdmin: u.isAdmin || false,
+    suspended: u.suspended || false,
+    orgUnitPath: u.orgUnitPath || "/",
+  }));
+
+  return { users, nextPageToken: res.data.nextPageToken || null };
+}
+
 /**
  * Change a user's primary domain. (Preflight + read-after-write — see the
  * domain-change route handler for the full safety story.)
