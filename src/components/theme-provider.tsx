@@ -6,11 +6,13 @@ type Theme = "light" | "dark";
 
 interface ThemeContextValue {
   theme: Theme;
+  mounted: boolean;
   toggle: () => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: "light",
+  mounted: false,
   toggle: () => {},
 });
 
@@ -18,23 +20,32 @@ export function useTheme() {
   return useContext(ThemeContext);
 }
 
-function readInitialTheme(): Theme {
-  if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem("theme") as Theme | null;
-  if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
-}
-
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  // Lazy initialiser reads localStorage / matchMedia exactly once at mount,
-  // avoiding the cascading render of "default light → effect setTheme(stored)".
-  const [theme, setTheme] = useState<Theme>(readInitialTheme);
+  // Start with a stable value that matches SSR. The inline script in
+  // app/layout.tsx applies the correct class to <html> before paint, so
+  // there's no flash even though React hasn't hydrated the real value yet.
+  const [theme, setTheme] = useState<Theme>("light");
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    const stored = window.localStorage.getItem("theme") as Theme | null;
+    const prefersDark = window.matchMedia(
+      "(prefers-color-scheme: dark)"
+    ).matches;
+    const initial: Theme =
+      stored === "light" || stored === "dark"
+        ? stored
+        : prefersDark
+        ? "dark"
+        : "light";
+    setTheme(initial);
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
     document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+  }, [theme, mounted]);
 
   function toggle() {
     setTheme((prev) => {
@@ -46,7 +57,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <ThemeContext.Provider value={{ theme, toggle }}>
+    <ThemeContext.Provider value={{ theme, mounted, toggle }}>
       {children}
     </ThemeContext.Provider>
   );
