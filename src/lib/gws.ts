@@ -6,6 +6,8 @@ import type { Tenant } from "./tenant-types";
 
 const execFileAsync = promisify(execFile);
 
+const IS_WINDOWS = process.platform === "win32";
+
 /**
  * Resolve the gws binary name for the current platform.
  *
@@ -15,8 +17,33 @@ const execFileAsync = promisify(execFile);
  * `gws.exe` binary or a non-PATH location).
  */
 const GWS_BIN =
-  process.env.GWS_BIN ||
-  (process.platform === "win32" ? "gws.cmd" : "gws");
+  process.env.GWS_BIN || (IS_WINDOWS ? "gws.cmd" : "gws");
+
+/**
+ * Run gws via execFile, with the Windows-specific quirks taken care of.
+ *
+ * Two Windows landmines this navigates:
+ *
+ *   1. CVE-2024-27980 (Node 18.20.2+, 20.12.2+, 21.7.3+): `child_process`
+ *      now refuses to invoke `.cmd` / `.bat` files unless `shell: true` is
+ *      set. The npm-installed `gws` shim is `gws.cmd`, so without this we
+ *      get EINVAL ("Executable invalid").
+ *
+ *   2. With `shell: true`, the args array is still escaped properly by
+ *      Node, but the *binary path itself* is not quoted. If GWS_BIN points
+ *      at a path with spaces (e.g. "C:\\Program Files\\..."), cmd.exe
+ *      splits it on whitespace. We handle that by quoting before passing.
+ */
+function runGws(
+  args: string[],
+  options: { timeout: number; env?: NodeJS.ProcessEnv }
+) {
+  if (IS_WINDOWS) {
+    const file = GWS_BIN.includes(" ") ? `"${GWS_BIN}"` : GWS_BIN;
+    return execFileAsync(file, args, { ...options, shell: true });
+  }
+  return execFileAsync(GWS_BIN, args, options);
+}
 
 export interface GwsResult {
   success: boolean;
@@ -63,7 +90,7 @@ export async function gws(
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync(GWS_BIN, args, {
+    const { stdout, stderr } = await runGws(args, {
       timeout: 30000,
       env,
     });
@@ -87,25 +114,30 @@ export async function gws(
 
 /**
  * Check if gws CLI is installed and authenticated.
+ *
+ * On failure we surface the resolved binary name and the error message so
+ * the operator can debug PATH / shim / permissions issues from the Setup
+ * page without having to spelunk through server logs.
  */
 export async function checkGwsStatus(): Promise<{
   installed: boolean;
   version?: string;
   authenticated: boolean;
+  bin?: string;
+  error?: string;
 }> {
   try {
-    const { stdout } = await execFileAsync(GWS_BIN, ["--version"], {
-      timeout: 5000,
-    });
+    const { stdout } = await runGws(["--version"], { timeout: 5000 });
     const version = stdout.trim();
 
     try {
-      await execFileAsync(GWS_BIN, ["auth", "export"], { timeout: 5000 });
-      return { installed: true, version, authenticated: true };
+      await runGws(["auth", "export"], { timeout: 5000 });
+      return { installed: true, version, authenticated: true, bin: GWS_BIN };
     } catch {
-      return { installed: true, version, authenticated: false };
+      return { installed: true, version, authenticated: false, bin: GWS_BIN };
     }
-  } catch {
-    return { installed: false, authenticated: false };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    return { installed: false, authenticated: false, bin: GWS_BIN, error };
   }
 }
