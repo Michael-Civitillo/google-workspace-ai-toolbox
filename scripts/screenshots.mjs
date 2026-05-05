@@ -22,30 +22,46 @@ const pages = [
   { name: "sharing-audit", path: "/sharing-audit", delay: 800 },
   { name: "tenants", path: "/tenants", delay: 800 },
   { name: "setup", path: "/setup", delay: 1500 },
-  { name: "login", path: "/login", delay: 500, skipLogin: true },
+  { name: "login", path: "/login", delay: 800, skipLogin: true },
 ];
 
-async function captureForTheme(page, theme) {
-  // Set the persisted theme so the inline anti-flash script in layout.tsx
-  // reads it on first paint and doesn't briefly render the wrong mode.
-  await page.evaluateOnNewDocument((t) => {
-    try { localStorage.setItem("theme", t); } catch {}
+async function login(page) {
+  await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle0" });
+  await page.waitForSelector("input[type='password']", { timeout: 15000 });
+  await page.type("input[type='password']", PASSWORD);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: "networkidle0" }),
+    page.click("button[type='submit']"),
+  ]);
+}
+
+async function setTheme(page, theme) {
+  // Drive the in-app toggle by writing localStorage and toggling the html
+  // class directly. Reload so the inline anti-flash script picks up the new
+  // value on first paint.
+  await page.evaluate((t) => {
+    localStorage.setItem("theme", t);
+    document.documentElement.classList.toggle("dark", t === "dark");
   }, theme);
+}
+
+async function captureForTheme(browser, theme) {
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1400, height: 900 });
 
   if (PASSWORD) {
     console.log(`[${theme}] Logging in...`);
-    await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle0" });
-    await page.type("input[type='password']", PASSWORD);
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle0" }),
-      page.click("button[type='submit']"),
-    ]);
+    await login(page);
   }
+
+  await setTheme(page, theme);
 
   const suffix = theme === "dark" ? "-dark" : "";
   for (const { name, path, delay } of pages) {
     console.log(`[${theme}] Capturing ${name}...`);
     await page.goto(`${BASE_URL}${path}`, { waitUntil: "networkidle0" });
+    // Re-apply theme after navigation in case localStorage was cleared.
+    await setTheme(page, theme);
     await new Promise((r) => setTimeout(r, delay));
     await page.addStyleTag({
       content: `
@@ -60,13 +76,13 @@ async function captureForTheme(page, theme) {
       fullPage: false,
     });
   }
+
+  await page.close();
 }
 
 async function run() {
   await mkdir(screenshotsDir, { recursive: true });
 
-  // Clean up the orphaned screenshots from deleted pages so they don't
-  // linger in the docs folder and confuse readers.
   for (const stale of ["ai-command.png", "bulk-operations.png"]) {
     try { await unlink(join(screenshotsDir, stale)); } catch {}
   }
@@ -77,11 +93,7 @@ async function run() {
   });
 
   for (const theme of THEMES) {
-    const ctx = await browser.createBrowserContext();
-    const page = await ctx.newPage();
-    await page.setViewport({ width: 1400, height: 900 });
-    await captureForTheme(page, theme);
-    await ctx.close();
+    await captureForTheme(browser, theme);
   }
 
   await browser.close();
