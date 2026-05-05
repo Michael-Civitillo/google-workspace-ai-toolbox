@@ -1,0 +1,279 @@
+import { NextRequest, NextResponse } from "next/server";
+import { gws, tenantFromRequest } from "@/lib/gws";
+import {
+  revokeAllOAuthTokens,
+  signOutAllSessions,
+  suspendUser,
+  transferDrive,
+} from "@/lib/admin-sdk";
+import {
+  requireEmail,
+  ValidationError,
+  emailDomain,
+} from "@/lib/validate";
+import { audit } from "@/lib/audit";
+
+const MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * Run a single offboarding step. The client orchestrates the sequence and
+ * shows per-step status; running them server-side one-at-a-time means we
+ * keep the audit trail granular and a partial failure halfway through
+ * leaves the rest of the steps explicit and recoverable.
+ *
+ * Body: {
+ *   step: "vacation" | "forward" | "calendar" | "drive" | "revokeTokens"
+ *       | "signOut" | "suspend",
+ *   user: string,                         // user being offboarded
+ *   successor?: string,                   // for forward/calendar/drive
+ *   vacationSubject?: string,             // for vacation
+ *   vacationMessage?: string,             // for vacation
+ *   calendarRemoveSourceAccess?: boolean, // for calendar (always false here)
+ * }
+ */
+export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+  }
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = await request.json();
+  } catch {}
+
+  let tenant = null;
+  const step = String(body.step || "");
+  try {
+    tenant = tenantFromRequest(request, body);
+    const user = requireEmail(body.user, "user");
+
+    const userDomain = emailDomain(user);
+    const auditBase = {
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+    };
+
+    switch (step) {
+      case "vacation": {
+        const subject = String(
+          body.vacationSubject ?? "Out of office"
+        ).slice(0, 200);
+        const message = String(
+          body.vacationMessage ??
+            "I'm no longer with the company. Please contact our team for any questions."
+        ).slice(0, 5000);
+        const result = await gws(
+          [
+            "gmail",
+            "users",
+            "settings",
+            "updateVacation",
+            `--userId=${user}`,
+            `--enableAutoReply=true`,
+            `--responseSubject=${subject}`,
+            `--responseBodyPlainText=${message}`,
+            `--restrictToContacts=false`,
+            `--restrictToDomain=false`,
+          ],
+          tenant
+        );
+        audit({
+          action: "offboarding.vacation",
+          ...auditBase,
+          params: { user, subject },
+          outcome: result.success ? "success" : "error",
+          error: result.error,
+        });
+        if (!result.success) {
+          return NextResponse.json({
+            success: false,
+            error: result.error || "Failed to enable vacation responder",
+          });
+        }
+        return NextResponse.json({
+          success: true,
+          data: { message: "Vacation responder enabled" },
+        });
+      }
+
+      case "forward": {
+        const successor = requireEmail(body.successor, "successor");
+        if (successor.toLowerCase() === user.toLowerCase()) {
+          throw new ValidationError("successor must differ from user");
+        }
+        const create = await gws(
+          [
+            "gmail",
+            "users",
+            "settings",
+            "forwardingAddresses",
+            "create",
+            `--userId=${user}`,
+            `--forwardingEmail=${successor}`,
+          ],
+          tenant
+        );
+        if (!create.success) {
+          audit({
+            action: "offboarding.forward.create",
+            ...auditBase,
+            params: { user, successor },
+            outcome: "error",
+            error: create.error,
+          });
+          return NextResponse.json({
+            success: false,
+            error: `Failed to create forwarding address: ${create.error}`,
+          });
+        }
+        const enable = await gws(
+          [
+            "gmail",
+            "users",
+            "settings",
+            "updateAutoForwarding",
+            `--userId=${user}`,
+            `--enabled=true`,
+            `--emailAddress=${successor}`,
+            `--disposition=archive`,
+          ],
+          tenant
+        );
+        audit({
+          action: "offboarding.forward",
+          ...auditBase,
+          params: { user, successor },
+          outcome: enable.success ? "success" : "error",
+          error: enable.error,
+        });
+        return NextResponse.json({
+          success: enable.success,
+          data: { successor, disposition: "archive" },
+          error: enable.success ? undefined : enable.error,
+        });
+      }
+
+      case "calendar": {
+        const successor = requireEmail(body.successor, "successor");
+        if (successor.toLowerCase() === user.toLowerCase()) {
+          throw new ValidationError("successor must differ from user");
+        }
+        // Grant ownership only — never auto-remove the source user's access
+        // during offboarding. Suspending the account already cuts them off;
+        // dropping the ACL on a primary calendar would be rejected anyway.
+        const grant = await gws(
+          [
+            "calendar",
+            "acl",
+            "insert",
+            `--calendarId=${user}`,
+            `--role=owner`,
+            `--scope.type=user`,
+            `--scope.value=${successor}`,
+          ],
+          tenant
+        );
+        audit({
+          action: "offboarding.calendar",
+          ...auditBase,
+          params: { user, successor },
+          outcome: grant.success ? "success" : "error",
+          error: grant.error,
+        });
+        return NextResponse.json({
+          success: grant.success,
+          data: { successor, role: "owner" },
+          error: grant.success ? undefined : grant.error,
+        });
+      }
+
+      case "drive": {
+        const successor = requireEmail(body.successor, "successor");
+        if (successor.toLowerCase() === user.toLowerCase()) {
+          throw new ValidationError("successor must differ from user");
+        }
+        const result = await transferDrive(tenant, user, successor);
+        audit({
+          action: "offboarding.drive",
+          ...auditBase,
+          params: { user, successor, transferId: result.transferId },
+          outcome: "success",
+        });
+        return NextResponse.json({
+          success: true,
+          data: {
+            successor,
+            transferId: result.transferId,
+            note: "Drive transfer accepted by Google. Files move asynchronously over the next minutes/hours depending on volume.",
+          },
+        });
+      }
+
+      case "revokeTokens": {
+        const result = await revokeAllOAuthTokens(tenant, user);
+        audit({
+          action: "offboarding.revokeTokens",
+          ...auditBase,
+          params: { user, ...result },
+          outcome: result.failed === 0 ? "success" : "error",
+          error: result.failed > 0
+            ? `${result.failed} token(s) failed to revoke`
+            : undefined,
+        });
+        return NextResponse.json({
+          success: result.failed === 0,
+          data: result,
+          error: result.failed > 0
+            ? `${result.failed} of ${result.revoked + result.failed} tokens failed to revoke`
+            : undefined,
+        });
+      }
+
+      case "signOut": {
+        await signOutAllSessions(tenant, user);
+        audit({
+          action: "offboarding.signOut",
+          ...auditBase,
+          params: { user },
+          outcome: "success",
+        });
+        return NextResponse.json({
+          success: true,
+          data: { message: "All sessions signed out" },
+        });
+      }
+
+      case "suspend": {
+        await suspendUser(tenant, user);
+        audit({
+          action: "offboarding.suspend",
+          ...auditBase,
+          params: { user },
+          outcome: "success",
+        });
+        return NextResponse.json({
+          success: true,
+          data: { message: "User suspended" },
+        });
+      }
+
+      default:
+        throw new ValidationError(`Unknown offboarding step: "${step}"`);
+    }
+    // Unreachable, but keeps TS happy if cases are added without returns.
+    void userDomain;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Step failed";
+    audit({
+      action: `offboarding.${step || "unknown"}`,
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: body,
+      outcome: "error",
+      error: message,
+    });
+    const status = e instanceof ValidationError ? 400 : 500;
+    return NextResponse.json({ success: false, error: message }, { status });
+  }
+}

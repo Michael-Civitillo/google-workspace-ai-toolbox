@@ -206,7 +206,23 @@ export default function Setup() {
               <ul className="ml-8 space-y-1 text-sm text-muted-foreground list-disc list-inside">
                 <li>Gmail API</li>
                 <li>Google Calendar API</li>
-                <li>Admin SDK API (for Domain Change feature)</li>
+                <li>Admin SDK API (Domain Change, Offboarding)</li>
+                <li>Admin Data Transfer API (Offboarding — Drive ownership transfer)</li>
+                <li>Google Drive API (Sharing Audit)</li>
+              </ul>
+              <p className="text-sm text-muted-foreground ml-8 mt-2">
+                And authorise these scopes for the service account in the Admin
+                Console under <em>Domain-wide Delegation</em>:
+              </p>
+              <ul className="ml-8 space-y-1 text-xs text-muted-foreground list-disc list-inside font-mono">
+                <li>https://www.googleapis.com/auth/gmail.settings.sharing</li>
+                <li>https://www.googleapis.com/auth/gmail.settings.basic</li>
+                <li>https://www.googleapis.com/auth/calendar</li>
+                <li>https://www.googleapis.com/auth/admin.directory.user</li>
+                <li>https://www.googleapis.com/auth/admin.directory.user.security</li>
+                <li>https://www.googleapis.com/auth/admin.directory.domain.readonly</li>
+                <li>https://www.googleapis.com/auth/admin.datatransfer</li>
+                <li>https://www.googleapis.com/auth/drive.metadata.readonly</li>
               </ul>
             </div>
 

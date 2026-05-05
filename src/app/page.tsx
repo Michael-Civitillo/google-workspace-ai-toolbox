@@ -15,6 +15,8 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  UserMinus,
+  Share2,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -64,6 +66,22 @@ const tasks = [
     icon: Globe,
     color: "text-rose-600",
     bg: "bg-rose-50",
+  },
+  {
+    title: "Offboarding",
+    description: "Run the full offboarding sequence in one go — vacation, forwarding, transfers, suspend",
+    href: "/offboarding",
+    icon: UserMinus,
+    color: "text-orange-600",
+    bg: "bg-orange-50",
+  },
+  {
+    title: "Sharing Audit",
+    description: "Find Drive files a user has shared outside your tenant",
+    href: "/sharing-audit",
+    icon: Share2,
+    color: "text-cyan-600",
+    bg: "bg-cyan-50",
   },
 ];
 
