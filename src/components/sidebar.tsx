@@ -133,19 +133,8 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="p-3 border-t border-border space-y-1">
+      <div className="p-3 border-t border-border">
         <LogoutButton />
-        <p className="text-xs text-muted-foreground px-3 pb-1">
-          Powered by{" "}
-          <a
-            href="https://github.com/googleworkspace/cli"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline hover:text-foreground"
-          >
-            gws CLI
-          </a>
-        </p>
       </div>
     </aside>
   );
