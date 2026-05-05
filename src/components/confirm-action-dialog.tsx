@@ -140,7 +140,7 @@ export function ConfirmActionDialog({
                   className={cn(
                     "rounded-md border px-3 py-2 text-xs",
                     row.emphasis
-                      ? "border-red-200 bg-red-50"
+                      ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
                       : "bg-background"
                   )}
                 >
@@ -151,7 +151,7 @@ export function ConfirmActionDialog({
                       <code className="font-mono">{row.before}</code>
                     </p>
                   )}
-                  <p className={row.emphasis ? "text-red-800" : ""}>
+                  <p className={row.emphasis ? "text-red-800 dark:text-red-300" : ""}>
                     <span className="opacity-60">to</span>{" "}
                     <code className="font-mono">{row.after}</code>
                   </p>
@@ -161,7 +161,7 @@ export function ConfirmActionDialog({
           </div>
 
           {warnings && (
-            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            <div className="rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-800 dark:text-amber-300">
               {warnings}
             </div>
           )}

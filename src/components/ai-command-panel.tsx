@@ -151,13 +151,13 @@ export function AICommandPanel() {
         <Alert
           className={`mb-4 ${
             message.type === "error"
-              ? "border-red-200 bg-red-50"
-              : "border-emerald-200 bg-emerald-50"
+              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
+              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
           }`}
         >
           <AlertDescription
             className={
-              message.type === "error" ? "text-red-800" : "text-emerald-800"
+              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
             }
           >
             {message.text}
@@ -226,7 +226,7 @@ export function AICommandPanel() {
           <CardContent className="space-y-4">
             <div className="p-4 rounded-lg bg-muted/50 space-y-3">
               <div className="flex items-center gap-2">
-                <Badge className="bg-violet-100 text-violet-700 border-violet-200">
+                <Badge className="bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50">
                   {parsed.actionDetails?.name || parsed.action}
                 </Badge>
               </div>
@@ -252,9 +252,9 @@ export function AICommandPanel() {
             </div>
 
             {!parsed.validParams && (
-              <Alert className="border-red-200 bg-red-50">
+              <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
                 <XCircle className="h-4 w-4 text-red-600" />
-                <AlertDescription className="text-red-800 text-sm">
+                <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
                   Parameters didn&apos;t pass validation: {parsed.validationError ?? "unknown error"}.
                   Refusing to execute. Rephrase your command and try again.
                 </AlertDescription>
@@ -262,9 +262,9 @@ export function AICommandPanel() {
             )}
 
             {isDestructive && (
-              <Alert className="border-amber-200 bg-amber-50">
+              <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
                 <AlertTriangle className="h-4 w-4 text-amber-600" />
-                <AlertDescription className="text-amber-800 text-sm">
+                <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
                   This is a destructive action ({parsed.action}). Run it from
                   its dedicated page so you get the proper typed-confirmation
                   safeguards.
@@ -273,9 +273,9 @@ export function AICommandPanel() {
             )}
 
             {parsed.validParams && parsed.confidence < 0.7 && !isDestructive && (
-              <Alert className="border-amber-200 bg-amber-50">
+              <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
                 <AlertTriangle className="h-4 w-4 text-amber-600" />
-                <AlertDescription className="text-amber-800 text-sm">
+                <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
                   The AI isn&apos;t very confident about this interpretation.
                   Double-check the parameters before running.
                 </AlertDescription>

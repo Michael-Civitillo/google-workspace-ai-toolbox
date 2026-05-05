@@ -122,13 +122,13 @@ export default function Audit() {
         <Alert
           className={`mb-6 ${
             message.type === "error"
-              ? "border-red-200 bg-red-50"
-              : "border-emerald-200 bg-emerald-50"
+              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
+              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
           }`}
         >
           <AlertDescription
             className={
-              message.type === "error" ? "text-red-800" : "text-emerald-800"
+              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
             }
           >
             {message.text}

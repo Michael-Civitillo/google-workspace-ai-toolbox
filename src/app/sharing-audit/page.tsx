@@ -70,9 +70,9 @@ interface PerUserOutcome {
 }
 
 const ROLE_BADGE: Record<string, string> = {
-  owner: "bg-violet-100 text-violet-700 border-violet-200",
-  organizer: "bg-violet-100 text-violet-700 border-violet-200",
-  fileOrganizer: "bg-violet-100 text-violet-700 border-violet-200",
+  owner: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
+  organizer: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
+  fileOrganizer: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
   writer: "bg-amber-100 text-amber-700 border-amber-200",
   commenter: "bg-blue-100 text-blue-700 border-blue-200",
   reader: "bg-zinc-100 text-zinc-700 border-zinc-200",
@@ -336,8 +336,8 @@ export default function SharingAudit() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 bg-red-50">
-          <AlertDescription className="text-red-800">{error}</AlertDescription>
+        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
+          <AlertDescription className="text-red-800 dark:text-red-300">{error}</AlertDescription>
         </Alert>
       )}
 
@@ -512,7 +512,7 @@ export default function SharingAudit() {
                       {p.status === "done" && (p.files?.length ?? 0) > 0 && (
                         <Badge
                           variant="outline"
-                          className="bg-amber-50 text-amber-700 border-amber-200 text-xs shrink-0"
+                          className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs shrink-0"
                         >
                           {p.files?.length} flagged
                         </Badge>
@@ -573,9 +573,9 @@ export default function SharingAudit() {
             </CardHeader>
             <CardContent>
               {singleResult.truncated && (
-                <Alert className="mb-4 border-amber-200 bg-amber-50">
+                <Alert className="mb-4 border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
                   <AlertTriangle className="h-4 w-4 text-amber-600" />
-                  <AlertDescription className="text-amber-800 text-sm">
+                  <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
                     Hit the 1,000-file cap. There may be additional
                     externally-shared files that weren&apos;t scanned.
                   </AlertDescription>
@@ -629,8 +629,8 @@ function FileRow({ file }: { file: ExternalFile }) {
             variant="outline"
             className={`${
               p.type === "anyone"
-                ? "bg-red-50 text-red-700 border-red-200"
-                : "bg-amber-50 text-amber-700 border-amber-200"
+                ? "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
+                : "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50"
             } text-xs flex items-center gap-1`}
           >
             {permissionIcon(p.type)}

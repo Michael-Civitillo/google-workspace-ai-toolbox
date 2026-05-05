@@ -127,13 +127,13 @@ export default function EmailTransfer() {
         <Alert
           className={`mb-6 ${
             message.type === "error"
-              ? "border-red-200 bg-red-50"
-              : "border-emerald-200 bg-emerald-50"
+              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
+              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
           }`}
         >
           <AlertDescription
             className={
-              message.type === "error" ? "text-red-800" : "text-emerald-800"
+              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
             }
           >
             {message.text}
@@ -200,9 +200,9 @@ export default function EmailTransfer() {
             </div>
 
             {isExternal && (
-              <Alert className="border-red-200 bg-red-50">
+              <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
                 <AlertTriangle className="h-4 w-4 text-red-600" />
-                <AlertDescription className="text-red-800 text-sm">
+                <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
                   <strong>{targetDomain}</strong> is NOT one of your tenant&apos;s
                   verified domains. Forwarding email outside your tenant can
                   leak data.
@@ -210,9 +210,9 @@ export default function EmailTransfer() {
               </Alert>
             )}
 
-            <Alert className="border-blue-200 bg-blue-50">
+            <Alert className="border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/40">
               <Info className="h-4 w-4 text-blue-600" />
-              <AlertDescription className="text-blue-800 text-sm">
+              <AlertDescription className="text-blue-800 dark:text-blue-300 text-sm">
                 This sets up forwarding for <strong>new</strong> incoming email
                 only. Existing emails are not transferred. For existing mail
                 migration, use Google&apos;s Data Migration Service in the Admin

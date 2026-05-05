@@ -205,9 +205,9 @@ export default function TenantsPage() {
 
       <div className="max-w-3xl space-y-6">
         {error && (
-          <Alert className="border-red-200 bg-red-50">
+          <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
             <AlertCircle className="h-4 w-4 text-red-600" />
-            <AlertDescription className="text-red-800 text-sm">
+            <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
               {error}
             </AlertDescription>
           </Alert>

@@ -71,8 +71,8 @@ function LoginInner() {
         <CardContent>
           <form onSubmit={submit} className="space-y-4">
             {error && (
-              <Alert className="border-red-200 bg-red-50">
-                <AlertDescription className="text-red-800 text-sm">
+              <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
+                <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
                   {error}
                 </AlertDescription>
               </Alert>
