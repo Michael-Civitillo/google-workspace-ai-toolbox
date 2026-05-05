@@ -23,7 +23,8 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { CalendarDays, Loader2, Trash2, UserPlus, Search } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface AclRule {
   id: string;
@@ -49,6 +50,7 @@ const roleBadgeColors: Record<string, string> = {
 };
 
 export default function CalendarDelegation() {
+  const { tenant, id: tenantId } = useCurrentTenant();
   const [calendarId, setCalendarId] = useState("");
   const [delegateEmail, setDelegateEmail] = useState("");
   const [role, setRole] = useState("reader");
@@ -56,6 +58,8 @@ export default function CalendarDelegation() {
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [confirmAddOpen, setConfirmAddOpen] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<AclRule | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -93,11 +97,15 @@ export default function CalendarDelegation() {
     setMessage(null);
 
     try {
-      const res = await tfetch("/api/gws/calendar-delegation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ calendarId, delegateEmail, role }),
-      });
+      const res = await tfetch(
+        "/api/gws/calendar-delegation",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ calendarId, delegateEmail, role }),
+        },
+        tenantId
+      );
       const result = await res.json();
 
       if (result.success) {
@@ -106,6 +114,7 @@ export default function CalendarDelegation() {
           text: `Granted ${role} access to ${delegateEmail}`,
         });
         setDelegateEmail("");
+        setConfirmAddOpen(false);
         await listAcl();
       } else {
         setMessage({ type: "error", text: result.error || "Failed to add access" });
@@ -122,15 +131,20 @@ export default function CalendarDelegation() {
     setMessage(null);
 
     try {
-      const res = await tfetch("/api/gws/calendar-delegation", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ calendarId, ruleId }),
-      });
+      const res = await tfetch(
+        "/api/gws/calendar-delegation",
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ calendarId, ruleId }),
+        },
+        tenantId
+      );
       const result = await res.json();
 
       if (result.success) {
         setMessage({ type: "success", text: "Access removed successfully" });
+        setConfirmRemove(null);
         await listAcl();
       } else {
         setMessage({ type: "error", text: result.error || "Failed to remove access" });
@@ -234,7 +248,10 @@ export default function CalendarDelegation() {
 
             <Button
               className="w-full"
-              onClick={addAcl}
+              onClick={() => {
+                setMessage(null);
+                setConfirmAddOpen(true);
+              }}
               disabled={!calendarId || !delegateEmail || adding}
             >
               {adding ? (
@@ -242,7 +259,7 @@ export default function CalendarDelegation() {
               ) : (
                 <UserPlus className="mr-2 h-4 w-4" />
               )}
-              Grant Access
+              Review &amp; Grant Access
             </Button>
           </CardContent>
         </Card>
@@ -292,7 +309,10 @@ export default function CalendarDelegation() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => removeAcl(rule.id)}
+                        onClick={() => {
+                          setMessage(null);
+                          setConfirmRemove(rule);
+                        }}
                         disabled={removing === rule.id}
                       >
                         {removing === rule.id ? (
@@ -309,6 +329,69 @@ export default function CalendarDelegation() {
           </CardContent>
         </Card>
       </div>
+
+      <ConfirmActionDialog
+        open={confirmAddOpen}
+        onOpenChange={(o) => !adding && setConfirmAddOpen(o)}
+        title="Grant calendar access"
+        summary={`Give ${delegateEmail || "—"} ${role} access to ${calendarId || "—"}'s calendar.`}
+        tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+        severity={role === "owner" ? "high" : "medium"}
+        confirmPhrase={role === "owner" ? delegateEmail : undefined}
+        confirmLabel={role === "owner" ? "Grant ownership" : "Grant access"}
+        busy={adding}
+        changes={[
+          { label: "Calendar", after: calendarId },
+          { label: "Grantee", after: delegateEmail },
+          {
+            label: "Role",
+            after: `${role} — ${roleDescriptions[role] ?? ""}`,
+            emphasis: role === "owner" || role === "writer",
+          },
+        ]}
+        warnings={
+          role === "owner" ? (
+            <>
+              <strong>Owner</strong> can re-share, transfer, and delete the
+              calendar. Only grant this if {delegateEmail} should have full
+              control.
+            </>
+          ) : null
+        }
+        onConfirm={addAcl}
+      />
+
+      <ConfirmActionDialog
+        open={!!confirmRemove}
+        onOpenChange={(o) => !removing && !o && setConfirmRemove(null)}
+        title="Remove calendar access"
+        summary={`Revoke ${confirmRemove?.scope?.value ?? ""}'s ${confirmRemove?.role ?? ""} access to ${calendarId}.`}
+        tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+        severity={confirmRemove?.role === "owner" ? "high" : "medium"}
+        confirmPhrase={confirmRemove?.role === "owner" ? confirmRemove?.scope?.value : undefined}
+        confirmLabel="Remove access"
+        busy={!!removing}
+        changes={[
+          { label: "Calendar", after: calendarId },
+          {
+            label: "Removing",
+            before: `${confirmRemove?.scope?.value ?? ""} (${confirmRemove?.role ?? ""})`,
+            after: "no longer has access",
+            emphasis: true,
+          },
+        ]}
+        warnings={
+          confirmRemove?.role === "owner" ? (
+            <>
+              Removing an owner from a secondary calendar with no other owners
+              can leave the calendar orphaned. Make sure another owner exists.
+            </>
+          ) : null
+        }
+        onConfirm={() => {
+          if (confirmRemove?.id) void removeAcl(confirmRemove.id);
+        }}
+      />
     </>
   );
 }

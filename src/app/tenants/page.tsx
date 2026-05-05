@@ -32,6 +32,7 @@ import {
   type Tenant,
   type TenantColor,
 } from "@/lib/tenants";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface TenantsState {
   tenants: Tenant[];
@@ -67,6 +68,7 @@ export default function TenantsPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Tenant | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -155,16 +157,11 @@ export default function TenantsPage() {
   }
 
   async function handleDelete(id: string) {
-    if (
-      !confirm(
-        "Delete this tenant? This only removes it from the toolbox — no changes are made to your Google Workspace."
-      )
-    )
-      return;
     setSaving(true);
     try {
       const res = await fetch(`/api/tenants/${id}`, { method: "DELETE" });
       if (res.ok) {
+        setDeleteTarget(null);
         load();
       } else {
         const data = await res.json();
@@ -349,7 +346,7 @@ export default function TenantsPage() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleDelete(tenant.id)}
+                            onClick={() => setDeleteTarget(tenant)}
                             className="h-8 w-8 p-0 text-red-500 hover:text-red-600 hover:bg-red-50"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -417,6 +414,26 @@ export default function TenantsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <ConfirmActionDialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !saving && !o && setDeleteTarget(null)}
+        title="Delete tenant"
+        summary="This only removes the tenant from the toolbox. It does NOT modify Google Workspace."
+        tenant={null}
+        severity="medium"
+        confirmLabel="Delete tenant"
+        busy={saving}
+        changes={[
+          { label: "Tenant name", after: deleteTarget?.name ?? "" },
+          { label: "Admin email", after: deleteTarget?.adminEmail ?? "" },
+          { label: "Credentials path", after: deleteTarget?.credentialsFile ?? "" },
+          { label: "Affects Google Workspace?", after: "No — config-only delete" },
+        ]}
+        onConfirm={() => {
+          if (deleteTarget) void handleDelete(deleteTarget.id);
+        }}
+      />
     </>
   );
 }

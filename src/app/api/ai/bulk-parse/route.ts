@@ -25,7 +25,14 @@ const BulkOperationSchema = z.object({
     .describe("Brief summary of all operations that will be performed"),
 });
 
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_TEXT_CHARS = 32_000;
+
 export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+  }
   let body: Record<string, unknown> = {};
   try {
     body = await request.json();
@@ -37,6 +44,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: "text is required" },
         { status: 400 }
+      );
+    }
+    if (text.length > MAX_TEXT_CHARS) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `text too long (max ${MAX_TEXT_CHARS} chars)`,
+        },
+        { status: 413 }
       );
     }
 

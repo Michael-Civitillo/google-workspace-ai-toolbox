@@ -1,7 +1,15 @@
 import { appendFileSync } from "fs";
 import path from "path";
 
-const LOG_PATH = path.join(process.cwd(), "audit.log");
+/**
+ * Resolve the audit log path once at module load. We prefer an explicit env
+ * var so a systemd-managed deployment never writes audit entries somewhere
+ * unexpected if cwd changes (e.g. service restart in /). Falls back to
+ * <cwd>/audit.log for local dev.
+ */
+const LOG_PATH = path.resolve(
+  process.env.AUDIT_LOG_PATH || path.join(process.cwd(), "audit.log")
+);
 
 export interface AuditEntry {
   /** Action identifier (e.g. "domain_change", "calendar_transfer.remove") */

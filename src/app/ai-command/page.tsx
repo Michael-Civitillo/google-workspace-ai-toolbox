@@ -23,7 +23,8 @@ import {
   Play,
   XCircle,
 } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface ParsedAction {
   action: string;
@@ -47,11 +48,18 @@ const DESTRUCTIVE_ACTIONS = new Set([
   "calendar_delegation_remove",
 ]);
 
+const READ_ONLY_ACTIONS = new Set([
+  "email_delegation_list",
+  "calendar_delegation_list",
+]);
+
 export default function AICommand() {
+  const { tenant, id: tenantId } = useCurrentTenant();
   const [command, setCommand] = useState("");
   const [parsed, setParsed] = useState<ParsedAction | null>(null);
   const [parsing, setParsing] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -108,7 +116,7 @@ export default function AICommand() {
         fetchOptions.body = JSON.stringify(parsed.params);
       }
 
-      const res = await tfetch(url, fetchOptions);
+      const res = await tfetch(url, fetchOptions, tenantId);
       const result = await res.json();
 
       if (result.success) {
@@ -118,6 +126,7 @@ export default function AICommand() {
         });
         setParsed(null);
         setCommand("");
+        setConfirmOpen(false);
       } else {
         setMessage({
           type: "error",
@@ -283,7 +292,13 @@ export default function AICommand() {
                 <Button
                   className="flex-1"
                   size="lg"
-                  onClick={executeAction}
+                  onClick={() => {
+                    if (parsed && READ_ONLY_ACTIONS.has(parsed.action)) {
+                      void executeAction();
+                    } else {
+                      setConfirmOpen(true);
+                    }
+                  }}
                   disabled={executing || !canRun}
                 >
                   {executing ? (
@@ -291,7 +306,9 @@ export default function AICommand() {
                   ) : (
                     <Play className="mr-2 h-4 w-4" />
                   )}
-                  Run It
+                  {parsed && READ_ONLY_ACTIONS.has(parsed.action)
+                    ? "Run It"
+                    : "Review & Run"}
                 </Button>
                 <Button
                   variant="outline"
@@ -327,6 +344,42 @@ export default function AICommand() {
           </Card>
         )}
       </div>
+
+      {parsed && parsed.actionDetails && parsed.validParams && !isDestructive && (
+        <ConfirmActionDialog
+          open={confirmOpen}
+          onOpenChange={(o) => !executing && setConfirmOpen(o)}
+          title={`Run: ${parsed.actionDetails.name}`}
+          summary={parsed.explanation}
+          tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+          severity={parsed.confidence < 0.7 ? "high" : "medium"}
+          confirmPhrase={parsed.confidence < 0.7 ? "RUN" : undefined}
+          confirmLabel="Run action"
+          busy={executing}
+          changes={[
+            { label: "Action", after: parsed.actionDetails.name },
+            ...Object.entries(parsed.params).map(([k, v]) => ({
+              label: k,
+              after: String(v),
+            })),
+            {
+              label: "AI confidence",
+              after: `${Math.round(parsed.confidence * 100)}%`,
+              emphasis: parsed.confidence < 0.7,
+            },
+          ]}
+          warnings={
+            parsed.confidence < 0.7 ? (
+              <>
+                The AI&apos;s confidence is low. Re-read every parameter before
+                confirming — a misparsed value could grant access to the wrong
+                user.
+              </>
+            ) : null
+          }
+          onConfirm={executeAction}
+        />
+      )}
     </>
   );
 }
