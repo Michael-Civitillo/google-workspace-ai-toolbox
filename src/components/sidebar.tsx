@@ -14,6 +14,8 @@ import {
   Shield,
   Settings,
   Building2,
+  UserMinus,
+  Share2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -50,6 +52,16 @@ const navigation = [
     name: "Domain Change",
     href: "/domain-change",
     icon: Globe,
+  },
+  {
+    name: "Offboarding",
+    href: "/offboarding",
+    icon: UserMinus,
+  },
+  {
+    name: "Sharing Audit",
+    href: "/sharing-audit",
+    icon: Share2,
   },
   {
     name: "AI Command",

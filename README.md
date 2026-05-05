@@ -22,6 +22,8 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. Also great for offboarding.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Handy when you've got 50 domains and someone needs to move.
+- 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
+- 🔍 **External Sharing Audit** — Per-user Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. CSV export for remediation.
 - 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Nothing carries over between tenants.
 
 ### AI-Powered (Gemini)
@@ -89,8 +91,11 @@ The app runs `gws` commands on the server side. For real admin work, you'll want
    - `https://www.googleapis.com/auth/gmail.settings.sharing`
    - `https://www.googleapis.com/auth/gmail.settings.basic`
    - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/admin.directory.user` (for Domain Change)
-   - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (for Domain Change)
+   - `https://www.googleapis.com/auth/admin.directory.user` (Domain Change, Offboarding)
+   - `https://www.googleapis.com/auth/admin.directory.user.security` (Offboarding — OAuth token revoke, sign-out)
+   - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (Domain Change, Sharing Audit)
+   - `https://www.googleapis.com/auth/admin.datatransfer` (Offboarding — Drive ownership transfer)
+   - `https://www.googleapis.com/auth/drive.metadata.readonly` (Sharing Audit)
 4. Set an admin email for impersonation (Domain Change needs this):
    ```bash
    export GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@yourdomain.com
