@@ -46,14 +46,34 @@ function writeStoreAtomic(store: TenantStore): void {
     encoding: "utf-8",
     mode: 0o600,
   });
-  try {
-    renameSync(STORE_TMP_PATH, STORE_PATH);
-  } catch (e) {
+
+  // On Windows the rename can transiently fail with EPERM/EBUSY if
+  // antivirus / Windows Search Indexer briefly holds the destination
+  // file open. Retry a couple of times with tiny backoffs before giving up.
+  const MAX_ATTEMPTS = 5;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      if (existsSync(STORE_TMP_PATH)) unlinkSync(STORE_TMP_PATH);
-    } catch {}
-    throw e;
+      renameSync(STORE_TMP_PATH, STORE_PATH);
+      return;
+    } catch (e) {
+      lastError = e;
+      const code = (e as NodeJS.ErrnoException)?.code;
+      const transient =
+        code === "EPERM" || code === "EBUSY" || code === "EACCES";
+      if (!transient || attempt === MAX_ATTEMPTS) break;
+      // Tiny synchronous backoff. We're inside withLock() so this only
+      // blocks one request at a time, never the event loop forever.
+      const until = Date.now() + 25 * attempt;
+      while (Date.now() < until) {
+        // busy-wait — short enough not to matter, can't await inside sync write
+      }
+    }
   }
+  try {
+    if (existsSync(STORE_TMP_PATH)) unlinkSync(STORE_TMP_PATH);
+  } catch {}
+  throw lastError;
 }
 
 async function withLock<T>(fn: () => T): Promise<T> {
