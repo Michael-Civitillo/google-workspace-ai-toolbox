@@ -14,6 +14,7 @@ import {
   Building2,
   UserMinus,
   Share2,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -24,6 +25,11 @@ const navigation = [
     name: "Dashboard",
     href: "/",
     icon: LayoutDashboard,
+  },
+  {
+    name: "Get Started",
+    href: "/onboarding",
+    icon: Sparkles,
   },
   {
     name: "Email Delegation",

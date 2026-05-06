@@ -253,14 +253,27 @@ export default function TenantsPage() {
                 <p className="text-sm text-muted-foreground">
                   No tenants configured yet.
                 </p>
-                <Button
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => setAdding(true)}
-                >
-                  <Plus className="h-4 w-4 mr-1.5" />
-                  Add your first tenant
-                </Button>
+                <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+                  First time here? The guided walkthrough will take you through the CLI install, service account setup, and adding your tenant.
+                </p>
+                <div className="mt-4 flex items-center justify-center gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      window.location.href = "/onboarding";
+                    }}
+                  >
+                    <Plus className="h-4 w-4 mr-1.5" />
+                    Start guided onboarding
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setAdding(true)}
+                  >
+                    Or add manually
+                  </Button>
+                </div>
               </div>
             ) : (
               state.tenants.map((tenant, idx) => {
