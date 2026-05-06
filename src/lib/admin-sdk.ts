@@ -31,6 +31,10 @@ const SCOPES = {
   DATA_TRANSFER: "https://www.googleapis.com/auth/admin.datatransfer",
   DRIVE_METADATA_READONLY:
     "https://www.googleapis.com/auth/drive.metadata.readonly",
+  // Required to delete permissions. Google Drive does not expose a narrower
+  // scope for permission management — `drive.file` only covers files the app
+  // itself created, which doesn't help an admin tool acting on existing files.
+  DRIVE_FULL: "https://www.googleapis.com/auth/drive",
 } as const;
 
 /**
@@ -118,6 +122,22 @@ function getDriveClient(tenant: Tenant | null, asUser: string): drive_v3.Drive {
     throw new Error("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_METADATA_READONLY]);
+  return google.drive({ version: "v3", auth });
+}
+
+/**
+ * Drive client run AS a specific user with write access. Used by the external
+ * sharing remediation flow to call permissions.delete — there is no
+ * narrower scope for that operation.
+ */
+function getDriveClientWritable(
+  tenant: Tenant | null,
+  asUser: string
+): drive_v3.Drive {
+  if (!isValidEmail(asUser)) {
+    throw new Error("asUser must be a valid email address");
+  }
+  const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_FULL]);
   return google.drive({ version: "v3", auth });
 }
 
@@ -676,4 +696,177 @@ function isNotFoundError(e: unknown): boolean {
     err.status === 404 ||
     err.response?.status === 404
   );
+}
+
+// ---------------------------------------------------------------------------
+// External sharing remediation
+// ---------------------------------------------------------------------------
+
+export interface RevokeFileOutcome {
+  fileId: string;
+  /** Number of permissions actually deleted. */
+  removed: number;
+  /** External permissions we tried to delete but couldn't, with the reason. */
+  errors: Array<{ permissionId: string; target: string; message: string }>;
+  /** True if the file was missing or no longer accessible. */
+  notFound?: boolean;
+  /** The user-facing display name we observed. */
+  fileName?: string;
+}
+
+export interface RevokeBatchResult {
+  user: string;
+  results: RevokeFileOutcome[];
+}
+
+/** Per-batch cap — protects the request handler from a runaway client. */
+const REVOKE_FILE_CAP = 200;
+
+/**
+ * Strip every external permission from each requested file owned (or
+ * editable) by `userEmail`.
+ *
+ * "External" is re-classified server-side against the live verified-domain
+ * set so that a stale client snapshot can never cause us to delete an
+ * internal collaborator.
+ *
+ * Per-permission errors are collected and returned, never thrown — one bad
+ * permission shouldn't abort the rest of the batch.
+ */
+export async function revokeExternalPermissions(
+  tenant: Tenant | null,
+  userEmail: string,
+  fileIds: string[]
+): Promise<RevokeBatchResult> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!Array.isArray(fileIds) || fileIds.length === 0) {
+    throw new Error("fileIds must be a non-empty array");
+  }
+  if (fileIds.length > REVOKE_FILE_CAP) {
+    throw new Error(
+      `Too many files in one revoke batch — cap is ${REVOKE_FILE_CAP}`
+    );
+  }
+
+  const verifiedDomains = new Set(
+    (await listDomains(tenant))
+      .filter((d) => d.verified)
+      .map((d) => d.domainName.toLowerCase())
+  );
+
+  const drive = getDriveClientWritable(tenant, userEmail);
+
+  const results: RevokeFileOutcome[] = [];
+  for (const rawFileId of fileIds) {
+    const fileId = String(rawFileId || "").trim();
+    if (!fileId) continue;
+    results.push(
+      await revokeForOneFile(drive, fileId, verifiedDomains)
+    );
+  }
+
+  return { user: userEmail.toLowerCase(), results };
+}
+
+async function revokeForOneFile(
+  drive: drive_v3.Drive,
+  fileId: string,
+  verifiedDomains: Set<string>
+): Promise<RevokeFileOutcome> {
+  const outcome: RevokeFileOutcome = {
+    fileId,
+    removed: 0,
+    errors: [],
+  };
+
+  // Re-fetch live permissions so we never act on a stale client snapshot.
+  const perms: drive_v3.Schema$Permission[] = [];
+  let fileName: string | undefined;
+  try {
+    const meta = await drive.files.get(
+      {
+        fileId,
+        fields: "id, name",
+        supportsAllDrives: true,
+      },
+      { timeout: ADMIN_API_TIMEOUT_MS }
+    );
+    fileName = meta.data.name ?? undefined;
+    let pageToken: string | undefined;
+    do {
+      const r = await drive.permissions.list(
+        {
+          fileId,
+          fields:
+            "nextPageToken, permissions(id, type, role, emailAddress, domain, allowFileDiscovery)",
+          pageSize: 100,
+          pageToken,
+          supportsAllDrives: true,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+      perms.push(...(r.data.permissions || []));
+      pageToken = r.data.nextPageToken ?? undefined;
+    } while (pageToken);
+  } catch (e) {
+    if (isNotFoundError(e)) {
+      outcome.notFound = true;
+      return outcome;
+    }
+    outcome.errors.push({
+      permissionId: "*",
+      target: "(file)",
+      message: e instanceof Error ? e.message : "Failed to list permissions",
+    });
+    return outcome;
+  }
+  outcome.fileName = fileName;
+
+  const externalPerms = perms.filter((p) =>
+    classifyPermission(p, verifiedDomains) !== null
+  );
+
+  for (const p of externalPerms) {
+    const target =
+      p.type === "anyone"
+        ? "anyone"
+        : p.type === "domain"
+        ? p.domain ?? "(domain)"
+        : p.emailAddress ?? "(user)";
+    if (!p.id) {
+      outcome.errors.push({
+        permissionId: "(missing)",
+        target,
+        message: "Permission has no id — cannot delete",
+      });
+      continue;
+    }
+
+    try {
+      await drive.permissions.delete(
+        {
+          fileId,
+          permissionId: p.id,
+          supportsAllDrives: true,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+      outcome.removed++;
+    } catch (e) {
+      if (isNotFoundError(e)) {
+        // Already gone — count as success, no error needed.
+        continue;
+      }
+      outcome.errors.push({
+        permissionId: p.id,
+        target,
+        message:
+          e instanceof Error ? e.message : "Failed to delete permission",
+      });
+    }
+  }
+
+  return outcome;
 }

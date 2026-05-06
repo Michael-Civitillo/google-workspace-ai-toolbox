@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -25,8 +25,11 @@ import {
   Download,
   StopCircle,
   PlayCircle,
+  ShieldOff,
+  CheckCircle2,
 } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface ExternalPermission {
   type: "anyone" | "domain" | "user" | "group";
@@ -67,6 +70,28 @@ interface PerUserOutcome {
   truncated?: boolean;
   files?: ExternalFile[];
   error?: string;
+}
+
+interface RevokeFileOutcome {
+  fileId: string;
+  fileName?: string;
+  removed: number;
+  errors: Array<{ permissionId: string; target: string; message: string }>;
+  notFound?: boolean;
+}
+
+interface RevokeBatchResult {
+  user: string;
+  results: RevokeFileOutcome[];
+}
+
+interface RevokeTarget {
+  /** Email of the file owner — the user we'll impersonate to delete perms. */
+  user: string;
+  /** Files we plan to strip external permissions from. */
+  files: ExternalFile[];
+  /** Where to apply the optimistic removal once it succeeds. */
+  scope: { kind: "single" } | { kind: "tenant"; userIndex: number };
 }
 
 const ROLE_BADGE: Record<string, string> = {
@@ -153,23 +178,37 @@ function downloadCsv(filename: string, content: string) {
 }
 
 export default function SharingAudit() {
+  const { tenant } = useCurrentTenant();
+
   // Single-user state
   const [user, setUser] = useState("");
   const [singleLoading, setSingleLoading] = useState(false);
   const [singleResult, setSingleResult] = useState<AuditResult | null>(null);
+  const [singleSelected, setSingleSelected] = useState<Set<string>>(
+    () => new Set()
+  );
 
   // Tenant-wide state
   const [tenantLoading, setTenantLoading] = useState(false);
   const [perUser, setPerUser] = useState<PerUserOutcome[]>([]);
   const [tenantUserCount, setTenantUserCount] = useState<number | null>(null);
-  // Mutable cancel flag — used inside the async loop without rerunning the
-  // effect every state update.
+  // Per-user-result selection map keyed by userIndex — kept sparse so a switch
+  // back to a tenant-wide scan after a single audit doesn't leak old picks.
+  const [tenantSelected, setTenantSelected] = useState<
+    Record<number, Set<string>>
+  >({});
   const cancelRef = useRef(false);
-  // Skip suspended users by default — they're typically noise for a sharing
-  // audit (admin can still tick to include them).
   const [includeSuspended, setIncludeSuspended] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+
+  // Revoke-flow state
+  const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null);
+  const [revokeBusy, setRevokeBusy] = useState(false);
+  const [revokeNotice, setRevokeNotice] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
 
   // -------------------------------------------------------------------------
   // Single-user audit
@@ -179,6 +218,8 @@ export default function SharingAudit() {
     setSingleLoading(true);
     setError(null);
     setSingleResult(null);
+    setSingleSelected(new Set());
+    setRevokeNotice(null);
     try {
       const res = await tfetch(
         `/api/admin/sharing-audit?user=${encodeURIComponent(user)}`
@@ -197,23 +238,18 @@ export default function SharingAudit() {
   // Tenant-wide audit — client-orchestrated
   // -------------------------------------------------------------------------
 
-  /**
-   * Walk every user in the tenant via paginated /api/admin/users, then for
-   * each user invoke the per-user sharing-audit endpoint. We render results
-   * incrementally (per user) and short-circuit on cancel. Each per-user call
-   * has independent error isolation — one user's 500 doesn't kill the whole
-   * scan.
-   */
   const runTenantWide = async () => {
     setError(null);
     setSingleResult(null);
+    setSingleSelected(new Set());
     setPerUser([]);
+    setTenantSelected({});
     setTenantUserCount(null);
+    setRevokeNotice(null);
     cancelRef.current = false;
     setTenantLoading(true);
 
     try {
-      // Step 1: enumerate every tenant user.
       const allUsers: UserListItem[] = [];
       let pageToken: string | undefined = undefined;
       while (true) {
@@ -232,12 +268,10 @@ export default function SharingAudit() {
         if (!pageToken) break;
       }
 
-      // Optionally filter out suspended users.
       const targets = allUsers.filter(
         (u) => includeSuspended || !u.suspended
       );
 
-      // Seed the per-user table so the UI shows everyone we plan to scan.
       const seeded: PerUserOutcome[] = targets.map((u) => ({
         user: u.primaryEmail,
         status: "pending",
@@ -245,13 +279,8 @@ export default function SharingAudit() {
       setPerUser(seeded);
       setTenantUserCount(targets.length);
 
-      // Step 2: scan each user sequentially. Sequential (not parallel) keeps
-      // us politely under per-app Drive API quotas and makes progress display
-      // easy. For genuinely large tenants this would batch with a small
-      // concurrency limit, but per the requirements small tenants only.
       for (let i = 0; i < targets.length; i++) {
         if (cancelRef.current) {
-          // Mark every still-pending user as skipped.
           setPerUser((prev) =>
             prev.map((p) =>
               p.status === "pending" ? { ...p, status: "skipped" } : p
@@ -313,6 +342,152 @@ export default function SharingAudit() {
     cancelRef.current = true;
   };
 
+  // -------------------------------------------------------------------------
+  // Selection helpers
+  // -------------------------------------------------------------------------
+
+  function toggleSingle(fileId: string) {
+    setSingleSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileId)) next.delete(fileId);
+      else next.add(fileId);
+      return next;
+    });
+  }
+
+  function setSingleAll(files: ExternalFile[], on: boolean) {
+    setSingleSelected(on ? new Set(files.map((f) => f.id)) : new Set());
+  }
+
+  function toggleTenant(userIndex: number, fileId: string) {
+    setTenantSelected((prev) => {
+      const cur = new Set(prev[userIndex] ?? []);
+      if (cur.has(fileId)) cur.delete(fileId);
+      else cur.add(fileId);
+      return { ...prev, [userIndex]: cur };
+    });
+  }
+
+  function setTenantAllForUser(
+    userIndex: number,
+    files: ExternalFile[],
+    on: boolean
+  ) {
+    setTenantSelected((prev) => ({
+      ...prev,
+      [userIndex]: on ? new Set(files.map((f) => f.id)) : new Set(),
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Revoke flow
+  // -------------------------------------------------------------------------
+
+  function startRevoke(target: RevokeTarget) {
+    setRevokeNotice(null);
+    setRevokeTarget(target);
+  }
+
+  async function confirmRevoke() {
+    if (!revokeTarget) return;
+    setRevokeBusy(true);
+    try {
+      const res = await tfetch("/api/admin/sharing-audit/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: revokeTarget.user,
+          fileIds: revokeTarget.files.map((f) => f.id),
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setRevokeNotice({
+          tone: "error",
+          message: data.error || "Revoke failed",
+        });
+        return;
+      }
+
+      const batch: RevokeBatchResult = data.data;
+      const totalRemoved = batch.results.reduce(
+        (sum, r) => sum + r.removed,
+        0
+      );
+      const filesCleaned = batch.results.filter(
+        (r) =>
+          r.errors.length === 0 && (r.removed > 0 || r.notFound === true)
+      );
+      const filesWithErrors = batch.results.filter(
+        (r) => r.errors.length > 0
+      );
+
+      // Optimistically remove fully-cleaned files from the result lists.
+      const cleanedIds = new Set(filesCleaned.map((r) => r.fileId));
+      if (revokeTarget.scope.kind === "single") {
+        setSingleResult((prev) =>
+          prev
+            ? {
+                ...prev,
+                files: prev.files.filter((f) => !cleanedIds.has(f.id)),
+              }
+            : prev
+        );
+        setSingleSelected((prev) => {
+          const next = new Set(prev);
+          for (const id of cleanedIds) next.delete(id);
+          return next;
+        });
+      } else {
+        const idx = revokeTarget.scope.userIndex;
+        setPerUser((prev) =>
+          prev.map((p, i) =>
+            i === idx
+              ? {
+                  ...p,
+                  files: (p.files ?? []).filter(
+                    (f) => !cleanedIds.has(f.id)
+                  ),
+                }
+              : p
+          )
+        );
+        setTenantSelected((prev) => {
+          const cur = new Set(prev[idx] ?? []);
+          for (const id of cleanedIds) cur.delete(id);
+          return { ...prev, [idx]: cur };
+        });
+      }
+
+      const errorSummary =
+        filesWithErrors.length > 0
+          ? ` ${filesWithErrors.length} file${
+              filesWithErrors.length === 1 ? "" : "s"
+            } had errors — see Drive directly to investigate.`
+          : "";
+      setRevokeNotice({
+        tone: filesWithErrors.length > 0 ? "error" : "success",
+        message: `Removed ${totalRemoved} external permission${
+          totalRemoved === 1 ? "" : "s"
+        } across ${filesCleaned.length} file${
+          filesCleaned.length === 1 ? "" : "s"
+        }.${errorSummary}`,
+      });
+      setRevokeTarget(null);
+    } catch {
+      setRevokeNotice({
+        tone: "error",
+        message: "Network error while revoking. No changes were applied.",
+      });
+    } finally {
+      setRevokeBusy(false);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Derived
+  // -------------------------------------------------------------------------
+
   const tenantSummary = (() => {
     if (perUser.length === 0) return null;
     const done = perUser.filter((p) => p.status === "done").length;
@@ -327,6 +502,44 @@ export default function SharingAudit() {
     return { done, errored, flaggedFiles, flaggedUsers, truncatedUsers };
   })();
 
+  const revokeChanges = useMemo(() => {
+    if (!revokeTarget) return [];
+    const totalPerms = revokeTarget.files.reduce(
+      (sum, f) => sum + f.externalCount,
+      0
+    );
+    const sample = revokeTarget.files
+      .slice(0, 5)
+      .map((f) => f.name)
+      .join(", ");
+    return [
+      {
+        label: "File owner (will be impersonated)",
+        after: revokeTarget.user,
+      },
+      {
+        label: "Files affected",
+        after:
+          revokeTarget.files.length === 1
+            ? sample
+            : `${revokeTarget.files.length} files (${sample}${
+                revokeTarget.files.length > 5 ? ", …" : ""
+              })`,
+      },
+      {
+        label: "External permissions to remove",
+        after: `${totalPerms} permission${totalPerms === 1 ? "" : "s"}`,
+        emphasis: true,
+      },
+      {
+        label: "Internal collaborators",
+        after: "Untouched — only external sharing is removed",
+      },
+    ];
+  }, [revokeTarget]);
+
+  const isBulk = (revokeTarget?.files.length ?? 0) > 1;
+
   return (
     <>
       <PageHeader
@@ -338,6 +551,31 @@ export default function SharingAudit() {
       {error && (
         <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
           <AlertDescription className="text-red-800 dark:text-red-300">{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {revokeNotice && (
+        <Alert
+          className={`mb-6 ${
+            revokeNotice.tone === "success"
+              ? "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
+              : "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
+          }`}
+        >
+          {revokeNotice.tone === "success" ? (
+            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+          ) : (
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+          )}
+          <AlertDescription
+            className={`text-sm ${
+              revokeNotice.tone === "success"
+                ? "text-emerald-800 dark:text-emerald-300"
+                : "text-amber-800 dark:text-amber-300"
+            }`}
+          >
+            {revokeNotice.message}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -470,65 +708,115 @@ export default function SharingAudit() {
               )}
             </CardHeader>
             <CardContent>
-              {/* Compact per-user status strip */}
               <div className="space-y-2">
-                {perUser.map((p) => (
-                  <div
-                    key={p.user}
-                    className="rounded-lg border bg-muted/30 px-3 py-2"
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium truncate">{p.user}</p>
-                        {p.status === "running" && (
-                          <p className="text-xs text-muted-foreground flex items-center gap-1">
-                            <Loader2 className="h-3 w-3 animate-spin" />{" "}
-                            scanning…
-                          </p>
-                        )}
-                        {p.status === "done" && (
-                          <p className="text-xs text-muted-foreground">
-                            scanned {p.scannedFiles} · {p.files?.length ?? 0}{" "}
-                            flagged
-                            {p.truncated ? " · truncated" : ""}
-                          </p>
-                        )}
-                        {p.status === "error" && (
-                          <p className="text-xs text-red-600">
-                            {p.error}
-                          </p>
-                        )}
-                        {p.status === "skipped" && (
-                          <p className="text-xs text-muted-foreground">
-                            cancelled before scan
-                          </p>
-                        )}
-                        {p.status === "pending" && (
-                          <p className="text-xs text-muted-foreground">
-                            queued
-                          </p>
+                {perUser.map((p, idx) => {
+                  const flagged = p.files ?? [];
+                  const sel = tenantSelected[idx] ?? new Set<string>();
+                  const allSelected =
+                    flagged.length > 0 && sel.size === flagged.length;
+                  return (
+                    <div
+                      key={p.user}
+                      className="rounded-lg border bg-muted/30 px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium truncate">{p.user}</p>
+                          {p.status === "running" && (
+                            <p className="text-xs text-muted-foreground flex items-center gap-1">
+                              <Loader2 className="h-3 w-3 animate-spin" />{" "}
+                              scanning…
+                            </p>
+                          )}
+                          {p.status === "done" && (
+                            <p className="text-xs text-muted-foreground">
+                              scanned {p.scannedFiles} · {flagged.length}{" "}
+                              flagged
+                              {p.truncated ? " · truncated" : ""}
+                            </p>
+                          )}
+                          {p.status === "error" && (
+                            <p className="text-xs text-red-600">
+                              {p.error}
+                            </p>
+                          )}
+                          {p.status === "skipped" && (
+                            <p className="text-xs text-muted-foreground">
+                              cancelled before scan
+                            </p>
+                          )}
+                          {p.status === "pending" && (
+                            <p className="text-xs text-muted-foreground">
+                              queued
+                            </p>
+                          )}
+                        </div>
+                        {p.status === "done" && flagged.length > 0 && (
+                          <Badge
+                            variant="outline"
+                            className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs shrink-0"
+                          >
+                            {flagged.length} flagged
+                          </Badge>
                         )}
                       </div>
-                      {p.status === "done" && (p.files?.length ?? 0) > 0 && (
-                        <Badge
-                          variant="outline"
-                          className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs shrink-0"
-                        >
-                          {p.files?.length} flagged
-                        </Badge>
+
+                      {p.status === "done" && flagged.length > 0 && (
+                        <div className="mt-2 space-y-2 pl-3 border-l-2 border-amber-200 dark:border-amber-900/50">
+                          <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
+                            <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
+                              <input
+                                type="checkbox"
+                                checked={allSelected}
+                                onChange={(e) =>
+                                  setTenantAllForUser(
+                                    idx,
+                                    flagged,
+                                    e.target.checked
+                                  )
+                                }
+                              />
+                              Select all
+                            </label>
+                            <Button
+                              size="xs"
+                              variant="destructive"
+                              disabled={sel.size === 0 || revokeBusy}
+                              onClick={() =>
+                                startRevoke({
+                                  user: p.user,
+                                  files: flagged.filter((f) => sel.has(f.id)),
+                                  scope: { kind: "tenant", userIndex: idx },
+                                })
+                              }
+                            >
+                              <ShieldOff className="h-3 w-3 mr-1" />
+                              Revoke external on selected ({sel.size})
+                            </Button>
+                          </div>
+                          <div className="space-y-1.5">
+                            {flagged.map((f) => (
+                              <FileRow
+                                key={f.id}
+                                file={f}
+                                selected={sel.has(f.id)}
+                                onToggle={() => toggleTenant(idx, f.id)}
+                                onRevoke={() =>
+                                  startRevoke({
+                                    user: p.user,
+                                    files: [f],
+                                    scope: { kind: "tenant", userIndex: idx },
+                                  })
+                                }
+                                revokeDisabled={revokeBusy}
+                              />
+                            ))}
+                          </div>
+                        </div>
                       )}
                     </div>
-
-                    {/* Per-user file list */}
-                    {p.status === "done" && (p.files?.length ?? 0) > 0 && (
-                      <div className="mt-2 space-y-1.5 pl-3 border-l-2 border-amber-200">
-                        {p.files!.map((f) => (
-                          <FileRow key={f.id} file={f} />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </CardContent>
           </Card>
@@ -587,64 +875,180 @@ export default function SharingAudit() {
                   scanned.
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {singleResult.files.map((f) => (
-                    <FileRow key={f.id} file={f} />
-                  ))}
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={
+                          singleSelected.size === singleResult.files.length &&
+                          singleResult.files.length > 0
+                        }
+                        onChange={(e) =>
+                          setSingleAll(singleResult.files, e.target.checked)
+                        }
+                      />
+                      Select all ({singleResult.files.length})
+                    </label>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={singleSelected.size === 0 || revokeBusy}
+                      onClick={() =>
+                        startRevoke({
+                          user: singleResult.user,
+                          files: singleResult.files.filter((f) =>
+                            singleSelected.has(f.id)
+                          ),
+                          scope: { kind: "single" },
+                        })
+                      }
+                    >
+                      <ShieldOff className="h-4 w-4 mr-1.5" />
+                      Revoke external on selected ({singleSelected.size})
+                    </Button>
+                  </div>
+                  <div className="space-y-2">
+                    {singleResult.files.map((f) => (
+                      <FileRow
+                        key={f.id}
+                        file={f}
+                        selected={singleSelected.has(f.id)}
+                        onToggle={() => toggleSingle(f.id)}
+                        onRevoke={() =>
+                          startRevoke({
+                            user: singleResult.user,
+                            files: [f],
+                            scope: { kind: "single" },
+                          })
+                        }
+                        revokeDisabled={revokeBusy}
+                      />
+                    ))}
+                  </div>
                 </div>
               )}
             </CardContent>
           </Card>
         )}
       </div>
+
+      {/* Confirm dialog — single click for one file, typed REVOKE for bulk */}
+      <ConfirmActionDialog
+        open={!!revokeTarget}
+        onOpenChange={(o) => {
+          if (!o && !revokeBusy) setRevokeTarget(null);
+        }}
+        title={
+          isBulk
+            ? `Revoke external sharing on ${revokeTarget?.files.length ?? 0} files`
+            : "Revoke external sharing"
+        }
+        summary="Removes every external permission (anyone-with-link, external domain, external email) on the selected files. Internal collaborators stay untouched."
+        tenant={
+          tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null
+        }
+        severity={isBulk ? "high" : "medium"}
+        confirmPhrase={isBulk ? "REVOKE" : undefined}
+        confirmLabel={
+          isBulk
+            ? `Revoke external on ${revokeTarget?.files.length ?? 0} files`
+            : "Revoke external sharing"
+        }
+        busy={revokeBusy}
+        changes={revokeChanges}
+        warnings={
+          <span>
+            Permission removal is <strong>irreversible</strong> — Google issues
+            a fresh permission ID on re-share, so the same link won&apos;t
+            grant access again. Re-sharing requires the file owner to add the
+            collaborator from scratch.
+          </span>
+        }
+        onConfirm={confirmRevoke}
+      />
     </>
   );
 }
 
-function FileRow({ file }: { file: ExternalFile }) {
+function FileRow({
+  file,
+  selected,
+  onToggle,
+  onRevoke,
+  revokeDisabled,
+}: {
+  file: ExternalFile;
+  selected: boolean;
+  onToggle: () => void;
+  onRevoke: () => void;
+  revokeDisabled: boolean;
+}) {
   return (
     <div className="rounded-md border bg-background p-2.5">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          className="mt-1 shrink-0"
+          aria-label={`Select ${file.name}`}
+        />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium truncate">{file.name}</p>
-          <p className="text-xs text-muted-foreground truncate">
-            {file.mimeType}
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium truncate">{file.name}</p>
+              <p className="text-xs text-muted-foreground truncate">
+                {file.mimeType}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {file.webViewLink && (
+                <a
+                  href={file.webViewLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs flex items-center gap-1 text-blue-600 hover:underline"
+                >
+                  Open <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+              <Button
+                size="xs"
+                variant="destructive"
+                onClick={onRevoke}
+                disabled={revokeDisabled}
+              >
+                <ShieldOff className="h-3 w-3 mr-1" />
+                Revoke external
+              </Button>
+            </div>
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {file.external.map((p, i) => (
+              <Badge
+                key={i}
+                variant="outline"
+                className={`${
+                  p.type === "anyone"
+                    ? "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
+                    : "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50"
+                } text-xs flex items-center gap-1`}
+              >
+                {permissionIcon(p.type)}
+                {permissionLabel(p)}
+                <span
+                  className={`ml-1 px-1 rounded ${
+                    ROLE_BADGE[p.role] ??
+                    "bg-zinc-100 text-zinc-700 border-zinc-200"
+                  }`}
+                >
+                  {p.role}
+                </span>
+              </Badge>
+            ))}
+          </div>
         </div>
-        {file.webViewLink && (
-          <a
-            href={file.webViewLink}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs flex items-center gap-1 text-blue-600 hover:underline shrink-0"
-          >
-            Open <ExternalLink className="h-3 w-3" />
-          </a>
-        )}
-      </div>
-      <div className="mt-1.5 flex flex-wrap gap-1.5">
-        {file.external.map((p, i) => (
-          <Badge
-            key={i}
-            variant="outline"
-            className={`${
-              p.type === "anyone"
-                ? "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
-                : "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50"
-            } text-xs flex items-center gap-1`}
-          >
-            {permissionIcon(p.type)}
-            {permissionLabel(p)}
-            <span
-              className={`ml-1 px-1 rounded ${
-                ROLE_BADGE[p.role] ??
-                "bg-zinc-100 text-zinc-700 border-zinc-200"
-              }`}
-            >
-              {p.role}
-            </span>
-          </Badge>
-        ))}
       </div>
     </div>
   );

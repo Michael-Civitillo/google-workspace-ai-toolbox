@@ -25,7 +25,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. External-domain transfers require explicit confirmation.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Server-side preflight + read-after-write verification.
 - 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
-- 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export for remediation.
+- 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export, and one-click "revoke external sharing" per file or in bulk — strips only external permissions, leaves internal collaborators alone.
 - 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Per-request tenant isolation — nothing carries over between tenants.
 
 ### AI-powered (Gemini)
@@ -167,6 +167,7 @@ The app runs `gws` commands and `googleapis` SDK calls on the server side. For r
    - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (Domain Change, Sharing Audit)
    - `https://www.googleapis.com/auth/admin.datatransfer` (Offboarding — Drive ownership transfer)
    - `https://www.googleapis.com/auth/drive.metadata.readonly` (Sharing Audit)
+   - `https://www.googleapis.com/auth/drive` (Sharing Audit — revoke external sharing)
 4. Set an admin email for impersonation (Domain Change and Admin SDK calls need this):
    ```bash
    export GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@yourdomain.com
