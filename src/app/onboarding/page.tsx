@@ -101,6 +101,7 @@ const REQUIRED_SCOPES = [
   "https://www.googleapis.com/auth/admin.directory.domain.readonly",
   "https://www.googleapis.com/auth/admin.datatransfer",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
+  "https://www.googleapis.com/auth/drive",
 ];
 
 const REQUIRED_APIS = [

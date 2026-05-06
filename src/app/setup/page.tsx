@@ -343,6 +343,7 @@ export default function Setup() {
                 <li>https://www.googleapis.com/auth/admin.directory.domain.readonly</li>
                 <li>https://www.googleapis.com/auth/admin.datatransfer</li>
                 <li>https://www.googleapis.com/auth/drive.metadata.readonly</li>
+                <li>https://www.googleapis.com/auth/drive</li>
               </ul>
             </div>
 
