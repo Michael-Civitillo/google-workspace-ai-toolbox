@@ -15,6 +15,8 @@ import {
   Loader2,
   UserMinus,
   Share2,
+  Sparkles,
+  ArrowRight,
 } from "lucide-react";
 import Link from "next/link";
 import { AICommandPanel } from "@/components/ai-command-panel";
@@ -23,6 +25,10 @@ interface GwsStatus {
   installed: boolean;
   version?: string;
   authenticated: boolean;
+}
+
+interface TenantsListPayload {
+  tenants?: { id: string }[];
 }
 
 const tasks = [
@@ -95,14 +101,26 @@ const tasks = [
 export default function Dashboard() {
   const [status, setStatus] = useState<GwsStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tenantCount, setTenantCount] = useState<number | null>(null);
 
   useEffect(() => {
-    fetch("/api/gws/status")
-      .then((res) => res.json())
-      .then(setStatus)
-      .catch(() => setStatus({ installed: false, authenticated: false }))
+    Promise.all([
+      fetch("/api/gws/status")
+        .then((res) => res.json())
+        .catch(() => ({ installed: false, authenticated: false } as GwsStatus)),
+      fetch("/api/tenants")
+        .then((res) => res.json() as Promise<TenantsListPayload>)
+        .then((d) => (Array.isArray(d?.tenants) ? d.tenants.length : 0))
+        .catch(() => 0),
+    ])
+      .then(([s, count]) => {
+        setStatus(s);
+        setTenantCount(count);
+      })
       .finally(() => setLoading(false));
   }, []);
+
+  const showFirstRunBanner = !loading && tenantCount === 0;
 
   return (
     <>
@@ -110,6 +128,35 @@ export default function Dashboard() {
         title="Dashboard"
         description="Manage your Google Workspace from a single place."
       />
+
+      {/* First-run onboarding banner */}
+      {showFirstRunBanner && (
+        <Link href="/onboarding" className="block mb-6 group">
+          <Card className="border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent transition-all hover:border-primary/50 hover:shadow-md">
+            <CardContent className="pt-6">
+              <div className="flex items-start gap-4">
+                <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
+                  <Sparkles className="h-5 w-5" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-base font-semibold">
+                    Let&apos;s get you set up
+                  </h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    No tenants configured yet. Walk through a 5-step guided onboarding
+                    to install the CLI, set up a service account, and connect your
+                    first Google Workspace tenant.
+                  </p>
+                </div>
+                <span className="text-sm font-medium text-primary shrink-0 inline-flex items-center gap-1 self-center group-hover:translate-x-0.5 transition-transform">
+                  Start
+                  <ArrowRight className="h-4 w-4" />
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+      )}
 
       {/* Status Banner */}
       <Card className="mb-6">

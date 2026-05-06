@@ -19,7 +19,10 @@ import {
   Loader2,
   Terminal,
   ExternalLink,
+  Sparkles,
+  ArrowRight,
 } from "lucide-react";
+import Link from "next/link";
 
 interface GwsStatus {
   installed: boolean;
@@ -60,6 +63,32 @@ export default function Setup() {
       />
 
       <div className="max-w-3xl space-y-6">
+        {/* Guided onboarding banner */}
+        <Link href="/onboarding" className="block group">
+          <Card className="border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent transition-all hover:border-primary/50 hover:shadow-md">
+            <CardContent className="pt-6">
+              <div className="flex items-start gap-4">
+                <div className="h-9 w-9 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
+                  <Sparkles className="h-4.5 w-4.5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm font-semibold">
+                    Prefer a guided walkthrough?
+                  </h3>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    The 5-step onboarding wizard handles install, service account
+                    setup, and your first tenant in one flow.
+                  </p>
+                </div>
+                <span className="text-xs font-medium text-primary shrink-0 inline-flex items-center gap-1 self-center group-hover:translate-x-0.5 transition-transform">
+                  Open
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+
         {/* Status Check */}
         <Card>
           <CardHeader>
