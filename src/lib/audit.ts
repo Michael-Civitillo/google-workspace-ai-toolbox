@@ -1,4 +1,4 @@
-import { appendFileSync } from "fs";
+import { appendFileSync, chmodSync, statSync } from "fs";
 import path from "path";
 
 /**
@@ -10,6 +10,18 @@ import path from "path";
 const LOG_PATH = path.resolve(
   process.env.AUDIT_LOG_PATH || path.join(process.cwd(), "audit.log")
 );
+
+// Re-tighten file permissions at module load: `appendFileSync` only applies
+// `mode` on file creation, so a pre-existing log written under a permissive
+// umask would keep its old mode forever. Idempotent for the common case.
+try {
+  const stat = statSync(LOG_PATH);
+  if ((stat.mode & 0o777) !== 0o600) {
+    chmodSync(LOG_PATH, 0o600);
+  }
+} catch {
+  // File doesn't exist yet — the next append will create it with 0o600.
+}
 
 export interface AuditEntry {
   /** Action identifier (e.g. "domain_change", "calendar_transfer.remove") */
@@ -45,16 +57,50 @@ export function audit(entry: AuditEntry): void {
   }
 }
 
-const SENSITIVE_KEYS = new Set(["password", "geminiApiKey", "apiKey", "token"]);
+/**
+ * Keys we never want to land in the audit log. Matched case-insensitively
+ * and with separators (`_`, `-`) stripped, so `password`, `Password`,
+ * `client_secret`, `clientSecret`, and `CLIENT-SECRET` all redact.
+ */
+const SENSITIVE_KEYS_NORMALIZED: ReadonlySet<string> = new Set([
+  "password",
+  "apikey",
+  "geminiapikey",
+  "token",
+  "accesstoken",
+  "refreshtoken",
+  "idtoken",
+  "secret",
+  "clientsecret",
+  "privatekey",
+  "credentials",
+  "credential",
+  "authorization",
+  "cookie",
+]);
+
+function normalizeKey(k: string): string {
+  return k.toLowerCase().replace(/[_-]/g, "");
+}
+
+function isSensitiveKey(k: string): boolean {
+  return SENSITIVE_KEYS_NORMALIZED.has(normalizeKey(k));
+}
+
+function redactValue(value: unknown, depth: number): unknown {
+  // Bound recursion so a malicious or buggy caller can't get us to overflow.
+  if (depth > 8) return "[redacted: depth-limit]";
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, depth + 1));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = isSensitiveKey(k) ? "[redacted]" : redactValue(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
 
 function redactSensitive(obj: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (SENSITIVE_KEYS.has(k)) {
-      out[k] = "[redacted]";
-    } else {
-      out[k] = v;
-    }
-  }
-  return out;
+  return redactValue(obj, 0) as Record<string, unknown>;
 }

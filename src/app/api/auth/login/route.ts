@@ -59,9 +59,13 @@ export async function POST(req: NextRequest) {
 
   const token = await createSessionToken();
   const res = NextResponse.json({ success: true });
+  // `strict` blocks the cookie on any cross-site navigation, top-level or
+  // otherwise. The toolbox has no flow that depends on inbound cross-site
+  // links, so this gives us belt-and-braces CSRF protection on top of the
+  // Origin/Referer check enforced by the middleware.
   res.cookies.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: "strict",
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: SESSION_TTL,
