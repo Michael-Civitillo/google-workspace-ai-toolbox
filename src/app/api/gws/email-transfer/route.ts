@@ -4,6 +4,7 @@ import { buildGmailClient } from "@/lib/admin-sdk";
 import { listDomains } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError, emailDomain } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { constantTimeStringEqual } from "@/lib/auth";
 
 const GMAIL_SETTINGS_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.sharing",
@@ -79,7 +80,7 @@ export async function POST(request: NextRequest) {
         typeof body.confirmExternal === "string"
           ? body.confirmExternal.trim().toLowerCase()
           : "";
-      if (confirm !== targetUser) {
+      if (!constantTimeStringEqual(confirm, targetUser)) {
         throw new ValidationError(
           `Target "${targetUser}" is outside this tenant's verified domains. Set confirmExternal to the exact target email to proceed.`
         );

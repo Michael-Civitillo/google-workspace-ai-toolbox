@@ -30,17 +30,28 @@ const GWS_BIN =
  *      get EINVAL ("Executable invalid").
  *
  *   2. With `shell: true`, the args array is still escaped properly by
- *      Node, but the *binary path itself* is not quoted. If GWS_BIN points
- *      at a path with spaces (e.g. "C:\\Program Files\\..."), cmd.exe
- *      splits it on whitespace. We handle that by quoting before passing.
+ *      Node, but the *binary path itself* is not quoted. If GWS_BIN contains
+ *      a space, a metacharacter, or a stray quote, cmd.exe will mis-parse
+ *      it. We always wrap unquoted paths in double quotes so a path like
+ *      `C:\Program Files\gws.cmd` and a path with no spaces are both passed
+ *      as a single token. Operators who already pre-quote `GWS_BIN` in their
+ *      env file are left alone so we don't double-wrap.
  */
+function quoteForWindowsShell(bin: string): string {
+  if (bin.startsWith('"') && bin.endsWith('"') && bin.length >= 2) return bin;
+  // cmd.exe doubles `"` to escape it inside a quoted token.
+  return `"${bin.replace(/"/g, '""')}"`;
+}
+
 function runGws(
   args: string[],
   options: { timeout: number; env?: NodeJS.ProcessEnv }
 ) {
   if (IS_WINDOWS) {
-    const file = GWS_BIN.includes(" ") ? `"${GWS_BIN}"` : GWS_BIN;
-    return execFileAsync(file, args, { ...options, shell: true });
+    return execFileAsync(quoteForWindowsShell(GWS_BIN), args, {
+      ...options,
+      shell: true,
+    });
   }
   return execFileAsync(GWS_BIN, args, options);
 }
