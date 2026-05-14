@@ -538,14 +538,27 @@ export default function SharingAudit() {
       }.${errorSummary}`;
 
       if (abortedAt) {
-        const completedFiles = abortedAt.index * REVOKE_BATCH_SIZE;
+        // Earlier batches are always full REVOKE_BATCH_SIZE chunks (the partial
+        // is always last), so mergedResults.length matches the number of files
+        // sent to the server before the failure.
+        const filesProcessed = mergedResults.length;
+        const earlierResults =
+          filesProcessed === 0
+            ? "no earlier batches succeeded"
+            : `earlier batches removed ${totalRemoved} permission${
+                totalRemoved === 1 ? "" : "s"
+              } across ${filesCleaned.length} of ${filesProcessed} file${
+                filesProcessed === 1 ? "" : "s"
+              }${
+                filesWithErrors.length > 0
+                  ? ` (${filesWithErrors.length} with per-file errors)`
+                  : ""
+              }`;
         setRevokeNotice({
           tone: "error",
           message: `Batch ${abortedAt.index + 1} of ${fileChunks.length} failed: ${
             abortedAt.reason
-          }. ${completedFiles} file${
-            completedFiles === 1 ? "" : "s"
-          } were processed in earlier batches; re-run to retry the remainder.`,
+          }. ${earlierResults}. Re-run to retry the remainder.`,
         });
       } else {
         setRevokeNotice({
@@ -913,11 +926,11 @@ export default function SharingAudit() {
                                     categories: categoriesFromFilter(categoryFilter),
                                   })
                                 }
-                                title={`Un-share every flagged file for ${p.user}`}
+                                title={`Strip selected categories from every matching file for ${p.user} (files with other external sharing types may stay listed)`}
                               >
                                 <ShieldOff className="h-3 w-3 mr-1" />
-                                Un-share all {matching.length} file
-                                {matching.length === 1 ? "" : "s"} for this user
+                                Revoke selected categories on {matching.length} file
+                                {matching.length === 1 ? "" : "s"}
                               </Button>
                             </div>
                           </div>
@@ -1066,11 +1079,11 @@ export default function SharingAudit() {
                                 categories: categoriesFromFilter(categoryFilter),
                               })
                             }
-                            title={`Un-share every flagged file for ${singleResult.user}`}
+                            title={`Strip selected categories from every matching file for ${singleResult.user} (files with other external sharing types may stay listed)`}
                           >
                             <ShieldOff className="h-4 w-4 mr-1.5" />
-                            Un-share all {matching.length} file
-                            {matching.length === 1 ? "" : "s"} for this user
+                            Revoke selected categories on {matching.length} file
+                            {matching.length === 1 ? "" : "s"}
                           </Button>
                         );
                       })()}
