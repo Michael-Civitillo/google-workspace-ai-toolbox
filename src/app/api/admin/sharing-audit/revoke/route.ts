@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { revokeExternalPermissions } from "@/lib/admin-sdk";
+import { revokeExternalPermissions, type RevokeCategory } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+
+const VALID_CATEGORIES: ReadonlySet<RevokeCategory> = new Set([
+  "anyone",
+  "domain",
+  "user",
+  "group",
+]);
 
 /**
  * Strip every external permission from each requested file.
@@ -43,7 +50,30 @@ export async function POST(request: NextRequest) {
       fileIds.push(trimmed);
     }
 
-    const result = await revokeExternalPermissions(tenant, user, fileIds);
+    let categories: RevokeCategory[] | undefined;
+    if (body.categories !== undefined) {
+      if (!Array.isArray(body.categories) || body.categories.length === 0) {
+        // Empty list would silently no-op and audit as success — refuse it so
+        // the operator can't accidentally run a meaningless revoke.
+        throw new ValidationError(
+          "categories must be a non-empty array of permission types"
+        );
+      }
+      const parsed: RevokeCategory[] = [];
+      for (const c of body.categories) {
+        if (typeof c !== "string" || !VALID_CATEGORIES.has(c as RevokeCategory)) {
+          throw new ValidationError(
+            `Invalid category ${JSON.stringify(c)} — must be one of anyone, domain, user, group`
+          );
+        }
+        parsed.push(c as RevokeCategory);
+      }
+      categories = parsed;
+    }
+
+    const result = await revokeExternalPermissions(tenant, user, fileIds, {
+      categories,
+    });
 
     const totalRemoved = result.results.reduce(
       (sum, r) => sum + r.removed,
@@ -62,6 +92,7 @@ export async function POST(request: NextRequest) {
         fileCount: fileIds.length,
         totalRemoved,
         filesWithErrors,
+        categories: categories ?? null,
       },
       outcome: filesWithErrors > 0 ? "error" : "success",
       error:
