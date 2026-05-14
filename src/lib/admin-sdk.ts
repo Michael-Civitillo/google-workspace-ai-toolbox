@@ -719,6 +719,16 @@ export interface RevokeBatchResult {
   results: RevokeFileOutcome[];
 }
 
+export type RevokeCategory = "anyone" | "domain" | "user" | "group";
+
+export interface RevokeOptions {
+  /**
+   * Restrict revocation to permissions of these categories. If omitted, every
+   * externally-classified permission is stripped (historical default).
+   */
+  categories?: RevokeCategory[];
+}
+
 /** Per-batch cap — protects the request handler from a runaway client. */
 const REVOKE_FILE_CAP = 200;
 
@@ -736,7 +746,8 @@ const REVOKE_FILE_CAP = 200;
 export async function revokeExternalPermissions(
   tenant: Tenant | null,
   userEmail: string,
-  fileIds: string[]
+  fileIds: string[],
+  options: RevokeOptions = {}
 ): Promise<RevokeBatchResult> {
   if (!isValidEmail(userEmail)) {
     throw new Error("userEmail must be a valid email address");
@@ -749,6 +760,10 @@ export async function revokeExternalPermissions(
       `Too many files in one revoke batch — cap is ${REVOKE_FILE_CAP}`
     );
   }
+
+  const allowedCategories = options.categories
+    ? new Set<RevokeCategory>(options.categories)
+    : null;
 
   const verifiedDomains = new Set(
     (await listDomains(tenant))
@@ -763,7 +778,7 @@ export async function revokeExternalPermissions(
     const fileId = String(rawFileId || "").trim();
     if (!fileId) continue;
     results.push(
-      await revokeForOneFile(drive, fileId, verifiedDomains)
+      await revokeForOneFile(drive, fileId, verifiedDomains, allowedCategories)
     );
   }
 
@@ -773,7 +788,8 @@ export async function revokeExternalPermissions(
 async function revokeForOneFile(
   drive: drive_v3.Drive,
   fileId: string,
-  verifiedDomains: Set<string>
+  verifiedDomains: Set<string>,
+  allowedCategories: Set<RevokeCategory> | null
 ): Promise<RevokeFileOutcome> {
   const outcome: RevokeFileOutcome = {
     fileId,
@@ -824,9 +840,12 @@ async function revokeForOneFile(
   }
   outcome.fileName = fileName;
 
-  const externalPerms = perms.filter((p) =>
-    classifyPermission(p, verifiedDomains) !== null
-  );
+  const externalPerms = perms.filter((p) => {
+    const flag = classifyPermission(p, verifiedDomains);
+    if (!flag) return false;
+    if (allowedCategories && !allowedCategories.has(flag.type)) return false;
+    return true;
+  });
 
   for (const p of externalPerms) {
     const target =

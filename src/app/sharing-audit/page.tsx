@@ -85,6 +85,8 @@ interface RevokeBatchResult {
   results: RevokeFileOutcome[];
 }
 
+type PermissionType = ExternalPermission["type"];
+
 interface RevokeTarget {
   /** Email of the file owner — the user we'll impersonate to delete perms. */
   user: string;
@@ -92,7 +94,43 @@ interface RevokeTarget {
   files: ExternalFile[];
   /** Where to apply the optimistic removal once it succeeds. */
   scope: { kind: "single" } | { kind: "tenant"; userIndex: number };
+  /**
+   * Snapshot of which permission categories to revoke when this action runs.
+   * Captured at dialog-open time so toggling the filter mid-confirm doesn't
+   * change the in-flight operation.
+   */
+  categories: PermissionType[];
 }
+
+type CategoryKey = "anyone" | "domain" | "users";
+
+const CATEGORY_LABELS: Record<CategoryKey, string> = {
+  anyone: "Anyone-with-link / public",
+  domain: "External domains",
+  users: "External users & groups",
+};
+
+/** Map UI checkbox state to the API category list (users covers user+group). */
+function categoriesFromFilter(
+  filter: Record<CategoryKey, boolean>
+): PermissionType[] {
+  const out: PermissionType[] = [];
+  if (filter.anyone) out.push("anyone");
+  if (filter.domain) out.push("domain");
+  if (filter.users) out.push("user", "group");
+  return out;
+}
+
+/** A file matches the active filter when at least one of its externals matches. */
+function fileMatchesFilter(
+  file: ExternalFile,
+  active: Set<PermissionType>
+): boolean {
+  return file.external.some((p) => active.has(p.type));
+}
+
+/** Per-batch cap on the server — mirrored here so we can chunk client-side. */
+const REVOKE_BATCH_SIZE = 200;
 
 const ROLE_BADGE: Record<string, string> = {
   owner: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
@@ -209,6 +247,17 @@ export default function SharingAudit() {
     tone: "success" | "error";
     message: string;
   } | null>(null);
+  // Which permission categories to strip on the next revoke. All on by default
+  // because the most common workflow is a full lockdown.
+  const [categoryFilter, setCategoryFilter] = useState<
+    Record<CategoryKey, boolean>
+  >({ anyone: true, domain: true, users: true });
+
+  const activeCategories = useMemo(
+    () => new Set(categoriesFromFilter(categoryFilter)),
+    [categoryFilter]
+  );
+  const noCategoriesSelected = activeCategories.size === 0;
 
   // -------------------------------------------------------------------------
   // Single-user audit
@@ -392,33 +441,50 @@ export default function SharingAudit() {
     if (!revokeTarget) return;
     setRevokeBusy(true);
     try {
-      const res = await tfetch("/api/admin/sharing-audit/revoke", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user: revokeTarget.user,
-          fileIds: revokeTarget.files.map((f) => f.id),
-        }),
-      });
-      const data = await res.json();
-      if (!data.success) {
-        setRevokeNotice({
-          tone: "error",
-          message: data.error || "Revoke failed",
-        });
-        return;
+      // The server enforces a 200-file cap per request to bound Drive API
+      // blast radius. Split larger targets into sequential chunks and merge
+      // results before driving optimistic UI updates.
+      const fileChunks: ExternalFile[][] = [];
+      for (let i = 0; i < revokeTarget.files.length; i += REVOKE_BATCH_SIZE) {
+        fileChunks.push(revokeTarget.files.slice(i, i + REVOKE_BATCH_SIZE));
       }
 
-      const batch: RevokeBatchResult = data.data;
-      const totalRemoved = batch.results.reduce(
+      const mergedResults: RevokeFileOutcome[] = [];
+      let abortedAt: { index: number; reason: string } | null = null;
+
+      for (let i = 0; i < fileChunks.length; i++) {
+        try {
+          const res = await tfetch("/api/admin/sharing-audit/revoke", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user: revokeTarget.user,
+              fileIds: fileChunks[i].map((f) => f.id),
+              categories: revokeTarget.categories,
+            }),
+          });
+          const data = await res.json();
+          if (!data.success) {
+            abortedAt = { index: i, reason: data.error || "Revoke failed" };
+            break;
+          }
+          const batch: RevokeBatchResult = data.data;
+          mergedResults.push(...batch.results);
+        } catch {
+          abortedAt = { index: i, reason: "Network error" };
+          break;
+        }
+      }
+
+      const totalRemoved = mergedResults.reduce(
         (sum, r) => sum + r.removed,
         0
       );
-      const filesCleaned = batch.results.filter(
+      const filesCleaned = mergedResults.filter(
         (r) =>
           r.errors.length === 0 && (r.removed > 0 || r.notFound === true)
       );
-      const filesWithErrors = batch.results.filter(
+      const filesWithErrors = mergedResults.filter(
         (r) => r.errors.length > 0
       );
 
@@ -463,21 +529,35 @@ export default function SharingAudit() {
         filesWithErrors.length > 0
           ? ` ${filesWithErrors.length} file${
               filesWithErrors.length === 1 ? "" : "s"
-            } had errors — see Drive directly to investigate.`
+            } had per-file errors — see Drive directly to investigate.`
           : "";
-      setRevokeNotice({
-        tone: filesWithErrors.length > 0 ? "error" : "success",
-        message: `Removed ${totalRemoved} external permission${
-          totalRemoved === 1 ? "" : "s"
-        } across ${filesCleaned.length} file${
-          filesCleaned.length === 1 ? "" : "s"
-        }.${errorSummary}`,
-      });
+      const baseMessage = `Removed ${totalRemoved} external permission${
+        totalRemoved === 1 ? "" : "s"
+      } across ${filesCleaned.length} file${
+        filesCleaned.length === 1 ? "" : "s"
+      }.${errorSummary}`;
+
+      if (abortedAt) {
+        const completedFiles = abortedAt.index * REVOKE_BATCH_SIZE;
+        setRevokeNotice({
+          tone: "error",
+          message: `Batch ${abortedAt.index + 1} of ${fileChunks.length} failed: ${
+            abortedAt.reason
+          }. ${completedFiles} file${
+            completedFiles === 1 ? "" : "s"
+          } were processed in earlier batches; re-run to retry the remainder.`,
+        });
+      } else {
+        setRevokeNotice({
+          tone: filesWithErrors.length > 0 ? "error" : "success",
+          message: baseMessage,
+        });
+      }
       setRevokeTarget(null);
     } catch {
       setRevokeNotice({
         tone: "error",
-        message: "Network error while revoking. No changes were applied.",
+        message: "Unexpected error while revoking. Some changes may have been applied.",
       });
     } finally {
       setRevokeBusy(false);
@@ -504,14 +584,26 @@ export default function SharingAudit() {
 
   const revokeChanges = useMemo(() => {
     if (!revokeTarget) return [];
+    const targetCategories = new Set(revokeTarget.categories);
+    // Category-aware count: only count permissions that would actually be
+    // stripped given the snapshot filter.
     const totalPerms = revokeTarget.files.reduce(
-      (sum, f) => sum + f.externalCount,
+      (sum, f) =>
+        sum + f.external.filter((p) => targetCategories.has(p.type)).length,
       0
     );
     const sample = revokeTarget.files
       .slice(0, 5)
       .map((f) => f.name)
       .join(", ");
+
+    const categoryLabels: string[] = [];
+    if (targetCategories.has("anyone")) categoryLabels.push(CATEGORY_LABELS.anyone);
+    if (targetCategories.has("domain")) categoryLabels.push(CATEGORY_LABELS.domain);
+    if (targetCategories.has("user") || targetCategories.has("group")) {
+      categoryLabels.push(CATEGORY_LABELS.users);
+    }
+
     return [
       {
         label: "File owner (will be impersonated)",
@@ -525,6 +617,10 @@ export default function SharingAudit() {
             : `${revokeTarget.files.length} files (${sample}${
                 revokeTarget.files.length > 5 ? ", …" : ""
               })`,
+      },
+      {
+        label: "Categories to remove",
+        after: categoryLabels.join(", "),
       },
       {
         label: "External permissions to remove",
@@ -708,12 +804,20 @@ export default function SharingAudit() {
               )}
             </CardHeader>
             <CardContent>
+              <CategoryFilterRow
+                value={categoryFilter}
+                onChange={setCategoryFilter}
+                disabled={revokeBusy}
+              />
               <div className="space-y-2">
                 {perUser.map((p, idx) => {
                   const flagged = p.files ?? [];
                   const sel = tenantSelected[idx] ?? new Set<string>();
                   const allSelected =
                     flagged.length > 0 && sel.size === flagged.length;
+                  const matching = flagged.filter((f) =>
+                    fileMatchesFilter(f, activeCategories)
+                  );
                   return (
                     <div
                       key={p.user}
@@ -778,22 +882,50 @@ export default function SharingAudit() {
                               />
                               Select all
                             </label>
-                            <Button
-                              size="xs"
-                              variant="destructive"
-                              disabled={sel.size === 0 || revokeBusy}
-                              onClick={() =>
-                                startRevoke({
-                                  user: p.user,
-                                  files: flagged.filter((f) => sel.has(f.id)),
-                                  scope: { kind: "tenant", userIndex: idx },
-                                })
-                              }
-                            >
-                              <ShieldOff className="h-3 w-3 mr-1" />
-                              Revoke external on selected ({sel.size})
-                            </Button>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Button
+                                size="xs"
+                                variant="destructive"
+                                disabled={sel.size === 0 || revokeBusy || noCategoriesSelected}
+                                onClick={() =>
+                                  startRevoke({
+                                    user: p.user,
+                                    files: flagged.filter((f) => sel.has(f.id)),
+                                    scope: { kind: "tenant", userIndex: idx },
+                                    categories: categoriesFromFilter(categoryFilter),
+                                  })
+                                }
+                              >
+                                <ShieldOff className="h-3 w-3 mr-1" />
+                                Revoke on selected ({sel.size})
+                              </Button>
+                              <Button
+                                size="xs"
+                                variant="destructive"
+                                disabled={
+                                  matching.length === 0 || revokeBusy || noCategoriesSelected
+                                }
+                                onClick={() =>
+                                  startRevoke({
+                                    user: p.user,
+                                    files: matching,
+                                    scope: { kind: "tenant", userIndex: idx },
+                                    categories: categoriesFromFilter(categoryFilter),
+                                  })
+                                }
+                                title={`Un-share every flagged file for ${p.user}`}
+                              >
+                                <ShieldOff className="h-3 w-3 mr-1" />
+                                Un-share all {matching.length} file
+                                {matching.length === 1 ? "" : "s"} for this user
+                              </Button>
+                            </div>
                           </div>
+                          {p.truncated && (
+                            <p className="text-xs text-amber-700 dark:text-amber-300">
+                              Audit was capped at 1,000 files — re-run after this completes to pick up the rest.
+                            </p>
+                          )}
                           <div className="space-y-1.5">
                             {flagged.map((f) => (
                               <FileRow
@@ -806,9 +938,10 @@ export default function SharingAudit() {
                                     user: p.user,
                                     files: [f],
                                     scope: { kind: "tenant", userIndex: idx },
+                                    categories: categoriesFromFilter(categoryFilter),
                                   })
                                 }
-                                revokeDisabled={revokeBusy}
+                                revokeDisabled={revokeBusy || noCategoriesSelected}
                               />
                             ))}
                           </div>
@@ -876,6 +1009,11 @@ export default function SharingAudit() {
                 </div>
               ) : (
                 <div className="space-y-3">
+                  <CategoryFilterRow
+                    value={categoryFilter}
+                    onChange={setCategoryFilter}
+                    disabled={revokeBusy}
+                  />
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
                       <input
@@ -890,24 +1028,59 @@ export default function SharingAudit() {
                       />
                       Select all ({singleResult.files.length})
                     </label>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={singleSelected.size === 0 || revokeBusy}
-                      onClick={() =>
-                        startRevoke({
-                          user: singleResult.user,
-                          files: singleResult.files.filter((f) =>
-                            singleSelected.has(f.id)
-                          ),
-                          scope: { kind: "single" },
-                        })
-                      }
-                    >
-                      <ShieldOff className="h-4 w-4 mr-1.5" />
-                      Revoke external on selected ({singleSelected.size})
-                    </Button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        disabled={singleSelected.size === 0 || revokeBusy || noCategoriesSelected}
+                        onClick={() =>
+                          startRevoke({
+                            user: singleResult.user,
+                            files: singleResult.files.filter((f) =>
+                              singleSelected.has(f.id)
+                            ),
+                            scope: { kind: "single" },
+                            categories: categoriesFromFilter(categoryFilter),
+                          })
+                        }
+                      >
+                        <ShieldOff className="h-4 w-4 mr-1.5" />
+                        Revoke on selected ({singleSelected.size})
+                      </Button>
+                      {(() => {
+                        const matching = singleResult.files.filter((f) =>
+                          fileMatchesFilter(f, activeCategories)
+                        );
+                        return (
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={
+                              matching.length === 0 || revokeBusy || noCategoriesSelected
+                            }
+                            onClick={() =>
+                              startRevoke({
+                                user: singleResult.user,
+                                files: matching,
+                                scope: { kind: "single" },
+                                categories: categoriesFromFilter(categoryFilter),
+                              })
+                            }
+                            title={`Un-share every flagged file for ${singleResult.user}`}
+                          >
+                            <ShieldOff className="h-4 w-4 mr-1.5" />
+                            Un-share all {matching.length} file
+                            {matching.length === 1 ? "" : "s"} for this user
+                          </Button>
+                        );
+                      })()}
+                    </div>
                   </div>
+                  {singleResult.truncated && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      Audit was capped at 1,000 files — re-run after this completes to pick up the rest.
+                    </p>
+                  )}
                   <div className="space-y-2">
                     {singleResult.files.map((f) => (
                       <FileRow
@@ -920,9 +1093,10 @@ export default function SharingAudit() {
                             user: singleResult.user,
                             files: [f],
                             scope: { kind: "single" },
+                            categories: categoriesFromFilter(categoryFilter),
                           })
                         }
-                        revokeDisabled={revokeBusy}
+                        revokeDisabled={revokeBusy || noCategoriesSelected}
                       />
                     ))}
                   </div>
@@ -944,7 +1118,7 @@ export default function SharingAudit() {
             ? `Revoke external sharing on ${revokeTarget?.files.length ?? 0} files`
             : "Revoke external sharing"
         }
-        summary="Removes every external permission (anyone-with-link, external domain, external email) on the selected files. Internal collaborators stay untouched."
+        summary="Removes external permissions in the selected categories from the listed files. Internal collaborators stay untouched."
         tenant={
           tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null
         }
@@ -952,7 +1126,7 @@ export default function SharingAudit() {
         confirmPhrase={isBulk ? "REVOKE" : undefined}
         confirmLabel={
           isBulk
-            ? `Revoke external on ${revokeTarget?.files.length ?? 0} files`
+            ? `Revoke on ${revokeTarget?.files.length ?? 0} files`
             : "Revoke external sharing"
         }
         busy={revokeBusy}
@@ -1050,6 +1224,45 @@ function FileRow({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CategoryFilterRow({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: Record<CategoryKey, boolean>;
+  onChange: (next: Record<CategoryKey, boolean>) => void;
+  disabled: boolean;
+}) {
+  const noneSelected = !value.anyone && !value.domain && !value.users;
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 mb-3">
+      <p className="text-xs font-medium text-muted-foreground mb-2">
+        Which sharing types should bulk and per-file revoke remove?
+      </p>
+      <div className="flex flex-wrap gap-4 text-sm">
+        {(Object.keys(CATEGORY_LABELS) as CategoryKey[]).map((key) => (
+          <label key={key} className="flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={value[key]}
+              onChange={(e) =>
+                onChange({ ...value, [key]: e.target.checked })
+              }
+              disabled={disabled}
+            />
+            {CATEGORY_LABELS[key]}
+          </label>
+        ))}
+      </div>
+      {noneSelected && (
+        <p className="text-xs text-red-600 mt-2">
+          Pick at least one category — revoke is disabled until you do.
+        </p>
+      )}
     </div>
   );
 }
