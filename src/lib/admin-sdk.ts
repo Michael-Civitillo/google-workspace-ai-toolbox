@@ -760,6 +760,12 @@ export async function revokeExternalPermissions(
       `Too many files in one revoke batch — cap is ${REVOKE_FILE_CAP}`
     );
   }
+  if (options.categories !== undefined && options.categories.length === 0) {
+    // Refuse silent no-op: an empty allowlist would filter every external
+    // permission to "skip" and audit as success. Callers that want the
+    // historical strip-all behavior should omit `categories` entirely.
+    throw new Error("categories must be a non-empty array of permission types");
+  }
 
   const allowedCategories = options.categories
     ? new Set<RevokeCategory>(options.categories)
