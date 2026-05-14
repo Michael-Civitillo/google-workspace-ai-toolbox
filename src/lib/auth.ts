@@ -50,11 +50,22 @@ function hexToBytes(hex: string): Uint8Array | null {
   return out;
 }
 
-function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
+export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   let r = 0;
   for (let i = 0; i < a.length; i++) r |= a[i] ^ b[i];
   return r === 0;
+}
+
+/**
+ * Constant-time string compare. Length differences leak (we early-exit) but
+ * the operator-visible string they're confirming is already known to them,
+ * so length disclosure is not a meaningful side channel.
+ */
+export function constantTimeStringEqual(a: string, b: string): boolean {
+  const ea = TEXT_ENCODER.encode(a);
+  const eb = TEXT_ENCODER.encode(b);
+  return constantTimeEqual(ea, eb);
 }
 
 function randomHex(byteCount: number): string {
