@@ -569,7 +569,17 @@ export interface ExternalSharedFile {
 export interface SharingAuditResult {
   user: string;
   scannedFiles: number;
+  /**
+   * True when more files exist beyond what this call scanned. Mirror of
+   * `nextPageToken !== null`; kept for clarity in UI code that just wants
+   * "did we hit the cap?".
+   */
   truncated: boolean;
+  /**
+   * Resume token. Pass back as `pageToken` to continue from where this call
+   * stopped. Null when the entire Drive has been walked.
+   */
+  nextPageToken: string | null;
   files: ExternalSharedFile[];
 }
 
@@ -584,14 +594,16 @@ const SHARING_AUDIT_FILE_CAP = 1000;
  *   - permission.type === "domain" with a domain not in tenant's verified set
  *   - permission.type === "user" or "group" with an email outside those domains
  *
- * Caps at SHARING_AUDIT_FILE_CAP files scanned per call. For larger Drives,
- * the caller should paginate via the returned `truncated` flag and re-run.
+ * Caps at SHARING_AUDIT_FILE_CAP files scanned per call. Callers walking a
+ * Drive larger than the cap should chain calls using the returned
+ * `nextPageToken`.
  *
  * Drive metadata only — we never read file contents.
  */
 export async function listExternallySharedFiles(
   tenant: Tenant | null,
-  userEmail: string
+  userEmail: string,
+  startPageToken?: string
 ): Promise<SharingAuditResult> {
   if (!isValidEmail(userEmail)) {
     throw new Error("userEmail must be a valid email address");
@@ -607,8 +619,7 @@ export async function listExternallySharedFiles(
 
   const matches: ExternalSharedFile[] = [];
   let scanned = 0;
-  let pageToken: string | undefined = undefined;
-  let truncated = false;
+  let pageToken: string | undefined = startPageToken || undefined;
 
   while (scanned < SHARING_AUDIT_FILE_CAP) {
     const remaining = SHARING_AUDIT_FILE_CAP - scanned;
@@ -655,12 +666,11 @@ export async function listExternallySharedFiles(
     if (!pageToken) break;
   }
 
-  if (pageToken) truncated = true;
-
   return {
     user: userEmail.toLowerCase(),
     scannedFiles: scanned,
-    truncated,
+    truncated: !!pageToken,
+    nextPageToken: pageToken ?? null,
     files: matches,
   };
 }
@@ -759,6 +769,15 @@ export interface RevokeFileOutcome {
   notFound?: boolean;
   /** The user-facing display name we observed. */
   fileName?: string;
+  /**
+   * Diagnostic counts captured at revoke time. Useful for explaining
+   * `removed: 0, errors: []` outcomes — most often the file's permissions
+   * were already cleaned between audit and revoke, so the audit snapshot is
+   * stale.
+   */
+  permissionsSeen?: number;
+  /** Of permissionsSeen, how many were classified as external and matched the category filter. */
+  permissionsTargeted?: number;
 }
 
 export interface RevokeBatchResult {
@@ -907,6 +926,7 @@ async function revokeForOneFile(
     return outcome;
   }
   outcome.fileName = fileName;
+  outcome.permissionsSeen = perms.length;
 
   const externalPerms = perms.filter((p) => {
     const flag = classifyPermission(p, verifiedDomains);
@@ -914,6 +934,7 @@ async function revokeForOneFile(
     if (allowedCategories && !allowedCategories.has(flag.type)) return false;
     return true;
   });
+  outcome.permissionsTargeted = externalPerms.length;
 
   for (const p of externalPerms) {
     const target =

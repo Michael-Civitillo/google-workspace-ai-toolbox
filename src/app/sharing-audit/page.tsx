@@ -52,6 +52,7 @@ interface AuditResult {
   user: string;
   scannedFiles: number;
   truncated: boolean;
+  nextPageToken?: string | null;
   files: ExternalFile[];
 }
 
@@ -79,6 +80,8 @@ interface RevokeFileOutcome {
   removedAsAdmin?: number;
   errors: Array<{ permissionId: string; target: string; message: string }>;
   notFound?: boolean;
+  permissionsSeen?: number;
+  permissionsTargeted?: number;
 }
 
 interface RevokeBatchResult {
@@ -237,6 +240,7 @@ export default function SharingAudit() {
     Record<number, Set<string>>
   >({});
   const cancelRef = useRef(false);
+  const singleCancelRef = useRef(false);
   const [includeSuspended, setIncludeSuspended] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
@@ -263,6 +267,12 @@ export default function SharingAudit() {
   // -------------------------------------------------------------------------
   // Single-user audit
   // -------------------------------------------------------------------------
+
+  // Belt: cap auto-pagination so a 1M-file Drive can't trap the operator
+  // in a 20-minute scan. After this many pages we stop and surface the
+  // remaining nextPageToken in the result so they can choose to continue.
+  const SINGLE_USER_PAGE_CAP = 20; // up to 20,000 files
+
   const runSingle = async () => {
     if (!user.trim()) return;
     setSingleLoading(true);
@@ -270,13 +280,90 @@ export default function SharingAudit() {
     setSingleResult(null);
     setSingleSelected(new Set());
     setRevokeNotice(null);
+    singleCancelRef.current = false;
     try {
-      const res = await tfetch(
-        `/api/admin/sharing-audit?user=${encodeURIComponent(user)}`
-      );
-      const data = await res.json();
-      if (data.success) setSingleResult(data.data);
-      else setError(data.error || "Audit failed");
+      let pageToken: string | undefined;
+      let totalScanned = 0;
+      const accumulated: ExternalFile[] = [];
+      let pagesFetched = 0;
+      // We populate singleResult progressively so the operator sees flagged
+      // files appear while the rest of the Drive is still being walked.
+      while (true) {
+        if (singleCancelRef.current) break;
+        const url =
+          `/api/admin/sharing-audit?user=${encodeURIComponent(user)}` +
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+        const res = await tfetch(url);
+        const data = await res.json();
+        if (!data.success) {
+          setError(data.error || "Audit failed");
+          return;
+        }
+        const page: AuditResult = data.data;
+        totalScanned += page.scannedFiles;
+        accumulated.push(...page.files);
+        pagesFetched++;
+        // Surface progress every page so the operator isn't staring at a
+        // dead spinner during a long Drive walk.
+        setSingleResult({
+          user: page.user,
+          scannedFiles: totalScanned,
+          truncated: !!page.nextPageToken,
+          nextPageToken: page.nextPageToken,
+          files: accumulated.slice(),
+        });
+        if (!page.nextPageToken) break;
+        if (pagesFetched >= SINGLE_USER_PAGE_CAP) break;
+        pageToken = page.nextPageToken;
+      }
+    } catch {
+      setError("Failed to connect to the API");
+    } finally {
+      setSingleLoading(false);
+    }
+  };
+
+  const cancelSingle = () => {
+    singleCancelRef.current = true;
+  };
+
+  // Resume a single-user audit from where it stopped — either because the
+  // operator cancelled mid-flight or because we hit the page cap.
+  const continueSingleScan = async () => {
+    if (!singleResult?.nextPageToken || singleLoading) return;
+    setSingleLoading(true);
+    singleCancelRef.current = false;
+    try {
+      let pageToken: string | undefined = singleResult.nextPageToken;
+      let totalScanned = singleResult.scannedFiles;
+      const accumulated: ExternalFile[] = singleResult.files.slice();
+      let pagesFetched = 0;
+      while (true) {
+        if (singleCancelRef.current) break;
+        const url =
+          `/api/admin/sharing-audit?user=${encodeURIComponent(user)}` +
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+        const res = await tfetch(url);
+        const data = await res.json();
+        if (!data.success) {
+          setError(data.error || "Audit failed");
+          return;
+        }
+        const page: AuditResult = data.data;
+        totalScanned += page.scannedFiles;
+        accumulated.push(...page.files);
+        pagesFetched++;
+        setSingleResult({
+          user: page.user,
+          scannedFiles: totalScanned,
+          truncated: !!page.nextPageToken,
+          nextPageToken: page.nextPageToken,
+          files: accumulated.slice(),
+        });
+        if (!page.nextPageToken) break;
+        if (pagesFetched >= SINGLE_USER_PAGE_CAP) break;
+        pageToken = page.nextPageToken;
+      }
     } catch {
       setError("Failed to connect to the API");
     } finally {
@@ -488,9 +575,23 @@ export default function SharingAudit() {
       const filesWithErrors = mergedResults.filter(
         (r) => r.errors.length > 0
       );
+      // Files where the revoke completed cleanly but found nothing to remove
+      // — typically because the audit snapshot was stale (perms got cleaned
+      // somewhere between the audit and the revoke). Drop them from the UI
+      // list too so the operator sees an up-to-date picture.
+      const filesAlreadyClean = mergedResults.filter(
+        (r) =>
+          r.errors.length === 0 &&
+          r.removed === 0 &&
+          !r.notFound
+      );
 
-      // Optimistically remove fully-cleaned files from the result lists.
-      const cleanedIds = new Set(filesCleaned.map((r) => r.fileId));
+      // Optimistically remove fully-cleaned AND already-clean files from
+      // the result lists.
+      const cleanedIds = new Set([
+        ...filesCleaned.map((r) => r.fileId),
+        ...filesAlreadyClean.map((r) => r.fileId),
+      ]);
       if (revokeTarget.scope.kind === "single") {
         setSingleResult((prev) =>
           prev
@@ -540,11 +641,28 @@ export default function SharingAudit() {
               filesWithErrors.length === 1 ? "" : "s"
             } had per-file errors — see Drive directly to investigate.`
           : "";
-      const baseMessage = `Removed ${totalRemoved} external permission${
-        totalRemoved === 1 ? "" : "s"
-      } across ${filesCleaned.length} file${
-        filesCleaned.length === 1 ? "" : "s"
-      }.${adminSummary}${errorSummary}`;
+      const alreadyCleanSummary =
+        filesAlreadyClean.length > 0
+          ? ` ${filesAlreadyClean.length} file${
+              filesAlreadyClean.length === 1 ? "" : "s"
+            } had nothing to remove — perms were likely already cleaned between the audit and this run, or fell outside your selected categories. Removed from the list.`
+          : "";
+
+      // If we removed nothing and only had no-ops (no errors), the operator
+      // is almost certainly looking at a stale audit. Make the message tell
+      // them that instead of an ambiguous "0 across 0 files".
+      const baseMessage =
+        totalRemoved === 0 &&
+        filesAlreadyClean.length > 0 &&
+        filesWithErrors.length === 0
+          ? `No external permissions needed removal on the ${filesAlreadyClean.length} selected file${
+              filesAlreadyClean.length === 1 ? "" : "s"
+            }. They have been cleaned from the list — re-run the audit to refresh.`
+          : `Removed ${totalRemoved} external permission${
+              totalRemoved === 1 ? "" : "s"
+            } across ${filesCleaned.length} file${
+              filesCleaned.length === 1 ? "" : "s"
+            }.${adminSummary}${errorSummary}${alreadyCleanSummary}`;
 
       if (abortedAt) {
         // Earlier batches are always full REVOKE_BATCH_SIZE chunks (the partial
@@ -703,8 +821,9 @@ export default function SharingAudit() {
           <CardHeader>
             <CardTitle className="text-lg">Audit one user</CardTitle>
             <CardDescription>
-              Scans up to 1,000 owned Drive files and flags any permission
-              outside the tenant&apos;s verified domains. Read-only.
+              Walks every owned Drive file (1,000 per request, auto-continued
+              up to 20,000 in a single run) and flags any permission outside
+              the tenant&apos;s verified domains. Read-only.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -716,20 +835,29 @@ export default function SharingAudit() {
                   placeholder="user@yourdomain.com"
                   value={user}
                   onChange={(e) => setUser(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && runSingle()}
-                  disabled={tenantLoading}
+                  onKeyDown={(e) => e.key === "Enter" && !singleLoading && runSingle()}
+                  disabled={tenantLoading || singleLoading}
                 />
-                <Button
-                  onClick={runSingle}
-                  disabled={!user.trim() || singleLoading || tenantLoading}
-                >
-                  {singleLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
+                {!singleLoading ? (
+                  <Button
+                    onClick={runSingle}
+                    disabled={!user.trim() || tenantLoading}
+                  >
                     <Search className="h-4 w-4" />
-                  )}
-                </Button>
+                  </Button>
+                ) : (
+                  <Button variant="outline" onClick={cancelSingle}>
+                    <StopCircle className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
+              {singleLoading && singleResult && (
+                <p className="text-xs text-muted-foreground">
+                  Scanning… {singleResult.scannedFiles.toLocaleString()} file
+                  {singleResult.scannedFiles === 1 ? "" : "s"} walked,{" "}
+                  {singleResult.files.length.toLocaleString()} flagged so far.
+                </p>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -1029,12 +1157,25 @@ export default function SharingAudit() {
               </div>
             </CardHeader>
             <CardContent>
-              {singleResult.truncated && (
+              {singleResult.truncated && !singleLoading && (
                 <Alert className="mb-4 border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
                   <AlertTriangle className="h-4 w-4 text-amber-600" />
-                  <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
-                    Hit the 1,000-file cap. There may be additional
-                    externally-shared files that weren&apos;t scanned.
+                  <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm flex items-center justify-between gap-3">
+                    <span>
+                      Scanned {singleResult.scannedFiles.toLocaleString()} files
+                      and hit the per-run page cap. More files in this Drive
+                      have not been audited yet.
+                    </span>
+                    {singleResult.nextPageToken && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={continueSingleScan}
+                      >
+                        <PlayCircle className="h-3.5 w-3.5 mr-1.5" />
+                        Continue scanning
+                      </Button>
+                    )}
                   </AlertDescription>
                 </Alert>
               )}
