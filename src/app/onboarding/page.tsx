@@ -40,6 +40,11 @@ import {
   TENANT_COLOR_CLASSES,
   type TenantColor,
 } from "@/lib/tenants";
+import {
+  ScopePreflightPanel,
+  type PreflightState,
+} from "@/components/scope-preflight-panel";
+import type { PreflightResult } from "@/lib/preflight";
 
 type StepId =
   | "welcome"
@@ -128,6 +133,9 @@ export default function OnboardingPage() {
     | null
   >(null);
   const [tenantCount, setTenantCount] = useState<number>(0);
+  const [scopePreflight, setScopePreflight] = useState<PreflightState | null>(
+    null
+  );
 
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -245,6 +253,34 @@ export default function OnboardingPage() {
     }
   }
 
+  async function handleScopeCheck() {
+    if (!createdTenantId) return;
+    setScopePreflight({ kind: "loading" });
+    try {
+      const res = await fetch(
+        `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(createdTenantId)}`,
+        { headers: { "x-tenant-id": createdTenantId } }
+      );
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        setScopePreflight({
+          kind: "error",
+          message: json.error ?? "Preflight failed",
+        });
+        return;
+      }
+      setScopePreflight({
+        kind: "ok",
+        data: json.data as PreflightResult,
+      });
+    } catch (e) {
+      setScopePreflight({
+        kind: "error",
+        message: e instanceof Error ? e.message : "Network error",
+      });
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -301,6 +337,9 @@ export default function OnboardingPage() {
             onVerify={handleVerify}
             onFinish={() => router.push("/")}
             tenantName={tenantForm.name || "your tenant"}
+            tenantId={createdTenantId}
+            scopePreflight={scopePreflight}
+            onScopeCheck={handleScopeCheck}
           />
         )}
 
@@ -1019,6 +1058,9 @@ function VerifyStep({
   onVerify,
   onFinish,
   tenantName,
+  tenantId,
+  scopePreflight,
+  onScopeCheck,
 }: {
   status: GwsStatus | null;
   loading: boolean;
@@ -1030,6 +1072,9 @@ function VerifyStep({
   onVerify: () => void;
   onFinish: () => void;
   tenantName: string;
+  tenantId: string | null;
+  scopePreflight: PreflightState | null;
+  onScopeCheck: () => void;
 }) {
   return (
     <Card>
@@ -1079,6 +1124,42 @@ function VerifyStep({
             </span>
           )}
         </div>
+
+        {tenantId && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div>
+              <p className="text-sm font-medium">
+                Verify Domain-Wide Delegation scopes
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Checks every OAuth scope this toolbox impersonates against
+                Google&apos;s auth server, so missing scopes surface here
+                instead of silently breaking a future operation.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onScopeCheck}
+                disabled={scopePreflight?.kind === "loading"}
+              >
+                {scopePreflight?.kind === "loading" ? (
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                ) : null}
+                {scopePreflight?.kind === "loading"
+                  ? "Checking scopes..."
+                  : "Check DWD scopes"}
+              </Button>
+            </div>
+            {scopePreflight && (
+              <ScopePreflightPanel
+                state={scopePreflight}
+                onRetry={onScopeCheck}
+              />
+            )}
+          </div>
+        )}
 
         <div className="rounded-lg border bg-muted/40 p-4 text-sm space-y-2">
           <p className="font-medium">You&apos;re all set</p>
