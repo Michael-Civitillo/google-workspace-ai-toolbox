@@ -83,6 +83,20 @@ export async function POST(request: NextRequest) {
       (r) => r.errors.length > 0
     ).length;
 
+    // Capture the actual Drive API error per permission so the audit log
+    // alone is enough to diagnose why a revoke failed. Capped at 50 file
+    // entries to keep the log line from blowing up on huge batches; the
+    // browser response still carries the full set.
+    const FAILURE_DETAIL_CAP = 50;
+    const failures = result.results
+      .filter((r) => r.errors.length > 0)
+      .slice(0, FAILURE_DETAIL_CAP)
+      .map((r) => ({
+        fileId: r.fileId,
+        fileName: r.fileName ?? null,
+        errors: r.errors,
+      }));
+
     audit({
       action: "sharing_audit.revoke",
       tenantId: tenant?.id ?? null,
@@ -93,6 +107,7 @@ export async function POST(request: NextRequest) {
         totalRemoved,
         filesWithErrors,
         categories: categories ?? null,
+        ...(failures.length > 0 ? { failures } : {}),
       },
       outcome: filesWithErrors > 0 ? "error" : "success",
       error:
