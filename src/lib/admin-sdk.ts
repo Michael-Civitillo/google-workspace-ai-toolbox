@@ -141,6 +141,20 @@ function getDriveClientWritable(
   return google.drive({ version: "v3", auth });
 }
 
+/**
+ * Drive client run AS the tenant admin with the full Drive scope. Used as a
+ * second-attempt fallback when a user-scoped permission delete is rejected
+ * because the permission is inherited from a Shared Drive — domain admins
+ * with the `useDomainAdminAccess: true` parameter can override the
+ * inheritance restriction. See:
+ * https://developers.google.com/workspace/drive/api/guides/limited-expansive-access
+ */
+function getDriveClientAsAdmin(tenant: Tenant | null): drive_v3.Drive {
+  const subject = impersonatedAdminFor(tenant);
+  const auth = buildAuth(tenant, subject, [SCOPES.DRIVE_FULL]);
+  return google.drive({ version: "v3", auth });
+}
+
 export interface UserInfo {
   primaryEmail: string;
   name: {
@@ -698,6 +712,33 @@ function isNotFoundError(e: unknown): boolean {
   );
 }
 
+/**
+ * Detect Drive's "this permission is inherited, you can't delete it as the
+ * file owner" rejection. Match phrasing rather than a single error code so
+ * minor wording changes in the API don't bypass the admin-mode fallback.
+ */
+function isInheritedPermissionError(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as {
+    code?: number;
+    status?: number;
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    message?: string;
+  };
+  const status = err.code ?? err.status ?? err.response?.status;
+  if (status !== 403) return false;
+  const msg = (
+    err.response?.data?.error?.message ??
+    err.message ??
+    ""
+  ).toLowerCase();
+  return (
+    msg.includes("inherited") ||
+    msg.includes("limited expansive access") ||
+    msg.includes("cannot delete the permission")
+  );
+}
+
 // ---------------------------------------------------------------------------
 // External sharing remediation
 // ---------------------------------------------------------------------------
@@ -706,6 +747,12 @@ export interface RevokeFileOutcome {
   fileId: string;
   /** Number of permissions actually deleted. */
   removed: number;
+  /**
+   * Of those removals, how many required falling back to domain-admin mode
+   * because the user-scoped delete was rejected (typically Shared Drive
+   * inherited permissions).
+   */
+  removedAsAdmin?: number;
   /** External permissions we tried to delete but couldn't, with the reason. */
   errors: Array<{ permissionId: string; target: string; message: string }>;
   /** True if the file was missing or no longer accessible. */
@@ -778,13 +825,27 @@ export async function revokeExternalPermissions(
   );
 
   const drive = getDriveClientWritable(tenant, userEmail);
+  // Built lazily inside the loop only if we actually need it — keeps the
+  // common all-clean batch from doing an extra JWT exchange against
+  // Google's auth servers.
+  let adminDrive: drive_v3.Drive | null = null;
+  const getAdminDrive = () => {
+    if (!adminDrive) adminDrive = getDriveClientAsAdmin(tenant);
+    return adminDrive;
+  };
 
   const results: RevokeFileOutcome[] = [];
   for (const rawFileId of fileIds) {
     const fileId = String(rawFileId || "").trim();
     if (!fileId) continue;
     results.push(
-      await revokeForOneFile(drive, fileId, verifiedDomains, allowedCategories)
+      await revokeForOneFile(
+        drive,
+        getAdminDrive,
+        fileId,
+        verifiedDomains,
+        allowedCategories
+      )
     );
   }
 
@@ -793,6 +854,7 @@ export async function revokeExternalPermissions(
 
 async function revokeForOneFile(
   drive: drive_v3.Drive,
+  getAdminDrive: () => drive_v3.Drive,
   fileId: string,
   verifiedDomains: Set<string>,
   allowedCategories: Set<RevokeCategory> | null
@@ -883,6 +945,34 @@ async function revokeForOneFile(
       if (isNotFoundError(e)) {
         // Already gone — count as success, no error needed.
         continue;
+      }
+      if (isInheritedPermissionError(e)) {
+        // Retry as a domain admin with useDomainAdminAccess. This is the
+        // only path Drive permits for inherited Shared Drive permissions.
+        try {
+          await getAdminDrive().permissions.delete(
+            {
+              fileId,
+              permissionId: p.id,
+              supportsAllDrives: true,
+              useDomainAdminAccess: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          );
+          outcome.removed++;
+          outcome.removedAsAdmin = (outcome.removedAsAdmin ?? 0) + 1;
+          continue;
+        } catch (e2) {
+          if (isNotFoundError(e2)) continue;
+          outcome.errors.push({
+            permissionId: p.id,
+            target,
+            message: `Inherited permission — domain-admin retry also failed: ${
+              e2 instanceof Error ? e2.message : String(e2)
+            }`,
+          });
+          continue;
+        }
       }
       outcome.errors.push({
         permissionId: p.id,

@@ -79,6 +79,10 @@ export async function POST(request: NextRequest) {
       (sum, r) => sum + r.removed,
       0
     );
+    const totalRemovedAsAdmin = result.results.reduce(
+      (sum, r) => sum + (r.removedAsAdmin ?? 0),
+      0
+    );
     const filesWithErrors = result.results.filter(
       (r) => r.errors.length > 0
     ).length;
@@ -105,6 +109,7 @@ export async function POST(request: NextRequest) {
         user,
         fileCount: fileIds.length,
         totalRemoved,
+        totalRemovedAsAdmin,
         filesWithErrors,
         categories: categories ?? null,
         ...(failures.length > 0 ? { failures } : {}),
