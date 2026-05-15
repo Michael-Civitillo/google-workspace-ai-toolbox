@@ -287,7 +287,7 @@ export default function SharingAudit() {
   // Tenant-wide audit — client-orchestrated
   // -------------------------------------------------------------------------
 
-  const runTenantWide = async () => {
+  const runTenantWide = async (mode: "all" | "suspended-only" = "all") => {
     setError(null);
     setSingleResult(null);
     setSingleSelected(new Set());
@@ -317,8 +317,8 @@ export default function SharingAudit() {
         if (!pageToken) break;
       }
 
-      const targets = allUsers.filter(
-        (u) => includeSuspended || !u.suspended
+      const targets = allUsers.filter((u) =>
+        mode === "suspended-only" ? u.suspended : includeSuspended || !u.suspended
       );
 
       const seeded: PerUserOutcome[] = targets.map((u) => ({
@@ -744,15 +744,29 @@ export default function SharingAudit() {
                 onChange={(e) => setIncludeSuspended(e.target.checked)}
                 disabled={tenantLoading}
               />
-              Include suspended users
+              Include suspended users in &quot;Scan every user&quot;
             </label>
 
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {!tenantLoading ? (
-                <Button onClick={runTenantWide} disabled={singleLoading}>
-                  <PlayCircle className="h-4 w-4 mr-1.5" />
-                  Scan every user
-                </Button>
+                <>
+                  <Button
+                    onClick={() => runTenantWide("all")}
+                    disabled={singleLoading}
+                  >
+                    <PlayCircle className="h-4 w-4 mr-1.5" />
+                    Scan every user
+                  </Button>
+                  <Button
+                    onClick={() => runTenantWide("suspended-only")}
+                    disabled={singleLoading}
+                    variant="outline"
+                    title="Run the audit only on users whose account is currently suspended — the fastest path to locking down shares left behind by offboarded staff"
+                  >
+                    <PlayCircle className="h-4 w-4 mr-1.5" />
+                    Scan suspended users only
+                  </Button>
+                </>
               ) : (
                 <Button variant="outline" onClick={cancelTenantWide}>
                   <StopCircle className="h-4 w-4 mr-1.5" />
