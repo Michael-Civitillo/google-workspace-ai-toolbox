@@ -24,6 +24,8 @@ import {
   X,
   AlertCircle,
   ArrowRightLeft,
+  ShieldCheck,
+  Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -33,6 +35,11 @@ import {
   type TenantColor,
 } from "@/lib/tenants";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
+import {
+  ScopePreflightPanel,
+  type PreflightState,
+} from "@/components/scope-preflight-panel";
+import type { PreflightResult } from "@/lib/preflight";
 
 interface TenantsState {
   tenants: Tenant[];
@@ -69,6 +76,9 @@ export default function TenantsPage() {
   const [saving, setSaving] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Tenant | null>(null);
+  const [preflightByTenant, setPreflightByTenant] = useState<
+    Record<string, PreflightState>
+  >({});
 
   const load = useCallback(() => {
     setLoading(true);
@@ -182,6 +192,47 @@ export default function TenantsPage() {
     } finally {
       setSwitching(null);
     }
+  }
+
+  async function runPreflight(tenantId: string) {
+    setPreflightByTenant((prev) => ({ ...prev, [tenantId]: { kind: "loading" } }));
+    try {
+      const res = await fetch(
+        `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(tenantId)}`,
+        { headers: { "x-tenant-id": tenantId } }
+      );
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        setPreflightByTenant((prev) => ({
+          ...prev,
+          [tenantId]: {
+            kind: "error",
+            message: json.error ?? "Preflight failed",
+          },
+        }));
+        return;
+      }
+      setPreflightByTenant((prev) => ({
+        ...prev,
+        [tenantId]: { kind: "ok", data: json.data as PreflightResult },
+      }));
+    } catch (e) {
+      setPreflightByTenant((prev) => ({
+        ...prev,
+        [tenantId]: {
+          kind: "error",
+          message: e instanceof Error ? e.message : "Network error",
+        },
+      }));
+    }
+  }
+
+  function dismissPreflight(tenantId: string) {
+    setPreflightByTenant((prev) => {
+      const next = { ...prev };
+      delete next[tenantId];
+      return next;
+    });
   }
 
   function startEdit(tenant: Tenant) {
@@ -348,6 +399,29 @@ export default function TenantsPage() {
                             </Button>
                           )}
                           <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              const cur = preflightByTenant[tenant.id];
+                              if (cur) dismissPreflight(tenant.id);
+                              else void runPreflight(tenant.id);
+                            }}
+                            disabled={
+                              preflightByTenant[tenant.id]?.kind === "loading"
+                            }
+                            className="h-8 text-xs"
+                            title="Verify that every OAuth scope this toolbox needs is authorized in Domain-Wide Delegation"
+                          >
+                            {preflightByTenant[tenant.id]?.kind === "loading" ? (
+                              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                            ) : (
+                              <ShieldCheck className="h-3.5 w-3.5 mr-1" />
+                            )}
+                            {preflightByTenant[tenant.id]
+                              ? "Hide scopes"
+                              : "Test scopes"}
+                          </Button>
+                          <Button
                             variant="ghost"
                             size="sm"
                             onClick={() => startEdit(tenant)}
@@ -367,6 +441,12 @@ export default function TenantsPage() {
                           </Button>
                         </div>
                       </div>
+                    )}
+                    {preflightByTenant[tenant.id] && !isEditing && (
+                      <ScopePreflightPanel
+                        state={preflightByTenant[tenant.id]}
+                        onRetry={() => void runPreflight(tenant.id)}
+                      />
                     )}
                   </div>
                 );
