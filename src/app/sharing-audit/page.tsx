@@ -76,6 +76,7 @@ interface RevokeFileOutcome {
   fileId: string;
   fileName?: string;
   removed: number;
+  removedAsAdmin?: number;
   errors: Array<{ permissionId: string; target: string; message: string }>;
   notFound?: boolean;
 }
@@ -525,6 +526,14 @@ export default function SharingAudit() {
         });
       }
 
+      const totalRemovedAsAdmin = mergedResults.reduce(
+        (sum, r) => sum + (r.removedAsAdmin ?? 0),
+        0
+      );
+      const adminSummary =
+        totalRemovedAsAdmin > 0
+          ? ` ${totalRemovedAsAdmin} of those required domain-admin escalation (Shared Drive inherited permissions).`
+          : "";
       const errorSummary =
         filesWithErrors.length > 0
           ? ` ${filesWithErrors.length} file${
@@ -535,7 +544,7 @@ export default function SharingAudit() {
         totalRemoved === 1 ? "" : "s"
       } across ${filesCleaned.length} file${
         filesCleaned.length === 1 ? "" : "s"
-      }.${errorSummary}`;
+      }.${adminSummary}${errorSummary}`;
 
       if (abortedAt) {
         // Earlier batches are always full REVOKE_BATCH_SIZE chunks (the partial
