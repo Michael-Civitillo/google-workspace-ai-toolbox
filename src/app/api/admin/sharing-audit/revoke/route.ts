@@ -101,6 +101,29 @@ export async function POST(request: NextRequest) {
         errors: r.errors,
       }));
 
+    // Files where revoke completed cleanly but had nothing to do: no perms
+    // matched the classifier (audit snapshot was probably stale — perms got
+    // cleaned between the audit and now), or no perms matched the category
+    // filter. Logged so a "removed 0 from 56 files" outcome is diagnosable.
+    const noOps = result.results
+      .filter(
+        (r) =>
+          r.removed === 0 &&
+          r.errors.length === 0 &&
+          !r.notFound
+      )
+      .slice(0, FAILURE_DETAIL_CAP)
+      .map((r) => ({
+        fileId: r.fileId,
+        fileName: r.fileName ?? null,
+        permissionsSeen: r.permissionsSeen ?? 0,
+        permissionsTargeted: r.permissionsTargeted ?? 0,
+      }));
+    const noOpFileCount = result.results.filter(
+      (r) =>
+        r.removed === 0 && r.errors.length === 0 && !r.notFound
+    ).length;
+
     audit({
       action: "sharing_audit.revoke",
       tenantId: tenant?.id ?? null,
@@ -111,8 +134,10 @@ export async function POST(request: NextRequest) {
         totalRemoved,
         totalRemovedAsAdmin,
         filesWithErrors,
+        noOpFileCount,
         categories: categories ?? null,
         ...(failures.length > 0 ? { failures } : {}),
+        ...(noOps.length > 0 ? { noOps } : {}),
       },
       outcome: filesWithErrors > 0 ? "error" : "success",
       error:
