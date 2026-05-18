@@ -171,10 +171,18 @@ function permissionLabel(p: ExternalPermission): string {
  * Convert one or more per-user audit results into a flat CSV. We expand each
  * external permission into its own row and prefix with the file owner so the
  * tenant-wide export slots straight into a remediation spreadsheet.
+ *
+ * `pathsByUser` is keyed by the user the audit ran as, then by fileId.
+ * Missing entries get an empty path cell so an export still works if
+ * resolution failed for some files.
  */
-function toCsv(results: AuditResult[]): string {
+function toCsv(
+  results: AuditResult[],
+  pathsByUser?: Record<string, Record<string, string>>
+): string {
   const header = [
     "owner",
+    "path",
     "file_name",
     "file_id",
     "mime_type",
@@ -186,10 +194,13 @@ function toCsv(results: AuditResult[]): string {
   ];
   const rows: string[][] = [header];
   for (const r of results) {
+    const paths = pathsByUser?.[r.user] ?? {};
     for (const f of r.files) {
+      const path = paths[f.id] ?? "";
       for (const p of f.external) {
         rows.push([
           r.user,
+          path,
           f.name,
           f.id,
           f.mimeType,
@@ -205,6 +216,42 @@ function toCsv(results: AuditResult[]): string {
   return rows
     .map((r) => r.map((c) => `"${(c ?? "").replace(/"/g, '""')}"`).join(","))
     .join("\n");
+}
+
+/**
+ * Ask the server to walk Drive's parent chain for every flagged file
+ * across these audit results, one user at a time (since impersonation is
+ * per user). Returns `{ [user]: { [fileId]: path } }`. Failures fall
+ * back to an empty per-user map — the CSV still exports, just without
+ * the path column populated for that user.
+ */
+async function fetchPathsForResults(
+  results: AuditResult[]
+): Promise<Record<string, Record<string, string>>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const r of results) {
+    if (r.files.length === 0) {
+      out[r.user] = {};
+      continue;
+    }
+    try {
+      const res = await tfetch("/api/admin/sharing-audit/resolve-paths", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: r.user,
+          fileIds: r.files.map((f) => f.id),
+        }),
+      });
+      const data = await res.json();
+      out[r.user] = data?.success
+        ? (data.data?.paths as Record<string, string>) ?? {}
+        : {};
+    } catch {
+      out[r.user] = {};
+    }
+  }
+  return out;
 }
 
 function downloadCsv(filename: string, content: string) {
@@ -263,6 +310,41 @@ export default function SharingAudit() {
     [categoryFilter]
   );
   const noCategoriesSelected = activeCategories.size === 0;
+
+  // Export-CSV state. Resolution can take many seconds for large audits so
+  // we surface a "Resolving paths…" indicator on the export button.
+  const [exportBusy, setExportBusy] = useState(false);
+
+  async function exportSingleCsv(result: AuditResult) {
+    setExportBusy(true);
+    try {
+      const paths = await fetchPathsForResults([result]);
+      downloadCsv(
+        `external-sharing-${result.user}-${new Date()
+          .toISOString()
+          .slice(0, 10)}.csv`,
+        toCsv([result], paths)
+      );
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function exportTenantCsv(aggregated: AuditResult[]) {
+    if (aggregated.length === 0) return;
+    setExportBusy(true);
+    try {
+      const paths = await fetchPathsForResults(aggregated);
+      downloadCsv(
+        `tenant-external-sharing-${new Date()
+          .toISOString()
+          .slice(0, 10)}.csv`,
+        toCsv(aggregated, paths)
+      );
+    } finally {
+      setExportBusy(false);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Single-user audit
@@ -923,18 +1005,16 @@ export default function SharingAudit() {
                         truncated: p.truncated ?? false,
                         files: p.files ?? [],
                       }));
-                    if (aggregated.length === 0) return;
-                    downloadCsv(
-                      `tenant-external-sharing-${new Date()
-                        .toISOString()
-                        .slice(0, 10)}.csv`,
-                      toCsv(aggregated)
-                    );
+                    void exportTenantCsv(aggregated);
                   }}
-                  disabled={tenantSummary.flaggedFiles === 0}
+                  disabled={tenantSummary.flaggedFiles === 0 || exportBusy}
                 >
-                  <Download className="h-3.5 w-3.5 mr-1.5" />
-                  Export CSV
+                  {exportBusy ? (
+                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5 mr-1.5" />
+                  )}
+                  {exportBusy ? "Resolving paths…" : "Export CSV"}
                 </Button>
               )}
             </div>
@@ -1141,17 +1221,15 @@ export default function SharingAudit() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
-                      downloadCsv(
-                        `external-sharing-${singleResult.user}-${new Date()
-                          .toISOString()
-                          .slice(0, 10)}.csv`,
-                        toCsv([singleResult])
-                      )
-                    }
+                    onClick={() => void exportSingleCsv(singleResult)}
+                    disabled={exportBusy}
                   >
-                    <Download className="h-3.5 w-3.5 mr-1.5" />
-                    Export CSV
+                    {exportBusy ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5 mr-1.5" />
+                    )}
+                    {exportBusy ? "Resolving paths…" : "Export CSV"}
                   </Button>
                 )}
               </div>

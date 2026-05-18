@@ -675,6 +675,147 @@ export async function listExternallySharedFiles(
   };
 }
 
+/**
+ * Per-batch cap for path resolution. Each file might trigger N
+ * `files.get` calls for ancestor folders, but the per-tenant folder cache
+ * amortises across the whole batch — most files share parents.
+ */
+const PATH_RESOLVE_FILE_CAP = 1000;
+
+/** Defensive limit on how far we'll walk up a parent chain. */
+const PATH_RESOLVE_MAX_DEPTH = 50;
+
+interface FolderNode {
+  name: string;
+  parents: string[];
+  driveId?: string;
+}
+
+/**
+ * Resolve each file ID to its full Drive folder path. Climbs the parent
+ * chain via `files.get`, caching folder metadata so a Drive with one file
+ * per folder costs N calls but a Drive with a thousand files in one folder
+ * costs ~2 calls (file + folder).
+ *
+ * The leaf file's own name is NOT included in the returned path — the CSV
+ * already has a file_name column, so the path field describes "where the
+ * file lives" rather than the file itself.
+ *
+ * Files at My Drive root resolve to "My Drive". Files in a Shared Drive
+ * resolve to "Shared Drive: <name> / ...". Anything we can't resolve
+ * (deleted folders, permission lost, weird metadata) gets a sentinel
+ * "(path unavailable)" so the CSV row stays parseable.
+ */
+export async function resolveFilePaths(
+  tenant: Tenant | null,
+  userEmail: string,
+  fileIds: string[]
+): Promise<Record<string, string>> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!Array.isArray(fileIds) || fileIds.length === 0) {
+    return {};
+  }
+  if (fileIds.length > PATH_RESOLVE_FILE_CAP) {
+    throw new Error(
+      `Too many files in one resolve batch — cap is ${PATH_RESOLVE_FILE_CAP}`
+    );
+  }
+
+  const drive = getDriveClient(tenant, userEmail);
+  const folderCache = new Map<string, FolderNode | null>();
+  const driveNameCache = new Map<string, string>();
+  const out: Record<string, string> = {};
+
+  const fetchNode = async (id: string): Promise<FolderNode | null> => {
+    const cached = folderCache.get(id);
+    if (cached !== undefined) return cached;
+    try {
+      const meta = await drive.files.get(
+        {
+          fileId: id,
+          fields: "id, name, parents, driveId",
+          supportsAllDrives: true,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+      const node: FolderNode = {
+        name: meta.data.name || "(untitled)",
+        parents: meta.data.parents || [],
+        driveId: meta.data.driveId ?? undefined,
+      };
+      folderCache.set(id, node);
+      return node;
+    } catch {
+      folderCache.set(id, null);
+      return null;
+    }
+  };
+
+  const resolveDriveName = async (driveId: string): Promise<string> => {
+    const cached = driveNameCache.get(driveId);
+    if (cached) return cached;
+    try {
+      const d = await drive.drives.get(
+        { driveId },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+      const label = `Shared Drive: ${d.data.name || driveId}`;
+      driveNameCache.set(driveId, label);
+      return label;
+    } catch {
+      const label = `Shared Drive: ${driveId}`;
+      driveNameCache.set(driveId, label);
+      return label;
+    }
+  };
+
+  for (const rawId of fileIds) {
+    const fileId = String(rawId || "").trim();
+    if (!fileId) continue;
+    const fileNode = await fetchNode(fileId);
+    if (!fileNode) {
+      out[fileId] = "(path unavailable)";
+      continue;
+    }
+    if (fileNode.parents.length === 0) {
+      out[fileId] = fileNode.driveId
+        ? await resolveDriveName(fileNode.driveId)
+        : "My Drive";
+      continue;
+    }
+
+    const segments: string[] = [];
+    let currentId: string | undefined = fileNode.parents[0];
+    let depthExceeded = false;
+    for (let i = 0; i < PATH_RESOLVE_MAX_DEPTH; i++) {
+      if (!currentId) break;
+      const folder = await fetchNode(currentId);
+      if (!folder) {
+        segments.unshift("(unknown folder)");
+        break;
+      }
+      segments.unshift(folder.name);
+      if (folder.parents.length === 0) {
+        if (folder.driveId) {
+          segments.unshift(await resolveDriveName(folder.driveId));
+        } else {
+          segments.unshift("My Drive");
+        }
+        break;
+      }
+      currentId = folder.parents[0];
+      if (i === PATH_RESOLVE_MAX_DEPTH - 1) depthExceeded = true;
+    }
+    if (depthExceeded) segments.unshift("…");
+
+    out[fileId] = segments.join(" / ");
+  }
+
+  return out;
+}
+
 function classifyPermission(
   p: drive_v3.Schema$Permission,
   verifiedDomains: Set<string>
