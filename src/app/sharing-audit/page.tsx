@@ -27,6 +27,8 @@ import {
   PlayCircle,
   ShieldOff,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
@@ -286,6 +288,14 @@ export default function SharingAudit() {
   const [tenantSelected, setTenantSelected] = useState<
     Record<number, Set<string>>
   >({});
+  // userIndex set for collapsed users in the tenant-wide results list. A
+  // collapsed user shows the summary row but hides the per-file list — much
+  // easier to scroll a long tenant when one user has hundreds of flagged
+  // files. Default state is expanded (empty set) to preserve the existing
+  // out-of-the-box behaviour.
+  const [collapsedUsers, setCollapsedUsers] = useState<Set<number>>(
+    () => new Set()
+  );
   const cancelRef = useRef(false);
   const singleCancelRef = useRef(false);
   const [includeSuspended, setIncludeSuspended] = useState(false);
@@ -463,6 +473,7 @@ export default function SharingAudit() {
     setSingleSelected(new Set());
     setPerUser([]);
     setTenantSelected({});
+    setCollapsedUsers(new Set());
     setTenantUserCount(null);
     setRevokeNotice(null);
     cancelRef.current = false;
@@ -585,6 +596,29 @@ export default function SharingAudit() {
       else cur.add(fileId);
       return { ...prev, [userIndex]: cur };
     });
+  }
+
+  function toggleUserCollapsed(userIndex: number) {
+    setCollapsedUsers((prev) => {
+      const next = new Set(prev);
+      if (next.has(userIndex)) next.delete(userIndex);
+      else next.add(userIndex);
+      return next;
+    });
+  }
+
+  function collapseAllUsers() {
+    const indices = new Set<number>();
+    perUser.forEach((p, idx) => {
+      if (p.status === "done" && (p.files?.length ?? 0) > 0) {
+        indices.add(idx);
+      }
+    });
+    setCollapsedUsers(indices);
+  }
+
+  function expandAllUsers() {
+    setCollapsedUsers(new Set());
   }
 
   function setTenantAllForUser(
@@ -1053,6 +1087,35 @@ export default function SharingAudit() {
                 onChange={setCategoryFilter}
                 disabled={revokeBusy}
               />
+              {tenantSummary && tenantSummary.flaggedUsers > 0 && (
+                <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-muted-foreground">
+                  <span>
+                    {collapsedUsers.size} of {tenantSummary.flaggedUsers}{" "}
+                    user
+                    {tenantSummary.flaggedUsers === 1 ? "" : "s"} collapsed
+                  </span>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={collapseAllUsers}
+                    disabled={
+                      collapsedUsers.size === tenantSummary.flaggedUsers
+                    }
+                  >
+                    <ChevronRight className="h-3 w-3 mr-1" />
+                    Collapse all
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={expandAllUsers}
+                    disabled={collapsedUsers.size === 0}
+                  >
+                    <ChevronDown className="h-3 w-3 mr-1" />
+                    Expand all
+                  </Button>
+                </div>
+              )}
               <div className="space-y-2">
                 {perUser.map((p, idx) => {
                   const flagged = p.files ?? [];
@@ -1062,54 +1125,99 @@ export default function SharingAudit() {
                   const matching = flagged.filter((f) =>
                     fileMatchesFilter(f, activeCategories)
                   );
+                  const isCollapsible =
+                    p.status === "done" && flagged.length > 0;
+                  const isCollapsed = isCollapsible && collapsedUsers.has(idx);
                   return (
                     <div
                       key={p.user}
                       className="rounded-lg border bg-muted/30 px-3 py-2"
                     >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium truncate">{p.user}</p>
-                          {p.status === "running" && (
-                            <p className="text-xs text-muted-foreground flex items-center gap-1">
-                              <Loader2 className="h-3 w-3 animate-spin" />{" "}
-                              scanning…
-                            </p>
+                      <div
+                        className={`flex items-center justify-between gap-3 ${
+                          isCollapsible
+                            ? "cursor-pointer select-none -mx-1 px-1 py-0.5 rounded hover:bg-muted/60"
+                            : ""
+                        }`}
+                        onClick={
+                          isCollapsible
+                            ? () => toggleUserCollapsed(idx)
+                            : undefined
+                        }
+                        role={isCollapsible ? "button" : undefined}
+                        tabIndex={isCollapsible ? 0 : undefined}
+                        aria-expanded={isCollapsible ? !isCollapsed : undefined}
+                        onKeyDown={
+                          isCollapsible
+                            ? (e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  toggleUserCollapsed(idx);
+                                }
+                              }
+                            : undefined
+                        }
+                      >
+                        <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                          {isCollapsible &&
+                            (isCollapsed ? (
+                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            ) : (
+                              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            ))}
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium truncate">{p.user}</p>
+                            {p.status === "running" && (
+                              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                <Loader2 className="h-3 w-3 animate-spin" />{" "}
+                                scanning…
+                              </p>
+                            )}
+                            {p.status === "done" && (
+                              <p className="text-xs text-muted-foreground">
+                                scanned {p.scannedFiles} · {flagged.length}{" "}
+                                flagged
+                                {p.truncated ? " · truncated" : ""}
+                              </p>
+                            )}
+                            {p.status === "error" && (
+                              <p className="text-xs text-red-600">
+                                {p.error}
+                              </p>
+                            )}
+                            {p.status === "skipped" && (
+                              <p className="text-xs text-muted-foreground">
+                                cancelled before scan
+                              </p>
+                            )}
+                            {p.status === "pending" && (
+                              <p className="text-xs text-muted-foreground">
+                                queued
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {isCollapsed && sel.size > 0 && (
+                            <Badge
+                              variant="outline"
+                              className="bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/50 text-xs"
+                            >
+                              {sel.size} selected
+                            </Badge>
                           )}
-                          {p.status === "done" && (
-                            <p className="text-xs text-muted-foreground">
-                              scanned {p.scannedFiles} · {flagged.length}{" "}
-                              flagged
-                              {p.truncated ? " · truncated" : ""}
-                            </p>
-                          )}
-                          {p.status === "error" && (
-                            <p className="text-xs text-red-600">
-                              {p.error}
-                            </p>
-                          )}
-                          {p.status === "skipped" && (
-                            <p className="text-xs text-muted-foreground">
-                              cancelled before scan
-                            </p>
-                          )}
-                          {p.status === "pending" && (
-                            <p className="text-xs text-muted-foreground">
-                              queued
-                            </p>
+                          {p.status === "done" && flagged.length > 0 && (
+                            <Badge
+                              variant="outline"
+                              className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs"
+                            >
+                              {flagged.length} flagged
+                            </Badge>
                           )}
                         </div>
-                        {p.status === "done" && flagged.length > 0 && (
-                          <Badge
-                            variant="outline"
-                            className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs shrink-0"
-                          >
-                            {flagged.length} flagged
-                          </Badge>
-                        )}
                       </div>
 
-                      {p.status === "done" && flagged.length > 0 && (
+                      {p.status === "done" && flagged.length > 0 && !isCollapsed && (
                         <div className="mt-2 space-y-2 pl-3 border-l-2 border-amber-200 dark:border-amber-900/50">
                           <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
                             <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
