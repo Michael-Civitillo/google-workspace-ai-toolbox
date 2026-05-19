@@ -15,6 +15,7 @@ import {
   UserMinus,
   Share2,
   Sparkles,
+  FolderTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -60,6 +61,11 @@ const navigation = [
     name: "Offboarding",
     href: "/offboarding",
     icon: UserMinus,
+  },
+  {
+    name: "Drive Transfer",
+    href: "/drive-transfer",
+    icon: FolderTree,
   },
   {
     name: "Sharing Audit",

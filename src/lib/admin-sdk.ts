@@ -1147,3 +1147,502 @@ async function revokeForOneFile(
 
   return outcome;
 }
+
+// ---------------------------------------------------------------------------
+// Drive folder ownership transfer
+// ---------------------------------------------------------------------------
+
+const DRIVE_ID_RE = /^[A-Za-z0-9_-]{8,256}$/;
+
+/**
+ * Drive accepts "root" as a magic value meaning "My Drive root folder".
+ * Treated as a valid folder ID anywhere a folder reference is expected.
+ */
+function assertDriveFolderId(id: string): void {
+  if (id === "root") return;
+  if (!DRIVE_ID_RE.test(id)) {
+    throw new Error(`Folder id ${JSON.stringify(id)} looks invalid`);
+  }
+}
+
+export interface DriveFolderEntry {
+  id: string;
+  name: string;
+  /** Whether the source user can probably transfer it (owned + not shared-drive). */
+  ownedByUser: boolean;
+}
+
+export interface DriveFolderListing {
+  /** Parent folder we're listing inside. Null for the My Drive root. */
+  parent: { id: string; name: string } | null;
+  folders: DriveFolderEntry[];
+  nextPageToken: string | null;
+}
+
+const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
+
+/**
+ * List a user's folders, optionally under `parentId`. When `parentId` is
+ * omitted the listing returns My Drive root folders.
+ *
+ * Returns only folders the user owns — these are the ones we can actually
+ * transfer ownership of. Shared-drive contents and "shared with me" items
+ * are excluded by construction.
+ *
+ * Impersonates the user via DWD so we see exactly what they see in Drive.
+ */
+export async function listDriveFolders(
+  tenant: Tenant | null,
+  userEmail: string,
+  parentId?: string,
+  pageToken?: string
+): Promise<DriveFolderListing> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  const effectiveParent = parentId ?? "root";
+  assertDriveFolderId(effectiveParent);
+
+  const drive = getDriveClient(tenant, userEmail);
+
+  // Drive's `q` string is a SQL-ish DSL — single-quote the parent id and
+  // escape any internal quotes. Drive ids are alphanumeric+_- by construction
+  // (already validated above) so this is belt-and-braces.
+  const escapedParent = effectiveParent.replace(/'/g, "\\'");
+  const q = `'${escapedParent}' in parents and mimeType = '${DRIVE_FOLDER_MIME}' and trashed = false and 'me' in owners`;
+
+  const res = await drive.files.list(
+    {
+      q,
+      fields: "nextPageToken, files(id, name, ownedByMe)",
+      pageSize: 200,
+      pageToken,
+      orderBy: "name",
+      // Restrict to the user's corpus — keeps shared-drive items out.
+      corpora: "user",
+    },
+    { timeout: ADMIN_API_TIMEOUT_MS }
+  );
+
+  let parent: { id: string; name: string } | null = null;
+  if (parentId) {
+    try {
+      const meta = await drive.files.get(
+        { fileId: parentId, fields: "id, name" },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+      parent = {
+        id: meta.data.id || parentId,
+        name: meta.data.name || "(folder)",
+      };
+    } catch {
+      parent = { id: parentId, name: "(folder)" };
+    }
+  }
+
+  const folders: DriveFolderEntry[] = (res.data.files || []).map((f) => ({
+    id: f.id || "",
+    name: f.name || "(untitled)",
+    ownedByUser: f.ownedByMe ?? true,
+  }));
+
+  return {
+    parent,
+    folders,
+    nextPageToken: res.data.nextPageToken || null,
+  };
+}
+
+/**
+ * Cursor describing where a transfer left off. The client passes this back to
+ * resume a long-running transfer in chunked requests.
+ *
+ * - `queue` holds folders we still need to descend into.
+ * - `current` is the folder we're partway through paginating.
+ */
+export interface DriveTransferCursor {
+  queue: string[];
+  current: {
+    folderId: string;
+    pageToken: string | null;
+    selfTransferred: boolean;
+  } | null;
+}
+
+export interface DriveTransferErrorEntry {
+  id: string;
+  name: string | null;
+  message: string;
+}
+
+export interface DriveTransferProgress {
+  transferred: number;
+  alreadyOwned: number;
+  notOwned: number;
+  errors: DriveTransferErrorEntry[];
+  /** Cursor to pass into the next call. Null when the entire selection is done. */
+  nextCursor: DriveTransferCursor | null;
+}
+
+/** Per-request work budget. Bounded so each call stays well under request timeouts. */
+const TRANSFER_BATCH_BUDGET = 500;
+
+/** Hard cap on initial folder selections to keep cursors small. */
+const TRANSFER_FOLDER_SELECTION_CAP = 100;
+
+/** Hard cap on cursor queue depth to keep payloads bounded. */
+const TRANSFER_QUEUE_HARD_CAP = 20000;
+
+export function buildInitialTransferCursor(
+  folderIds: string[]
+): DriveTransferCursor {
+  if (folderIds.length === 0) {
+    throw new Error("folderIds must be a non-empty array");
+  }
+  if (folderIds.length > TRANSFER_FOLDER_SELECTION_CAP) {
+    throw new Error(
+      `Too many folders selected — cap is ${TRANSFER_FOLDER_SELECTION_CAP}`
+    );
+  }
+  const seen = new Set<string>();
+  const queue: string[] = [];
+  for (const raw of folderIds) {
+    const id = String(raw || "").trim();
+    assertDriveFolderId(id);
+    if (id === "root") {
+      throw new Error(
+        "Cannot transfer ownership of My Drive root — pick specific folders inside it"
+      );
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    queue.push(id);
+  }
+  return { queue, current: null };
+}
+
+/**
+ * Validate a cursor that came back from the client. Defensive: even though
+ * the client only echoes what we sent, we never trust round-tripped state.
+ */
+function sanitizeCursor(cursor: unknown): DriveTransferCursor {
+  if (typeof cursor !== "object" || cursor === null) {
+    throw new Error("cursor must be an object");
+  }
+  const c = cursor as { queue?: unknown; current?: unknown };
+  if (!Array.isArray(c.queue)) {
+    throw new Error("cursor.queue must be an array");
+  }
+  if (c.queue.length > TRANSFER_QUEUE_HARD_CAP) {
+    throw new Error(
+      `cursor.queue exceeds hard cap of ${TRANSFER_QUEUE_HARD_CAP} entries`
+    );
+  }
+  const queue: string[] = [];
+  for (const q of c.queue) {
+    if (typeof q !== "string") throw new Error("cursor.queue entries must be strings");
+    assertDriveFolderId(q);
+    queue.push(q);
+  }
+  let current: DriveTransferCursor["current"] = null;
+  if (c.current !== undefined && c.current !== null) {
+    const cur = c.current as {
+      folderId?: unknown;
+      pageToken?: unknown;
+      selfTransferred?: unknown;
+    };
+    if (typeof cur.folderId !== "string") {
+      throw new Error("cursor.current.folderId must be a string");
+    }
+    assertDriveFolderId(cur.folderId);
+    let pageToken: string | null = null;
+    if (cur.pageToken !== null && cur.pageToken !== undefined) {
+      if (typeof cur.pageToken !== "string" || cur.pageToken.length > 4096) {
+        throw new Error("cursor.current.pageToken is malformed");
+      }
+      pageToken = cur.pageToken;
+    }
+    current = {
+      folderId: cur.folderId,
+      pageToken,
+      selfTransferred: cur.selfTransferred === true,
+    };
+  }
+  return { queue, current };
+}
+
+export function sanitizeTransferCursor(cursor: unknown): DriveTransferCursor {
+  return sanitizeCursor(cursor);
+}
+
+/**
+ * Transfer ownership of the selected folders and every owned item beneath
+ * them from `fromUser` to `toUser`. Processes a bounded chunk per call —
+ * `nextCursor` in the response is non-null when more work remains.
+ *
+ * Drive does not inherit owner permissions down a tree: every file and
+ * subfolder has its own owner record. This walks the tree breadth-first,
+ * transferring each owned item individually.
+ *
+ * Items the source user does not own are silently skipped (counted under
+ * `notOwned`) — we can't transfer what we don't own. Per-item failures are
+ * collected, never thrown, so one bad item doesn't abort the batch.
+ */
+export async function transferDriveFoldersOwnership(
+  tenant: Tenant | null,
+  fromUser: string,
+  toUser: string,
+  cursor: DriveTransferCursor
+): Promise<DriveTransferProgress> {
+  if (!isValidEmail(fromUser) || !isValidEmail(toUser)) {
+    throw new Error("fromUser and toUser must be valid email addresses");
+  }
+  if (fromUser.toLowerCase() === toUser.toLowerCase()) {
+    throw new Error("fromUser and toUser must be different");
+  }
+
+  const verified = new Set(
+    (await listDomains(tenant))
+      .filter((d) => d.verified)
+      .map((d) => d.domainName.toLowerCase())
+  );
+  const fromDom = emailDomain(fromUser);
+  const toDom = emailDomain(toUser);
+  if (!verified.has(fromDom)) {
+    throw new Error(
+      `Source user's domain (${fromDom}) is not a verified domain of this tenant — Drive ownership transfers must stay inside the tenant`
+    );
+  }
+  if (!verified.has(toDom)) {
+    throw new Error(
+      `Target user's domain (${toDom}) is not a verified domain of this tenant — Drive ownership transfers must stay inside the tenant`
+    );
+  }
+
+  const drive = getDriveClientWritable(tenant, fromUser);
+
+  const local: DriveTransferCursor = {
+    queue: [...cursor.queue],
+    current: cursor.current ? { ...cursor.current } : null,
+  };
+
+  const out: DriveTransferProgress = {
+    transferred: 0,
+    alreadyOwned: 0,
+    notOwned: 0,
+    errors: [],
+    nextCursor: null,
+  };
+
+  let budget = TRANSFER_BATCH_BUDGET;
+  const toUserLower = toUser.toLowerCase();
+
+  while (budget > 0) {
+    if (!local.current) {
+      const next = local.queue.shift();
+      if (!next) break;
+      local.current = {
+        folderId: next,
+        pageToken: null,
+        selfTransferred: false,
+      };
+    }
+
+    // The folder itself needs ownership transferred too — Drive treats it as
+    // just another file. Do this once per folder before listing children so
+    // we don't double-count on a continuation.
+    if (!local.current.selfTransferred) {
+      const result = await transferOneItem(drive, local.current.folderId, toUserLower);
+      applyTransferResult(out, local.current.folderId, null, result);
+      local.current.selfTransferred = true;
+      budget--;
+      if (budget === 0) break;
+    }
+
+    const folderId = local.current.folderId;
+    const escapedParent = folderId.replace(/'/g, "\\'");
+    const q = `'${escapedParent}' in parents and trashed = false and 'me' in owners`;
+    const pageSize = Math.min(100, Math.max(1, budget));
+
+    let listRes;
+    try {
+      listRes = await drive.files.list(
+        {
+          q,
+          fields: "nextPageToken, files(id, name, mimeType)",
+          pageSize,
+          pageToken: local.current.pageToken ?? undefined,
+          corpora: "user",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+    } catch (e) {
+      // Record the listing failure against the folder itself and move on so
+      // the rest of the selection isn't held up by one bad branch.
+      out.errors.push({
+        id: folderId,
+        name: null,
+        message: `Failed to list children: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      });
+      local.current = null;
+      continue;
+    }
+
+    for (const child of listRes.data.files || []) {
+      const childId = child.id;
+      if (!childId) continue;
+      const result = await transferOneItem(drive, childId, toUserLower);
+      applyTransferResult(out, childId, child.name ?? null, result);
+      if (child.mimeType === DRIVE_FOLDER_MIME) {
+        if (local.queue.length >= TRANSFER_QUEUE_HARD_CAP) {
+          out.errors.push({
+            id: childId,
+            name: child.name ?? null,
+            message:
+              "Skipped: cursor queue hard cap reached — re-run after this chunk completes",
+          });
+        } else {
+          local.queue.push(childId);
+        }
+      }
+      budget--;
+      if (budget === 0) break;
+    }
+
+    if (listRes.data.nextPageToken && budget > 0) {
+      local.current.pageToken = listRes.data.nextPageToken;
+    } else if (listRes.data.nextPageToken && budget === 0) {
+      local.current.pageToken = listRes.data.nextPageToken;
+      break;
+    } else {
+      local.current = null;
+    }
+  }
+
+  if (local.current || local.queue.length > 0) {
+    out.nextCursor = local;
+  }
+  return out;
+}
+
+type TransferOneOutcome =
+  | { kind: "transferred" }
+  | { kind: "alreadyOwned" }
+  | { kind: "notOwned"; reason: string }
+  | { kind: "error"; message: string };
+
+/**
+ * Match the various error strings Drive returns when ownership cannot be
+ * transferred because the impersonated user isn't the current owner. Drive's
+ * exact wording shifts over time so we match on stable substrings.
+ */
+function isNotOwnerError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("only the current owner") ||
+    m.includes("not the current owner") ||
+    m.includes("owner only") ||
+    m.includes("consumer accounts") ||
+    m.includes("different domain")
+  );
+}
+
+async function transferOneItem(
+  drive: drive_v3.Drive,
+  fileId: string,
+  toUserLower: string
+): Promise<TransferOneOutcome> {
+  let perms: drive_v3.Schema$Permission[];
+  try {
+    const res = await drive.permissions.list(
+      {
+        fileId,
+        fields: "permissions(id, type, role, emailAddress)",
+        pageSize: 100,
+        supportsAllDrives: true,
+      },
+      { timeout: ADMIN_API_TIMEOUT_MS }
+    );
+    perms = res.data.permissions || [];
+  } catch (e) {
+    if (isNotFoundError(e)) {
+      return { kind: "notOwned", reason: "File no longer accessible" };
+    }
+    return {
+      kind: "error",
+      message: e instanceof Error ? e.message : "Failed to list permissions",
+    };
+  }
+
+  const targetPerm = perms.find(
+    (p) =>
+      p.type === "user" &&
+      (p.emailAddress || "").toLowerCase() === toUserLower
+  );
+  if (targetPerm?.role === "owner") {
+    return { kind: "alreadyOwned" };
+  }
+
+  try {
+    if (targetPerm?.id) {
+      await drive.permissions.update(
+        {
+          fileId,
+          permissionId: targetPerm.id,
+          requestBody: { role: "owner" },
+          transferOwnership: true,
+          supportsAllDrives: true,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+    } else {
+      await drive.permissions.create(
+        {
+          fileId,
+          requestBody: {
+            type: "user",
+            role: "owner",
+            emailAddress: toUserLower,
+          },
+          transferOwnership: true,
+          // Drive ignores sendNotificationEmail=false for ownership transfers
+          // and always sends a notification; leaving the field off avoids API
+          // warnings while documenting the behaviour for future readers.
+          supportsAllDrives: true,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      );
+    }
+    return { kind: "transferred" };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (isNotOwnerError(msg)) {
+      return { kind: "notOwned", reason: msg };
+    }
+    return { kind: "error", message: msg };
+  }
+}
+
+function applyTransferResult(
+  out: DriveTransferProgress,
+  id: string,
+  name: string | null,
+  result: TransferOneOutcome
+): void {
+  switch (result.kind) {
+    case "transferred":
+      out.transferred++;
+      return;
+    case "alreadyOwned":
+      out.alreadyOwned++;
+      return;
+    case "notOwned":
+      out.notOwned++;
+      return;
+    case "error":
+      out.errors.push({ id, name, message: result.message });
+      return;
+  }
+}

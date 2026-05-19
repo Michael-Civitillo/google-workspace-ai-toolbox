@@ -17,6 +17,7 @@ import {
   Share2,
   Sparkles,
   ArrowRight,
+  FolderTree,
 } from "lucide-react";
 import Link from "next/link";
 import { AICommandPanel } from "@/components/ai-command-panel";
@@ -79,6 +80,14 @@ const tasks = [
     icon: UserMinus,
     color: "text-orange-600 dark:text-orange-400",
     bg: "bg-orange-50 dark:bg-orange-950/30",
+  },
+  {
+    title: "Drive Transfer",
+    description: "Pick a user's Drive folders and transfer ownership of each folder and everything inside",
+    href: "/drive-transfer",
+    icon: FolderTree,
+    color: "text-teal-600 dark:text-teal-400",
+    bg: "bg-teal-50 dark:bg-teal-950/30",
   },
   {
     title: "Sharing Audit",
