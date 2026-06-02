@@ -475,7 +475,44 @@ export async function revokeAllOAuthTokens(
   return { revoked, failed };
 }
 
-const DRIVE_APP_ID = "55656082677"; // Drive & Docs application id for the Data Transfer API
+/**
+ * Resolve the numeric application ID for "Drive and Docs" in the Data Transfer
+ * API.
+ *
+ * Google does not publish a value that's safe to hardcode — the documented way
+ * to obtain it is `applications.list`, and a stale/guessed id surfaces only at
+ * transfer time as the opaque "Application Id not found" error. The id is a
+ * Google-global constant (identical across customers), so we memoise it after
+ * the first successful lookup.
+ *
+ * https://developers.google.com/admin-sdk/data-transfer/v1/transfer-data
+ */
+let cachedDriveAppId: string | null = null;
+
+async function resolveDriveAppId(
+  transfer: admin_datatransfer_v1.Admin
+): Promise<string> {
+  if (cachedDriveAppId) return cachedDriveAppId;
+
+  const res = await transfer.applications.list(
+    { customerId: "my_customer" },
+    { timeout: ADMIN_API_TIMEOUT_MS }
+  );
+  const apps = res.data.applications || [];
+  // Match by name, preferring an exact "Drive and Docs" but tolerating a minor
+  // relabel (case/wording) so the transfer doesn't break on a cosmetic change.
+  const drive =
+    apps.find((a) => (a.name || "").trim().toLowerCase() === "drive and docs") ||
+    apps.find((a) => (a.name || "").toLowerCase().includes("drive"));
+  if (!drive?.id) {
+    throw new Error(
+      "Could not find the Drive and Docs application via the Data Transfer API. " +
+        "Confirm the service account is authorised for the admin.datatransfer scope."
+    );
+  }
+  cachedDriveAppId = drive.id;
+  return drive.id;
+}
 
 /**
  * Transfer all Drive items owned by `fromUser` to `toUser` using the official
@@ -516,6 +553,7 @@ export async function transferDrive(
   }
 
   const transfer = getDataTransferClient(tenant);
+  const applicationId = await resolveDriveAppId(transfer);
   const res = await transfer.transfers.insert(
     {
       requestBody: {
@@ -523,7 +561,7 @@ export async function transferDrive(
         newOwnerUserId: toId,
         applicationDataTransfers: [
           {
-            applicationId: DRIVE_APP_ID,
+            applicationId,
             applicationTransferParams: [
               // Transfer both private and shared items; do not release source
               // ownership of items still required (RELEASE_RESOURCES=FALSE

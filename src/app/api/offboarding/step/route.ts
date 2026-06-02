@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { gws, tenantFromRequest } from "@/lib/gws";
+import { tenantFromRequest } from "@/lib/gws";
 import {
+  buildGmailClient,
+  buildCalendarClient,
   revokeAllOAuthTokens,
   signOutAllSessions,
   suspendUser,
@@ -14,6 +16,16 @@ import {
 import { audit } from "@/lib/audit";
 
 const MAX_BODY_BYTES = 16 * 1024;
+
+// Minimal Gmail scopes per operation, mirroring the email-transfer/-delegation
+// routes: creating a forwarding address needs the "sharing" scope, while the
+// vacation responder needs "basic".
+const GMAIL_FORWARDING_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.settings.sharing",
+];
+const GMAIL_VACATION_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.settings.basic",
+];
 
 /**
  * Run a single offboarding step. The client orchestrates the sequence and
@@ -63,34 +75,38 @@ export async function POST(request: NextRequest) {
           body.vacationMessage ??
             "I'm no longer with the company. Please contact our team for any questions."
         ).slice(0, 5000);
-        const result = await gws(
-          [
-            "gmail",
-            "users",
-            "settings",
-            "updateVacation",
-            `--userId=${user}`,
-            `--enableAutoReply=true`,
-            `--responseSubject=${subject}`,
-            `--responseBodyPlainText=${message}`,
-            `--restrictToContacts=false`,
-            `--restrictToDomain=false`,
-          ],
-          tenant
-        );
+        try {
+          const gmail = buildGmailClient(tenant, user, GMAIL_VACATION_SCOPES);
+          await gmail.users.settings.updateVacation({
+            userId: "me",
+            requestBody: {
+              enableAutoReply: true,
+              responseSubject: subject,
+              responseBodyPlainText: message,
+              restrictToContacts: false,
+              restrictToDomain: false,
+            },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          audit({
+            action: "offboarding.vacation",
+            ...auditBase,
+            params: { user, subject },
+            outcome: "error",
+            error: msg,
+          });
+          return NextResponse.json({
+            success: false,
+            error: msg || "Failed to enable vacation responder",
+          });
+        }
         audit({
           action: "offboarding.vacation",
           ...auditBase,
           params: { user, subject },
-          outcome: result.success ? "success" : "error",
-          error: result.error,
+          outcome: "success",
         });
-        if (!result.success) {
-          return NextResponse.json({
-            success: false,
-            error: result.error || "Failed to enable vacation responder",
-          });
-        }
         return NextResponse.json({
           success: true,
           data: { message: "Vacation responder enabled" },
@@ -102,55 +118,65 @@ export async function POST(request: NextRequest) {
         if (successor.toLowerCase() === user.toLowerCase()) {
           throw new ValidationError("successor must differ from user");
         }
-        const create = await gws(
-          [
-            "gmail",
-            "users",
-            "settings",
-            "forwardingAddresses",
-            "create",
-            `--userId=${user}`,
-            `--forwardingEmail=${successor}`,
-          ],
-          tenant
-        );
-        if (!create.success) {
+        const gmail = buildGmailClient(tenant, user, GMAIL_FORWARDING_SCOPES);
+
+        // Step 1: register the forwarding address on the source mailbox. A
+        // same-domain successor is auto-verified when the address is created
+        // via domain-wide delegation, so no confirmation email is needed.
+        try {
+          await gmail.users.settings.forwardingAddresses.create({
+            userId: "me",
+            requestBody: { forwardingEmail: successor },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
           audit({
             action: "offboarding.forward.create",
             ...auditBase,
             params: { user, successor },
             outcome: "error",
-            error: create.error,
+            error: msg,
           });
           return NextResponse.json({
             success: false,
-            error: `Failed to create forwarding address: ${create.error}`,
+            error: `Failed to create forwarding address: ${msg}`,
           });
         }
-        const enable = await gws(
-          [
-            "gmail",
-            "users",
-            "settings",
-            "updateAutoForwarding",
-            `--userId=${user}`,
-            `--enabled=true`,
-            `--emailAddress=${successor}`,
-            `--disposition=archive`,
-          ],
-          tenant
-        );
+
+        // Step 2: enable auto-forwarding and archive the originals.
+        try {
+          await gmail.users.settings.updateAutoForwarding({
+            userId: "me",
+            requestBody: {
+              enabled: true,
+              emailAddress: successor,
+              disposition: "archive",
+            },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          audit({
+            action: "offboarding.forward",
+            ...auditBase,
+            params: { user, successor },
+            outcome: "error",
+            error: msg,
+          });
+          return NextResponse.json({
+            success: false,
+            data: { successor, disposition: "archive" },
+            error: msg,
+          });
+        }
         audit({
           action: "offboarding.forward",
           ...auditBase,
           params: { user, successor },
-          outcome: enable.success ? "success" : "error",
-          error: enable.error,
+          outcome: "success",
         });
         return NextResponse.json({
-          success: enable.success,
+          success: true,
           data: { successor, disposition: "archive" },
-          error: enable.success ? undefined : enable.error,
         });
       }
 
@@ -162,29 +188,39 @@ export async function POST(request: NextRequest) {
         // Grant ownership only — never auto-remove the source user's access
         // during offboarding. Suspending the account already cuts them off;
         // dropping the ACL on a primary calendar would be rejected anyway.
-        const grant = await gws(
-          [
-            "calendar",
-            "acl",
-            "insert",
-            `--calendarId=${user}`,
-            `--role=owner`,
-            `--scope.type=user`,
-            `--scope.value=${successor}`,
-          ],
-          tenant
-        );
+        try {
+          const cal = buildCalendarClient(tenant, user);
+          await cal.acl.insert({
+            calendarId: user,
+            requestBody: {
+              role: "owner",
+              scope: { type: "user", value: successor },
+            },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          audit({
+            action: "offboarding.calendar",
+            ...auditBase,
+            params: { user, successor },
+            outcome: "error",
+            error: msg,
+          });
+          return NextResponse.json({
+            success: false,
+            data: { successor, role: "owner" },
+            error: msg,
+          });
+        }
         audit({
           action: "offboarding.calendar",
           ...auditBase,
           params: { user, successor },
-          outcome: grant.success ? "success" : "error",
-          error: grant.error,
+          outcome: "success",
         });
         return NextResponse.json({
-          success: grant.success,
+          success: true,
           data: { successor, role: "owner" },
-          error: grant.success ? undefined : grant.error,
         });
       }
 
