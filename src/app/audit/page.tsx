@@ -158,7 +158,7 @@ export default function Audit() {
                   placeholder="user@yourdomain.com"
                   value={user}
                   onChange={(e) => setUser(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && runAudit()}
+                  onKeyDown={(e) => e.key === "Enter" && !loading && runAudit()}
                 />
                 <Button
                   onClick={runAudit}

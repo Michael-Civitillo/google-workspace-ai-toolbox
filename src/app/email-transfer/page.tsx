@@ -50,9 +50,11 @@ export default function EmailTransfer() {
   } | null>(null);
 
   useEffect(() => {
-    tfetch("/api/admin/domains")
+    let cancelled = false;
+    tfetch("/api/admin/domains", {}, tenantId)
       .then((r) => r.json())
       .then((data) => {
+        if (cancelled) return;
         if (data.success && Array.isArray(data.data)) {
           setVerifiedDomains(
             data.data
@@ -61,10 +63,15 @@ export default function EmailTransfer() {
               )
               .map((d: { domainName: string }) => d.domainName.toLowerCase())
           );
+        } else {
+          setVerifiedDomains([]);
         }
       })
       .catch(() => {});
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
 
   const targetDomain = targetUser.includes("@")
     ? targetUser.split("@")[1].toLowerCase()

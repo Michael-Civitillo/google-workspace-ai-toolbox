@@ -35,14 +35,26 @@ export async function POST(req: NextRequest) {
   }
 
   // Bound the body size so a malicious caller can't blow up server memory.
+  // Check the header for a cheap early reject, then enforce on the bytes we
+  // actually read — a chunked request can omit or understate Content-Length.
   const lengthHeader = req.headers.get("content-length");
   if (lengthHeader && Number(lengthHeader) > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
 
+  let raw: string;
+  try {
+    raw = await req.text();
+  } catch {
+    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+  }
+  if (raw.length > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+  }
+
   let body: { password?: string };
   try {
-    body = await req.json();
+    body = JSON.parse(raw);
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -53,7 +65,7 @@ export async function POST(req: NextRequest) {
   if (body.password.length > 1024) {
     return NextResponse.json({ error: "Password too long" }, { status: 400 });
   }
-  if (!passwordMatches(body.password)) {
+  if (!(await passwordMatches(body.password))) {
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }
 

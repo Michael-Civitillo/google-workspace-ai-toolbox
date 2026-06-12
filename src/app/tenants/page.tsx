@@ -242,7 +242,9 @@ export default function TenantsPage() {
       color: tenant.color,
       credentialsFile: tenant.credentialsFile,
       adminEmail: tenant.adminEmail,
-      geminiApiKey: tenant.geminiApiKey ?? "",
+      // The key is never sent to the browser. Blank means "keep the existing
+      // key"; the PUT route only overwrites it when a value is supplied.
+      geminiApiKey: "",
     });
     setError(null);
   }
@@ -625,7 +627,7 @@ function TenantFormFields({
           id="t-gemini"
           value={form.geminiApiKey}
           onChange={(e) => onChange("geminiApiKey", e.target.value)}
-          placeholder="Leave blank to use GOOGLE_GENERATIVE_AI_API_KEY env var"
+          placeholder="Leave blank to keep current / use GOOGLE_GENERATIVE_AI_API_KEY env var"
           className="h-8 text-sm"
         />
       </div>

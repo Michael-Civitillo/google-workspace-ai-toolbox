@@ -29,13 +29,13 @@ const GWS_BIN =
  *      set. The npm-installed `gws` shim is `gws.cmd`, so without this we
  *      get EINVAL ("Executable invalid").
  *
- *   2. With `shell: true`, the args array is still escaped properly by
- *      Node, but the *binary path itself* is not quoted. If GWS_BIN contains
- *      a space, a metacharacter, or a stray quote, cmd.exe will mis-parse
- *      it. We always wrap unquoted paths in double quotes so a path like
- *      `C:\Program Files\gws.cmd` and a path with no spaces are both passed
- *      as a single token. Operators who already pre-quote `GWS_BIN` in their
- *      env file are left alone so we don't double-wrap.
+ *   2. With `shell: true`, Node does NOT escape the args array — they are
+ *      concatenated into a command line and re-parsed by cmd.exe. The binary
+ *      path is likewise unquoted. We wrap an unquoted GWS_BIN in double quotes
+ *      so a path like `C:\Program Files\gws.cmd` is passed as a single token,
+ *      and we reject any argument containing shell metacharacters (see
+ *      assertSafeArg) so nothing can break out of the intended command.
+ *      Operators who already pre-quote `GWS_BIN` are left alone (no double-wrap).
  */
 function quoteForWindowsShell(bin: string): string {
   if (bin.startsWith('"') && bin.endsWith('"') && bin.length >= 2) return bin;
@@ -43,11 +43,24 @@ function quoteForWindowsShell(bin: string): string {
   return `"${bin.replace(/"/g, '""')}"`;
 }
 
+// On the Windows shell path the args are re-parsed by cmd.exe, so any
+// metacharacter in an argument could break out of the command. Refuse them
+// rather than attempt to escape every cmd.exe quirk. The CLI's real arguments
+// are plain flags/identifiers, so this never rejects a legitimate call.
+const WINDOWS_SHELL_UNSAFE = /[&|<>^"`%\r\n]/;
+
+function assertSafeArg(arg: string): void {
+  if (WINDOWS_SHELL_UNSAFE.test(arg)) {
+    throw new Error("gws argument contains illegal shell characters");
+  }
+}
+
 function runGws(
   args: string[],
   options: { timeout: number; env?: NodeJS.ProcessEnv }
 ) {
   if (IS_WINDOWS) {
+    for (const a of args) assertSafeArg(a);
     return execFileAsync(quoteForWindowsShell(GWS_BIN), args, {
       ...options,
       shell: true,

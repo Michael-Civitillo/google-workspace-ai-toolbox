@@ -6,7 +6,18 @@ import {
   unlinkSync,
 } from "fs";
 import path from "path";
-import type { Tenant } from "./tenant-types";
+import type { Tenant, PublicTenant } from "./tenant-types";
+
+/**
+ * Strip the server-only Gemini API key before a tenant crosses to the browser,
+ * exposing only whether one is set. Use for every API response that returns
+ * tenant objects.
+ */
+export function toPublicTenant(tenant: Tenant): PublicTenant {
+  const { geminiApiKey, hasGeminiApiKey: _ignored, ...rest } = tenant;
+  void _ignored;
+  return { ...rest, hasGeminiApiKey: Boolean(geminiApiKey) };
+}
 
 interface TenantStore {
   activeTenantId: string | null;
@@ -35,6 +46,16 @@ function readStore(): TenantStore {
       tenants: Array.isArray(parsed.tenants) ? parsed.tenants : [],
     };
   } catch {
+    // The file exists but couldn't be read/parsed. Returning an empty store
+    // would let the next write permanently overwrite every tenant config, so
+    // preserve the unreadable file under a timestamped name first. After the
+    // rename the path no longer exists, so this happens at most once.
+    try {
+      renameSync(STORE_PATH, `${STORE_PATH}.corrupt-${Date.now()}`);
+    } catch {
+      // If we can't even move it, fall through — we still avoid throwing into
+      // the request handler.
+    }
     return { activeTenantId: null, tenants: [] };
   }
 }

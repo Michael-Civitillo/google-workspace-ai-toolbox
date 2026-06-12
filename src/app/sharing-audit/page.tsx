@@ -216,8 +216,20 @@ function toCsv(
     }
   }
   return rows
-    .map((r) => r.map((c) => `"${(c ?? "").replace(/"/g, '""')}"`).join(","))
+    .map((r) => r.map((c) => `"${csvCell(c)}"`).join(","))
     .join("\n");
+}
+
+/**
+ * Quote-escape a CSV cell and neutralize spreadsheet formula injection.
+ * File names and share targets can be renamed by external collaborators, so a
+ * cell like `=HYPERLINK(...)` must not execute when the export is opened in
+ * Excel/Sheets. A leading apostrophe forces text interpretation.
+ */
+function csvCell(c: string): string {
+  let v = c ?? "";
+  if (/^[=+\-@\t\r]/.test(v)) v = `'${v}`;
+  return v.replace(/"/g, '""');
 }
 
 /**
@@ -228,7 +240,8 @@ function toCsv(
  * the path column populated for that user.
  */
 async function fetchPathsForResults(
-  results: AuditResult[]
+  results: AuditResult[],
+  tenantId?: string | null
 ): Promise<Record<string, Record<string, string>>> {
   const out: Record<string, Record<string, string>> = {};
   for (const r of results) {
@@ -237,14 +250,18 @@ async function fetchPathsForResults(
       continue;
     }
     try {
-      const res = await tfetch("/api/admin/sharing-audit/resolve-paths", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user: r.user,
-          fileIds: r.files.map((f) => f.id),
-        }),
-      });
+      const res = await tfetch(
+        "/api/admin/sharing-audit/resolve-paths",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user: r.user,
+            fileIds: r.files.map((f) => f.id),
+          }),
+        },
+        tenantId
+      );
       const data = await res.json();
       out[r.user] = data?.success
         ? (data.data?.paths as Record<string, string>) ?? {}
@@ -269,7 +286,7 @@ function downloadCsv(filename: string, content: string) {
 }
 
 export default function SharingAudit() {
-  const { tenant } = useCurrentTenant();
+  const { tenant, id: tenantId } = useCurrentTenant();
 
   // Single-user state
   const [user, setUser] = useState("");
@@ -328,7 +345,7 @@ export default function SharingAudit() {
   async function exportSingleCsv(result: AuditResult) {
     setExportBusy(true);
     try {
-      const paths = await fetchPathsForResults([result]);
+      const paths = await fetchPathsForResults([result], tenantId);
       downloadCsv(
         `external-sharing-${result.user}-${new Date()
           .toISOString()
@@ -344,7 +361,7 @@ export default function SharingAudit() {
     if (aggregated.length === 0) return;
     setExportBusy(true);
     try {
-      const paths = await fetchPathsForResults(aggregated);
+      const paths = await fetchPathsForResults(aggregated, tenantId);
       downloadCsv(
         `tenant-external-sharing-${new Date()
           .toISOString()
@@ -373,6 +390,9 @@ export default function SharingAudit() {
     setSingleSelected(new Set());
     setRevokeNotice(null);
     singleCancelRef.current = false;
+    // Pin the tenant for the whole scan so a switch mid-walk can't redirect
+    // later pages to a different tenant.
+    const pinnedTenantId = tenantId;
     try {
       let pageToken: string | undefined;
       let totalScanned = 0;
@@ -385,7 +405,7 @@ export default function SharingAudit() {
         const url =
           `/api/admin/sharing-audit?user=${encodeURIComponent(user)}` +
           (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
-        const res = await tfetch(url);
+        const res = await tfetch(url, {}, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           setError(data.error || "Audit failed");
@@ -425,6 +445,11 @@ export default function SharingAudit() {
     if (!singleResult?.nextPageToken || singleLoading) return;
     setSingleLoading(true);
     singleCancelRef.current = false;
+    // Resume against the user the snapshot belongs to — NOT the live input
+    // field, which the operator may have edited since the scan ran. Replaying
+    // user A's page token against user B would scan the wrong Drive.
+    const scanUser = singleResult.user;
+    const pinnedTenantId = tenantId;
     try {
       let pageToken: string | undefined = singleResult.nextPageToken;
       let totalScanned = singleResult.scannedFiles;
@@ -433,9 +458,9 @@ export default function SharingAudit() {
       while (true) {
         if (singleCancelRef.current) break;
         const url =
-          `/api/admin/sharing-audit?user=${encodeURIComponent(user)}` +
+          `/api/admin/sharing-audit?user=${encodeURIComponent(scanUser)}` +
           (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
-        const res = await tfetch(url);
+        const res = await tfetch(url, {}, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           setError(data.error || "Audit failed");
@@ -478,6 +503,9 @@ export default function SharingAudit() {
     setRevokeNotice(null);
     cancelRef.current = false;
     setTenantLoading(true);
+    // Pin the tenant for the entire orchestrated scan so a mid-run switch
+    // can't send later per-user audits to a different tenant.
+    const pinnedTenantId = tenantId;
 
     try {
       const allUsers: UserListItem[] = [];
@@ -485,7 +513,7 @@ export default function SharingAudit() {
       while (true) {
         const url =
           "/api/admin/users" + (pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : "");
-        const res = await tfetch(url);
+        const res = await tfetch(url, {}, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           setError(data.error || "Failed to enumerate tenant users");
@@ -528,7 +556,9 @@ export default function SharingAudit() {
 
         try {
           const res = await tfetch(
-            `/api/admin/sharing-audit?user=${encodeURIComponent(target.primaryEmail)}`
+            `/api/admin/sharing-audit?user=${encodeURIComponent(target.primaryEmail)}`,
+            {},
+            pinnedTenantId
           );
           const data = await res.json();
           if (data.success) {
@@ -644,6 +674,9 @@ export default function SharingAudit() {
   async function confirmRevoke() {
     if (!revokeTarget) return;
     setRevokeBusy(true);
+    // Pin the tenant for the whole batched revoke so a switch between chunks
+    // can't send later deletes to a different tenant.
+    const pinnedTenantId = tenantId;
     try {
       // The server enforces a 200-file cap per request to bound Drive API
       // blast radius. Split larger targets into sequential chunks and merge
@@ -658,15 +691,19 @@ export default function SharingAudit() {
 
       for (let i = 0; i < fileChunks.length; i++) {
         try {
-          const res = await tfetch("/api/admin/sharing-audit/revoke", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              user: revokeTarget.user,
-              fileIds: fileChunks[i].map((f) => f.id),
-              categories: revokeTarget.categories,
-            }),
-          });
+          const res = await tfetch(
+            "/api/admin/sharing-audit/revoke",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                user: revokeTarget.user,
+                fileIds: fileChunks[i].map((f) => f.id),
+                categories: revokeTarget.categories,
+              }),
+            },
+            pinnedTenantId
+          );
           const data = await res.json();
           if (!data.success) {
             abortedAt = { index: i, reason: data.error || "Revoke failed" };

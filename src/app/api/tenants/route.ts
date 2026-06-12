@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTenants, getActiveTenantId, addTenant } from "@/lib/tenants-server";
+import {
+  getTenants,
+  getActiveTenantId,
+  addTenant,
+  toPublicTenant,
+} from "@/lib/tenants-server";
 import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 import {
   isValidEmail,
@@ -8,7 +13,7 @@ import {
 } from "@/lib/validate";
 
 export async function GET() {
-  const tenants = getTenants();
+  const tenants = getTenants().map(toPublicTenant);
   const activeTenantId = getActiveTenantId();
   return NextResponse.json({ tenants, activeTenantId });
 }
@@ -50,7 +55,7 @@ export async function POST(req: NextRequest) {
       geminiApiKey: geminiApiKey || undefined,
     });
 
-    return NextResponse.json({ tenant }, { status: 201 });
+    return NextResponse.json({ tenant: toPublicTenant(tenant) }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const status = error instanceof ValidationError ? 400 : 500;

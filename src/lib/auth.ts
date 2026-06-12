@@ -14,7 +14,16 @@ export function authConfigured(): boolean {
   return Boolean(process.env.APP_PASSWORD && process.env.APP_PASSWORD.length > 0);
 }
 
+/**
+ * Secret used to sign session tokens. Prefer a dedicated, high-entropy
+ * APP_SESSION_SECRET: it decouples the token signature from the login
+ * password, so a stolen session cookie can no longer be used to brute-force
+ * APP_PASSWORD offline. Falls back to APP_PASSWORD when no session secret is
+ * set, preserving the single-env-var deployment model.
+ */
 function sessionSecret(): string {
+  const explicit = process.env.APP_SESSION_SECRET;
+  if (explicit && explicit.length > 0) return explicit;
   const s = process.env.APP_PASSWORD;
   if (!s) throw new Error("APP_PASSWORD is not set");
   return s;
@@ -110,13 +119,17 @@ export async function verifySessionToken(token: string | undefined | null): Prom
   return true;
 }
 
-export function passwordMatches(input: string): boolean {
+export async function passwordMatches(input: string): Promise<boolean> {
   const expected = process.env.APP_PASSWORD || "";
   if (!expected) return false;
-  const a = TEXT_ENCODER.encode(expected);
-  const b = TEXT_ENCODER.encode(input || "");
-  if (a.length !== b.length) return false;
-  return constantTimeEqual(a, b);
+  // Compare SHA-256 digests rather than the raw bytes: digests are always the
+  // same length, so the comparison no longer short-circuits on a length
+  // mismatch and the candidate password's length doesn't leak via timing.
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(expected)),
+    crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(input || "")),
+  ]);
+  return constantTimeEqual(new Uint8Array(a), new Uint8Array(b));
 }
 
 export const SESSION_COOKIE_NAME = COOKIE_NAME;

@@ -23,8 +23,23 @@ export interface Tenant {
   color: TenantColor;
   credentialsFile: string;
   adminEmail: string;
+  /**
+   * Server-only secret. Stored in tenants.json and read by the AI features.
+   * Never serialise this to API responses — use PublicTenant for anything that
+   * crosses to the browser. See toPublicTenant() in tenants-server.ts.
+   */
   geminiApiKey?: string;
+  /** Present only on API responses: whether a tenant-level key is set. */
+  hasGeminiApiKey?: boolean;
 }
+
+/**
+ * The shape safe to send to the browser: identical to Tenant but with the
+ * secret stripped and replaced by a boolean flag.
+ */
+export type PublicTenant = Omit<Tenant, "geminiApiKey"> & {
+  hasGeminiApiKey: boolean;
+};
 
 export const TENANT_COLOR_CLASSES: Record<
   TenantColor,

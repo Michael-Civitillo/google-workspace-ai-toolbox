@@ -666,6 +666,13 @@ export async function listExternallySharedFiles(
         // Files the user can see — focus on shared items only to keep the
         // audit cheap. `q="visibility != 'limited'"` would miss link-shared
         // items, so we use the broader filter and check permissions client-side.
+        //
+        // NOTE: the inline `permissions` field is capped by Drive at ~100
+        // entries per file with no pagination here, so a file shared with more
+        // than ~100 principals can under-report external permissions in the
+        // audit. The revoke path (revokeForOneFile) re-lists permissions with
+        // full pagination, so remediation is unaffected — only the audit
+        // preview count can be short for pathologically over-shared files.
         q: "trashed = false and 'me' in owners",
         fields:
           "nextPageToken, files(id, name, mimeType, webViewLink, ownedByMe, permissions(type, role, emailAddress, domain, allowFileDiscovery))",
@@ -723,6 +730,14 @@ const PATH_RESOLVE_FILE_CAP = 1000;
 /** Defensive limit on how far we'll walk up a parent chain. */
 const PATH_RESOLVE_MAX_DEPTH = 50;
 
+/**
+ * How many files to resolve in parallel. Each file's ancestor climb is
+ * inherently sequential, but independent files can run concurrently — and the
+ * shared folder cache means overlapping ancestors are only fetched once. Keeps
+ * a 1,000-file export from becoming 1,000 serial round trips.
+ */
+const PATH_RESOLVE_CONCURRENCY = 8;
+
 interface FolderNode {
   name: string;
   parents: string[];
@@ -762,66 +777,69 @@ export async function resolveFilePaths(
   }
 
   const drive = getDriveClient(tenant, userEmail);
-  const folderCache = new Map<string, FolderNode | null>();
-  const driveNameCache = new Map<string, string>();
+  // Cache in-flight promises (not just resolved values) so two files climbing
+  // through the same ancestor concurrently share a single API call.
+  const folderCache = new Map<string, Promise<FolderNode | null>>();
+  const driveNameCache = new Map<string, Promise<string>>();
   const out: Record<string, string> = {};
 
-  const fetchNode = async (id: string): Promise<FolderNode | null> => {
+  const fetchNode = (id: string): Promise<FolderNode | null> => {
     const cached = folderCache.get(id);
     if (cached !== undefined) return cached;
-    try {
-      const meta = await drive.files.get(
-        {
-          fileId: id,
-          fields: "id, name, parents, driveId",
-          supportsAllDrives: true,
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS }
-      );
-      const node: FolderNode = {
-        name: meta.data.name || "(untitled)",
-        parents: meta.data.parents || [],
-        driveId: meta.data.driveId ?? undefined,
-      };
-      folderCache.set(id, node);
-      return node;
-    } catch {
-      folderCache.set(id, null);
-      return null;
-    }
+    const p = (async (): Promise<FolderNode | null> => {
+      try {
+        const meta = await drive.files.get(
+          {
+            fileId: id,
+            fields: "id, name, parents, driveId",
+            supportsAllDrives: true,
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        );
+        return {
+          name: meta.data.name || "(untitled)",
+          parents: meta.data.parents || [],
+          driveId: meta.data.driveId ?? undefined,
+        };
+      } catch {
+        return null;
+      }
+    })();
+    folderCache.set(id, p);
+    return p;
   };
 
-  const resolveDriveName = async (driveId: string): Promise<string> => {
+  const resolveDriveName = (driveId: string): Promise<string> => {
     const cached = driveNameCache.get(driveId);
-    if (cached) return cached;
-    try {
-      const d = await drive.drives.get(
-        { driveId },
-        { timeout: ADMIN_API_TIMEOUT_MS }
-      );
-      const label = `Shared Drive: ${d.data.name || driveId}`;
-      driveNameCache.set(driveId, label);
-      return label;
-    } catch {
-      const label = `Shared Drive: ${driveId}`;
-      driveNameCache.set(driveId, label);
-      return label;
-    }
+    if (cached !== undefined) return cached;
+    const p = (async (): Promise<string> => {
+      try {
+        const d = await drive.drives.get(
+          { driveId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        );
+        return `Shared Drive: ${d.data.name || driveId}`;
+      } catch {
+        return `Shared Drive: ${driveId}`;
+      }
+    })();
+    driveNameCache.set(driveId, p);
+    return p;
   };
 
-  for (const rawId of fileIds) {
+  const resolveOne = async (rawId: string): Promise<void> => {
     const fileId = String(rawId || "").trim();
-    if (!fileId) continue;
+    if (!fileId) return;
     const fileNode = await fetchNode(fileId);
     if (!fileNode) {
       out[fileId] = "(path unavailable)";
-      continue;
+      return;
     }
     if (fileNode.parents.length === 0) {
       out[fileId] = fileNode.driveId
         ? await resolveDriveName(fileNode.driveId)
         : "My Drive";
-      continue;
+      return;
     }
 
     const segments: string[] = [];
@@ -849,7 +867,23 @@ export async function resolveFilePaths(
     if (depthExceeded) segments.unshift("…");
 
     out[fileId] = segments.join(" / ");
-  }
+  };
+
+  // Resolve files with bounded concurrency: a shared cursor hands each worker
+  // the next file, so at most PATH_RESOLVE_CONCURRENCY climbs run at once.
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < fileIds.length) {
+      const idx = cursor++;
+      await resolveOne(fileIds[idx]);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(PATH_RESOLVE_CONCURRENCY, fileIds.length) },
+      worker
+    )
+  );
 
   return out;
 }
@@ -899,6 +933,31 @@ function isNotFoundError(e: unknown): boolean {
     err.status === 404 ||
     err.response?.status === 404
   );
+}
+
+/**
+ * Detect the "this resource already exists" rejection from Google APIs —
+ * e.g. re-creating a Gmail forwarding address that's already registered.
+ * Lets idempotent steps treat a duplicate as success and continue, so a
+ * partially-failed flow can be safely retried. Matches the 409 status or
+ * the stable phrasing, since wording shifts between APIs.
+ */
+export function isAlreadyExistsError(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as {
+    code?: number;
+    status?: number;
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    message?: string;
+  };
+  const status = err.code ?? err.status ?? err.response?.status;
+  if (status === 409) return true;
+  const msg = (
+    err.response?.data?.error?.message ??
+    err.message ??
+    ""
+  ).toLowerCase();
+  return msg.includes("already exists") || msg.includes("duplicate");
 }
 
 /**

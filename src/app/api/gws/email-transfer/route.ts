@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildGmailClient } from "@/lib/admin-sdk";
+import { buildGmailClient, isAlreadyExistsError } from "@/lib/admin-sdk";
 import { listDomains } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError, emailDomain } from "@/lib/validate";
 import { audit } from "@/lib/audit";
@@ -98,20 +98,26 @@ export async function POST(request: NextRequest) {
       });
       forwardData = res.data;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      audit({
-        action: "email_transfer.create_forwarding",
-        tenantId: tenant?.id ?? null,
-        tenantName: tenant?.name ?? null,
-        params: { sourceUser, targetUser, isExternal },
-        outcome: "error",
-        error: msg,
-      });
-      return NextResponse.json({
-        success: false,
-        error: `Failed to create forwarding address: ${msg}`,
-        step: "create_forwarding",
-      });
+      // A duplicate means a previous attempt already registered the address —
+      // continue to enabling auto-forwarding so a retry isn't blocked here.
+      if (isAlreadyExistsError(e)) {
+        forwardData = { forwardingEmail: targetUser, alreadyExisted: true };
+      } else {
+        const msg = e instanceof Error ? e.message : String(e);
+        audit({
+          action: "email_transfer.create_forwarding",
+          tenantId: tenant?.id ?? null,
+          tenantName: tenant?.name ?? null,
+          params: { sourceUser, targetUser, isExternal },
+          outcome: "error",
+          error: msg,
+        });
+        return NextResponse.json({
+          success: false,
+          error: `Failed to create forwarding address: ${msg}`,
+          step: "create_forwarding",
+        });
+      }
     }
 
     // Step 2: Enable auto-forwarding.

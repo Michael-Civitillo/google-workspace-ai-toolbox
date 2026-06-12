@@ -1,6 +1,12 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 type Theme = "light" | "dark";
 
@@ -20,27 +26,35 @@ export function useTheme() {
   return useContext(ThemeContext);
 }
 
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  // Start with a stable value that matches SSR. The inline script in
-  // app/layout.tsx applies the correct class to <html> before paint, so
-  // there's no flash even though React hasn't hydrated the real value yet.
-  const [theme, setTheme] = useState<Theme>("light");
-  const [mounted, setMounted] = useState(false);
+function readInitialTheme(): Theme {
+  if (typeof window === "undefined") return "light";
+  const stored = window.localStorage.getItem("theme");
+  if (stored === "light" || stored === "dark") return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
 
-  useEffect(() => {
-    const stored = window.localStorage.getItem("theme") as Theme | null;
-    const prefersDark = window.matchMedia(
-      "(prefers-color-scheme: dark)"
-    ).matches;
-    const initial: Theme =
-      stored === "light" || stored === "dark"
-        ? stored
-        : prefersDark
-        ? "dark"
-        : "light";
-    setTheme(initial);
-    setMounted(true);
-  }, []);
+// Hydration-safe "has the client mounted?" flag. Returns false during SSR and
+// the first hydration render (matching the server), then true afterwards —
+// without a setState-in-effect.
+const noopSubscribe = () => () => {};
+function useMounted(): boolean {
+  return useSyncExternalStore(
+    noopSubscribe,
+    () => true,
+    () => false
+  );
+}
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  // Read the real theme lazily on the client. On the server this returns
+  // "light" to match the initial SSR markup; the inline script in
+  // app/layout.tsx applies the correct class to <html> before paint, and
+  // consumers gate theme-dependent UI on `mounted`, so there's no flash or
+  // hydration mismatch.
+  const [theme, setTheme] = useState<Theme>(readInitialTheme);
+  const mounted = useMounted();
 
   useEffect(() => {
     if (!mounted) return;

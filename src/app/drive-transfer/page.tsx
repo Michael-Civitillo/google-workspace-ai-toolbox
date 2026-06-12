@@ -317,58 +317,66 @@ export default function DriveTransfer() {
     let totalErrors: ProgressTotals["errors"] = [];
     let aborted: string | null = null;
 
-    while (true) {
-      if (cancelRef.current) {
-        aborted = "Cancelled before next chunk";
-        break;
+    try {
+      while (true) {
+        if (cancelRef.current) {
+          aborted = "Cancelled before next chunk";
+          break;
+        }
+        chunkIndex++;
+        const body =
+          cursor === null
+            ? { fromUser, toUser, folderIds: initialFolderIds }
+            : { fromUser, toUser, cursor };
+        let res: Response;
+        try {
+          res = await tfetch(
+            "/api/admin/drive-transfer/transfer",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            },
+            tenantId
+          );
+        } catch {
+          aborted = "Network error";
+          break;
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch {
+          aborted = `Server returned a non-JSON response (HTTP ${res.status})`;
+          break;
+        }
+        if (!data.success) {
+          aborted = data.error || "Transfer failed";
+          break;
+        }
+        const p = data.data as TransferProgress;
+        totalErrors = totalErrors.concat(p.errors);
+        setProgress((prev) => ({
+          transferred: (prev?.transferred ?? 0) + p.transferred,
+          alreadyOwned: (prev?.alreadyOwned ?? 0) + p.alreadyOwned,
+          notOwned: (prev?.notOwned ?? 0) + p.notOwned,
+          errors: [
+            ...(prev?.errors ?? []),
+            ...p.errors,
+          ].slice(0, 200),
+          chunks: chunkIndex,
+          done: p.nextCursor === null,
+        }));
+        if (p.nextCursor === null) {
+          cursor = null;
+          break;
+        }
+        cursor = p.nextCursor;
       }
-      chunkIndex++;
-      const body =
-        cursor === null
-          ? { fromUser, toUser, folderIds: initialFolderIds }
-          : { fromUser, toUser, cursor };
-      let res: Response;
-      try {
-        res = await tfetch(
-          "/api/admin/drive-transfer/transfer",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          },
-          tenantId
-        );
-      } catch {
-        aborted = "Network error";
-        break;
-      }
-      const data = await res.json();
-      if (!data.success) {
-        aborted = data.error || "Transfer failed";
-        break;
-      }
-      const p = data.data as TransferProgress;
-      totalErrors = totalErrors.concat(p.errors);
-      setProgress((prev) => ({
-        transferred: (prev?.transferred ?? 0) + p.transferred,
-        alreadyOwned: (prev?.alreadyOwned ?? 0) + p.alreadyOwned,
-        notOwned: (prev?.notOwned ?? 0) + p.notOwned,
-        errors: [
-          ...(prev?.errors ?? []),
-          ...p.errors,
-        ].slice(0, 200),
-        chunks: chunkIndex,
-        done: p.nextCursor === null,
-      }));
-      if (p.nextCursor === null) {
-        cursor = null;
-        break;
-      }
-      cursor = p.nextCursor;
+    } finally {
+      setBusy(false);
+      setConfirmOpen(false);
     }
-
-    setBusy(false);
-    setConfirmOpen(false);
 
     if (aborted) {
       setCompletion({
