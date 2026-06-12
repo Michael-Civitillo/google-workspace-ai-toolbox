@@ -666,6 +666,13 @@ export async function listExternallySharedFiles(
         // Files the user can see — focus on shared items only to keep the
         // audit cheap. `q="visibility != 'limited'"` would miss link-shared
         // items, so we use the broader filter and check permissions client-side.
+        //
+        // NOTE: the inline `permissions` field is capped by Drive at ~100
+        // entries per file with no pagination here, so a file shared with more
+        // than ~100 principals can under-report external permissions in the
+        // audit. The revoke path (revokeForOneFile) re-lists permissions with
+        // full pagination, so remediation is unaffected — only the audit
+        // preview count can be short for pathologically over-shared files.
         q: "trashed = false and 'me' in owners",
         fields:
           "nextPageToken, files(id, name, mimeType, webViewLink, ownedByMe, permissions(type, role, emailAddress, domain, allowFileDiscovery))",
