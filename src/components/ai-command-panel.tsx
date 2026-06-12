@@ -140,10 +140,10 @@ export function AICommandPanel() {
 
   const confidenceColor =
     parsed && parsed.confidence >= 0.8
-      ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+      ? "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900/50"
       : parsed && parsed.confidence >= 0.5
-        ? "bg-amber-100 text-amber-700 border-amber-200"
-        : "bg-red-100 text-red-700 border-red-200";
+        ? "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900/50"
+        : "bg-red-100 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900/50";
 
   return (
     <>
@@ -214,7 +214,7 @@ export function AICommandPanel() {
       </Card>
 
       {parsed && (
-        <Card className="mt-4 border-violet-200">
+        <Card className="mt-4 ring-primary/25">
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg">Parsed Action</CardTitle>

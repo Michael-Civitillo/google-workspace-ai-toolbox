@@ -141,7 +141,7 @@ export default function Dashboard() {
       {/* First-run onboarding banner */}
       {showFirstRunBanner && (
         <Link href="/onboarding" className="block mb-6 group">
-          <Card className="border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent transition-all hover:border-primary/50 hover:shadow-md">
+          <Card className="ring-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent transition-all hover:ring-primary/50 hover:shadow-md">
             <CardContent className="pt-6">
               <div className="flex items-start gap-4">
                 <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
@@ -228,10 +228,10 @@ export default function Dashboard() {
 
       {/* Admin Tasks */}
       <h2 className="text-lg font-semibold mb-3">Admin Tasks</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {tasks.map((task) => (
           <Link key={task.href} href={task.href}>
-            <Card className="h-full transition-all hover:shadow-md hover:border-primary/20 cursor-pointer group">
+            <Card className="h-full transition-all hover:shadow-md hover:ring-primary/30 cursor-pointer group">
               <CardHeader className="pb-3">
                 <div className="flex items-center gap-3">
                   <div

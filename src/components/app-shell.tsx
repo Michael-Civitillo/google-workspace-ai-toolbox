@@ -26,7 +26,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="fixed top-4 right-4 z-40">
         <ThemeToggle variant="icon" />
       </div>
-      <div className="p-8">{children}</div>
+      <div className="p-8">
+        <div className="mx-auto w-full max-w-6xl">{children}</div>
+      </div>
     </main>
   );
 }
