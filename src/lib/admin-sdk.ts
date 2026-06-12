@@ -902,6 +902,31 @@ function isNotFoundError(e: unknown): boolean {
 }
 
 /**
+ * Detect the "this resource already exists" rejection from Google APIs —
+ * e.g. re-creating a Gmail forwarding address that's already registered.
+ * Lets idempotent steps treat a duplicate as success and continue, so a
+ * partially-failed flow can be safely retried. Matches the 409 status or
+ * the stable phrasing, since wording shifts between APIs.
+ */
+export function isAlreadyExistsError(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as {
+    code?: number;
+    status?: number;
+    response?: { status?: number; data?: { error?: { message?: string } } };
+    message?: string;
+  };
+  const status = err.code ?? err.status ?? err.response?.status;
+  if (status === 409) return true;
+  const msg = (
+    err.response?.data?.error?.message ??
+    err.message ??
+    ""
+  ).toLowerCase();
+  return msg.includes("already exists") || msg.includes("duplicate");
+}
+
+/**
  * Detect Drive's "this permission is inherited, you can't delete it as the
  * file owner" rejection. Match phrasing rather than a single error code so
  * minor wording changes in the API don't bypass the admin-mode fallback.

@@ -7,6 +7,7 @@ import {
   signOutAllSessions,
   suspendUser,
   transferDrive,
+  isAlreadyExistsError,
 } from "@/lib/admin-sdk";
 import {
   requireEmail,
@@ -129,18 +130,23 @@ export async function POST(request: NextRequest) {
             requestBody: { forwardingEmail: successor },
           });
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          audit({
-            action: "offboarding.forward.create",
-            ...auditBase,
-            params: { user, successor },
-            outcome: "error",
-            error: msg,
-          });
-          return NextResponse.json({
-            success: false,
-            error: `Failed to create forwarding address: ${msg}`,
-          });
+          // An "already exists" error means a previous run registered the
+          // address — proceed to enabling auto-forwarding so the step is
+          // retry-safe rather than wedging on the duplicate.
+          if (!isAlreadyExistsError(e)) {
+            const msg = e instanceof Error ? e.message : String(e);
+            audit({
+              action: "offboarding.forward.create",
+              ...auditBase,
+              params: { user, successor },
+              outcome: "error",
+              error: msg,
+            });
+            return NextResponse.json({
+              success: false,
+              error: `Failed to create forwarding address: ${msg}`,
+            });
+          }
         }
 
         // Step 2: enable auto-forwarding and archive the originals.
