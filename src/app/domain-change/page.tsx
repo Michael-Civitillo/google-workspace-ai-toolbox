@@ -73,16 +73,24 @@ export default function DomainChange() {
   } | null>(null);
 
   useEffect(() => {
-    tfetch("/api/admin/domains")
+    let cancelled = false;
+    setLoadingDomains(true);
+    tfetch("/api/admin/domains", {}, tenantId)
       .then((res) => res.json())
       .then((result) => {
+        if (cancelled) return;
         if (result.success && result.data) {
           setDomains(result.data);
         }
       })
       .catch(() => {})
-      .finally(() => setLoadingDomains(false));
-  }, []);
+      .finally(() => {
+        if (!cancelled) setLoadingDomains(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
 
   const lookupUser = async () => {
     if (!email) return;
