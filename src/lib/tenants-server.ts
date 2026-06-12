@@ -6,7 +6,18 @@ import {
   unlinkSync,
 } from "fs";
 import path from "path";
-import type { Tenant } from "./tenant-types";
+import type { Tenant, PublicTenant } from "./tenant-types";
+
+/**
+ * Strip the server-only Gemini API key before a tenant crosses to the browser,
+ * exposing only whether one is set. Use for every API response that returns
+ * tenant objects.
+ */
+export function toPublicTenant(tenant: Tenant): PublicTenant {
+  const { geminiApiKey, hasGeminiApiKey: _ignored, ...rest } = tenant;
+  void _ignored;
+  return { ...rest, hasGeminiApiKey: Boolean(geminiApiKey) };
+}
 
 interface TenantStore {
   activeTenantId: string | null;

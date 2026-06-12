@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateTenant, deleteTenant } from "@/lib/tenants-server";
+import { updateTenant, deleteTenant, toPublicTenant } from "@/lib/tenants-server";
 import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 import {
   isValidEmail,
@@ -48,7 +48,7 @@ export async function PUT(
       updates.geminiApiKey = geminiApiKey || undefined;
 
     const tenant = await updateTenant(id, updates as Parameters<typeof updateTenant>[1]);
-    return NextResponse.json({ tenant });
+    return NextResponse.json({ tenant: toPublicTenant(tenant) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const status = error instanceof ValidationError ? 400 : 500;
