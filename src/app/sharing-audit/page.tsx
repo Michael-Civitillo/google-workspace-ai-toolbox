@@ -216,8 +216,20 @@ function toCsv(
     }
   }
   return rows
-    .map((r) => r.map((c) => `"${(c ?? "").replace(/"/g, '""')}"`).join(","))
+    .map((r) => r.map((c) => `"${csvCell(c)}"`).join(","))
     .join("\n");
+}
+
+/**
+ * Quote-escape a CSV cell and neutralize spreadsheet formula injection.
+ * File names and share targets can be renamed by external collaborators, so a
+ * cell like `=HYPERLINK(...)` must not execute when the export is opened in
+ * Excel/Sheets. A leading apostrophe forces text interpretation.
+ */
+function csvCell(c: string): string {
+  let v = c ?? "";
+  if (/^[=+\-@\t\r]/.test(v)) v = `'${v}`;
+  return v.replace(/"/g, '""');
 }
 
 /**
