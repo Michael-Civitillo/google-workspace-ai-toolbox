@@ -18,6 +18,9 @@ function safeNext(raw: string | null): string {
   if (!raw) return "/";
   // Reject protocol-relative ("//evil.com") and absolute URLs.
   if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
+  // Reject backslashes outright: the WHATWG URL parser treats "\" as "/",
+  // so "/\evil.com" would otherwise navigate to https://evil.com.
+  if (raw.includes("\\")) return "/";
   // Reject paths containing schemes (e.g. "/foo?x=javascript:bad" is fine
   // — that's just a query string, but a bare scheme like "javascript:..." in
   // the path itself is dangerous).
