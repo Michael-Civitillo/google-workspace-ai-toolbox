@@ -437,6 +437,10 @@ export default function SharingAudit() {
     if (!singleResult?.nextPageToken || singleLoading) return;
     setSingleLoading(true);
     singleCancelRef.current = false;
+    // Resume against the user the snapshot belongs to — NOT the live input
+    // field, which the operator may have edited since the scan ran. Replaying
+    // user A's page token against user B would scan the wrong Drive.
+    const scanUser = singleResult.user;
     try {
       let pageToken: string | undefined = singleResult.nextPageToken;
       let totalScanned = singleResult.scannedFiles;
@@ -445,7 +449,7 @@ export default function SharingAudit() {
       while (true) {
         if (singleCancelRef.current) break;
         const url =
-          `/api/admin/sharing-audit?user=${encodeURIComponent(user)}` +
+          `/api/admin/sharing-audit?user=${encodeURIComponent(scanUser)}` +
           (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
         const res = await tfetch(url);
         const data = await res.json();
