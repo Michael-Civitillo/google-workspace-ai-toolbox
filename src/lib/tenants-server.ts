@@ -46,6 +46,16 @@ function readStore(): TenantStore {
       tenants: Array.isArray(parsed.tenants) ? parsed.tenants : [],
     };
   } catch {
+    // The file exists but couldn't be read/parsed. Returning an empty store
+    // would let the next write permanently overwrite every tenant config, so
+    // preserve the unreadable file under a timestamped name first. After the
+    // rename the path no longer exists, so this happens at most once.
+    try {
+      renameSync(STORE_PATH, `${STORE_PATH}.corrupt-${Date.now()}`);
+    } catch {
+      // If we can't even move it, fall through — we still avoid throwing into
+      // the request handler.
+    }
     return { activeTenantId: null, tenants: [] };
   }
 }
