@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
   if (body.password.length > 1024) {
     return NextResponse.json({ error: "Password too long" }, { status: 400 });
   }
-  if (!passwordMatches(body.password)) {
+  if (!(await passwordMatches(body.password))) {
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }
 
