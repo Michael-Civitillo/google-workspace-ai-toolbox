@@ -52,6 +52,9 @@ async function captureForTheme(browser, theme) {
   if (PASSWORD) {
     console.log(`[${theme}] Logging in...`);
     await login(page);
+  } else {
+    // localStorage isn't accessible on about:blank — land on the app first.
+    await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle0" });
   }
 
   await setTheme(page, theme);
