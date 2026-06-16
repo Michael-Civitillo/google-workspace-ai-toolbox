@@ -84,6 +84,21 @@ const REQUIRED_SCOPES: ReadonlyArray<{
     feature: "Email delegation setup",
   },
   {
+    scope: "https://www.googleapis.com/auth/gmail.readonly",
+    label: "Gmail (read)",
+    feature: "Mailbox export (backup)",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/gmail.insert",
+    label: "Gmail (insert)",
+    feature: "Mailbox import (restore)",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/gmail.labels",
+    label: "Gmail (labels)",
+    feature: "Mailbox import — recreate labels",
+  },
+  {
     scope: "https://www.googleapis.com/auth/calendar",
     label: "Calendar",
     feature: "Calendar delegation and transfer",

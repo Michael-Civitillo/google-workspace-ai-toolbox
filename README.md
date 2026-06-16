@@ -25,6 +25,8 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. External-domain transfers require explicit confirmation.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Server-side preflight + read-after-write verification.
 - 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
+- 💾 **Mailbox Export** — Back up a user's entire Gmail mailbox to a portable `.ndjson` file. Every message is saved as its raw MIME blob with labels and dates preserved. Walks the mailbox page by page, streams straight to disk, cancellable mid-run (you keep what's gathered).
+- 📥 **Mailbox Import** — Restore a mailbox export into another user. Recreates the source's labels by name, then inserts every message via IMAP-style append (no re-delivery, no spam reclassification) with original dates intact — gated behind a typed confirmation since it writes into a live mailbox.
 - 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export, and one-click "revoke external sharing" per file or in bulk — strips only external permissions, leaves internal collaborators alone.
 - 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Per-request tenant isolation — nothing carries over between tenants.
 
@@ -161,6 +163,9 @@ The app runs `gws` commands and `googleapis` SDK calls on the server side. For r
 3. Add these OAuth scopes:
    - `https://www.googleapis.com/auth/gmail.settings.sharing`
    - `https://www.googleapis.com/auth/gmail.settings.basic`
+   - `https://www.googleapis.com/auth/gmail.readonly` (Mailbox Export)
+   - `https://www.googleapis.com/auth/gmail.insert` (Mailbox Import)
+   - `https://www.googleapis.com/auth/gmail.labels` (Mailbox Import — recreate labels)
    - `https://www.googleapis.com/auth/calendar`
    - `https://www.googleapis.com/auth/admin.directory.user` (Domain Change, Offboarding)
    - `https://www.googleapis.com/auth/admin.directory.user.security` (Offboarding — OAuth token revoke, sign-out)

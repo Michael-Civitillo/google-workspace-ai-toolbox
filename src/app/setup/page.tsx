@@ -337,6 +337,9 @@ export default function Setup() {
               <ul className="ml-8 space-y-1 text-xs text-muted-foreground list-disc list-inside font-mono">
                 <li>https://www.googleapis.com/auth/gmail.settings.sharing</li>
                 <li>https://www.googleapis.com/auth/gmail.settings.basic</li>
+                <li>https://www.googleapis.com/auth/gmail.readonly</li>
+                <li>https://www.googleapis.com/auth/gmail.insert</li>
+                <li>https://www.googleapis.com/auth/gmail.labels</li>
                 <li>https://www.googleapis.com/auth/calendar</li>
                 <li>https://www.googleapis.com/auth/admin.directory.user</li>
                 <li>https://www.googleapis.com/auth/admin.directory.user.security</li>

@@ -18,6 +18,8 @@ import {
   Sparkles,
   ArrowRight,
   FolderTree,
+  Download,
+  Upload,
 } from "lucide-react";
 import Link from "next/link";
 import { AICommandPanel } from "@/components/ai-command-panel";
@@ -88,6 +90,22 @@ const tasks = [
     icon: FolderTree,
     color: "text-teal-600 dark:text-teal-400",
     bg: "bg-teal-50 dark:bg-teal-950/30",
+  },
+  {
+    title: "Mailbox Export",
+    description: "Back up a user's entire Gmail mailbox to a portable file",
+    href: "/mailbox-export",
+    icon: Download,
+    color: "text-indigo-600 dark:text-indigo-400",
+    bg: "bg-indigo-50 dark:bg-indigo-950/30",
+  },
+  {
+    title: "Mailbox Import",
+    description: "Restore a mailbox export into another user, labels and dates intact",
+    href: "/mailbox-import",
+    icon: Upload,
+    color: "text-sky-600 dark:text-sky-400",
+    bg: "bg-sky-50 dark:bg-sky-950/30",
   },
   {
     title: "Sharing Audit",
