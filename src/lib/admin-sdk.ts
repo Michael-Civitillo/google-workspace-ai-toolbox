@@ -1743,3 +1743,384 @@ function applyTransferResult(
       return;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Mailbox export / import
+//
+// Export walks a user's Gmail and returns every message as its raw RFC 822
+// MIME blob (base64url), one page at a time, so the client can stream a whole
+// mailbox to disk without holding it server-side. Import inserts those raw
+// messages into another mailbox via messages.insert (IMAP-APPEND semantics —
+// no re-delivery, no spam reclassification), recreating the source's user
+// labels by name first so restored mail keeps its organisation.
+// ---------------------------------------------------------------------------
+
+// Minimal scopes per operation. Export only reads; import only inserts and
+// manages labels — keeping them separate means a compromised export token
+// can never write to a mailbox.
+const GMAIL_READONLY_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.readonly",
+];
+const GMAIL_INSERT_SCOPES = ["https://www.googleapis.com/auth/gmail.insert"];
+const GMAIL_LABELS_SCOPES = ["https://www.googleapis.com/auth/gmail.labels"];
+
+// Raw messages (with attachments) can be large and slow to transfer, so the
+// per-call Gmail timeout is more generous than the Admin SDK default.
+const MAILBOX_API_TIMEOUT_MS = 60_000;
+
+const MAILBOX_EXPORT_DEFAULT_PAGE = 25;
+const MAILBOX_EXPORT_MAX_PAGE = 50;
+// Fetch a handful of raw messages in parallel per page — bounded so a page of
+// large messages can't open dozens of simultaneous downloads.
+const MAILBOX_EXPORT_FETCH_CONCURRENCY = 5;
+
+/** Hard cap on messages accepted in a single import batch. */
+export const MAILBOX_IMPORT_BATCH_CAP = 25;
+// Gmail rejects messages larger than ~50 MB. base64url inflates the payload by
+// ~4/3, so 50 MB of raw text is comfortably above the real ceiling while still
+// rejecting obviously bogus input early.
+const MAILBOX_MAX_RAW_CHARS = 50 * 1024 * 1024;
+
+// Gmail label IDs are short opaque tokens (e.g. "INBOX", "Label_42",
+// "CATEGORY_PERSONAL"). Reject anything that doesn't look like one before it
+// reaches the API.
+const GMAIL_LABEL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * System labels that must never be applied via messages.insert. CHAT is
+ * reserved for Hangouts/Chat history and DRAFT belongs to the drafts API —
+ * inserting a message tagged with either is rejected by Gmail.
+ */
+const NON_IMPORTABLE_LABELS = new Set(["CHAT", "DRAFT"]);
+
+export interface GmailLabelInfo {
+  id: string;
+  name: string;
+  /** "system" (INBOX, SENT, …) or "user" (custom labels). */
+  type: string;
+}
+
+export interface ExportedMessage {
+  id: string;
+  threadId: string;
+  /** Epoch-ms string as Gmail returns it, or null if absent. */
+  internalDate: string | null;
+  labelIds: string[];
+  sizeEstimate: number;
+  /** Full RFC 822 message, base64url-encoded (Gmail `format=raw`). */
+  raw: string;
+}
+
+export interface MailboxExportPage {
+  user: string;
+  messages: ExportedMessage[];
+  /** Pass back as `pageToken` to fetch the next page. Null when done. */
+  nextPageToken: string | null;
+  /** Gmail's rough total-message estimate, for progress display. */
+  resultSizeEstimate: number | null;
+  /**
+   * The mailbox's labels. Returned only on the first page (no `pageToken`),
+   * so the client can write them once into the export header.
+   */
+  labels?: GmailLabelInfo[];
+}
+
+/** List a mailbox's labels (system + user). Read-only. */
+export async function listGmailLabels(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<GmailLabelInfo[]> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
+  const res = await gmail.users.labels.list(
+    { userId: "me" },
+    { timeout: MAILBOX_API_TIMEOUT_MS }
+  );
+  return (res.data.labels || []).map((l) => ({
+    id: l.id || "",
+    name: l.name || "",
+    type: l.type || "user",
+  }));
+}
+
+/**
+ * Export one page of a user's mailbox.
+ *
+ * Lists up to `pageSize` message IDs (default 25, capped at 50), then fetches
+ * each as its raw MIME blob with bounded concurrency. The first page (called
+ * without a `pageToken`) also carries the label set so the client can record
+ * it once in the export header. Read-only.
+ */
+export async function exportMailboxPage(
+  tenant: Tenant | null,
+  userEmail: string,
+  opts: {
+    pageToken?: string;
+    pageSize?: number;
+    includeSpamTrash?: boolean;
+  } = {}
+): Promise<MailboxExportPage> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  const pageSize = Math.min(
+    MAILBOX_EXPORT_MAX_PAGE,
+    Math.max(1, opts.pageSize ?? MAILBOX_EXPORT_DEFAULT_PAGE)
+  );
+
+  const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
+
+  const listRes = await gmail.users.messages.list(
+    {
+      userId: "me",
+      maxResults: pageSize,
+      pageToken: opts.pageToken,
+      includeSpamTrash: opts.includeSpamTrash ?? false,
+    },
+    { timeout: MAILBOX_API_TIMEOUT_MS }
+  );
+
+  const ids = (listRes.data.messages || [])
+    .map((m) => m.id)
+    .filter((id): id is string => !!id);
+
+  // Preserve list order in the output so the export reads in the same order
+  // Gmail returned it (newest first), even though fetches complete out of order.
+  const messages: (ExportedMessage | undefined)[] = new Array(ids.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < ids.length) {
+      const idx = cursor++;
+      const id = ids[idx];
+      const r = await gmail.users.messages.get(
+        { userId: "me", id, format: "raw" },
+        { timeout: MAILBOX_API_TIMEOUT_MS }
+      );
+      messages[idx] = {
+        id: r.data.id || id,
+        threadId: r.data.threadId || "",
+        internalDate: r.data.internalDate ?? null,
+        labelIds: r.data.labelIds || [],
+        sizeEstimate: r.data.sizeEstimate ?? 0,
+        raw: r.data.raw || "",
+      };
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAILBOX_EXPORT_FETCH_CONCURRENCY, ids.length || 1) },
+      worker
+    )
+  );
+
+  const page: MailboxExportPage = {
+    user: userEmail.toLowerCase(),
+    messages: messages.filter((m): m is ExportedMessage => !!m),
+    nextPageToken: listRes.data.nextPageToken || null,
+    resultSizeEstimate: listRes.data.resultSizeEstimate ?? null,
+  };
+  if (!opts.pageToken) {
+    page.labels = await listGmailLabels(tenant, userEmail);
+  }
+  return page;
+}
+
+/**
+ * Resolve the source mailbox's labels to label IDs in the target mailbox,
+ * creating any missing user labels by name.
+ *
+ * System labels (INBOX, SENT, IMPORTANT, CATEGORY_*, …) use IDs that are
+ * identical across every mailbox, so they map to themselves. User labels have
+ * arbitrary per-mailbox IDs, so we match on (case-insensitive) name and create
+ * the label when the target doesn't have it yet. Returns a `{ sourceId:
+ * targetId }` map the caller applies to each message's labelIds before import.
+ */
+export async function resolveImportLabels(
+  tenant: Tenant | null,
+  userEmail: string,
+  sourceLabels: GmailLabelInfo[]
+): Promise<Record<string, string>> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!Array.isArray(sourceLabels)) {
+    throw new Error("sourceLabels must be an array");
+  }
+
+  const gmail = buildGmailClient(tenant, userEmail, GMAIL_LABELS_SCOPES);
+
+  const byNameLower = new Map<string, string>();
+  const refreshExisting = async () => {
+    const res = await gmail.users.labels.list(
+      { userId: "me" },
+      { timeout: MAILBOX_API_TIMEOUT_MS }
+    );
+    byNameLower.clear();
+    for (const l of res.data.labels || []) {
+      if (l.id && l.name) byNameLower.set(l.name.toLowerCase(), l.id);
+    }
+  };
+  await refreshExisting();
+
+  const map: Record<string, string> = {};
+  for (const sl of sourceLabels) {
+    const sourceId = sl?.id;
+    if (!sourceId || !GMAIL_LABEL_ID_RE.test(sourceId)) continue;
+
+    // System labels share IDs across mailboxes — map straight through.
+    if ((sl.type || "") === "system") {
+      map[sourceId] = sourceId;
+      continue;
+    }
+
+    const nameLower = (sl.name || "").toLowerCase();
+    if (!nameLower) continue;
+
+    const existing = byNameLower.get(nameLower);
+    if (existing) {
+      map[sourceId] = existing;
+      continue;
+    }
+
+    try {
+      const created = await gmail.users.labels.create({
+        userId: "me",
+        requestBody: {
+          name: sl.name,
+          labelListVisibility: "labelShow",
+          messageListVisibility: "show",
+        },
+      });
+      if (created.data.id) {
+        map[sourceId] = created.data.id;
+        byNameLower.set(nameLower, created.data.id);
+      }
+    } catch (e) {
+      // A racing create (or a name that already exists under a different case)
+      // surfaces as a conflict — re-list and map to whatever now exists.
+      if (isAlreadyExistsError(e)) {
+        await refreshExisting();
+        const now = byNameLower.get(nameLower);
+        if (now) map[sourceId] = now;
+      }
+      // Any other failure: skip this label. The message still imports, just
+      // without this one tag (import is resilient by design).
+    }
+  }
+  return map;
+}
+
+export interface ImportMessageInput {
+  raw: string;
+  labelIds?: string[];
+}
+
+export interface ImportBatchResult {
+  inserted: number;
+  failed: number;
+  errors: Array<{ index: number; message: string }>;
+}
+
+/** Drop label IDs that are malformed or can't be applied on insert. */
+function sanitizeImportLabelIds(labelIds: unknown): string[] {
+  if (!Array.isArray(labelIds)) return [];
+  const out: string[] = [];
+  for (const l of labelIds) {
+    if (typeof l !== "string") continue;
+    if (!GMAIL_LABEL_ID_RE.test(l)) continue;
+    if (NON_IMPORTABLE_LABELS.has(l)) continue;
+    out.push(l);
+  }
+  return out;
+}
+
+/**
+ * Insert a batch of raw messages into `userEmail`'s mailbox.
+ *
+ * Uses messages.insert (IMAP-APPEND semantics): the message is added directly
+ * without re-delivery or spam reclassification, and `internalDateSource:
+ * "dateHeader"` keeps each message ordered by its original Date header rather
+ * than "now". Per-message failures are collected, never thrown, so one bad
+ * message doesn't abort the batch. A message that fails because of a label is
+ * retried once with no labels, so a stale/unknown label can't lose the mail.
+ */
+export async function importMessageBatch(
+  tenant: Tenant | null,
+  userEmail: string,
+  messages: ImportMessageInput[]
+): Promise<ImportBatchResult> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("messages must be a non-empty array");
+  }
+  if (messages.length > MAILBOX_IMPORT_BATCH_CAP) {
+    throw new Error(
+      `Too many messages in one import batch — cap is ${MAILBOX_IMPORT_BATCH_CAP}`
+    );
+  }
+
+  const gmail = buildGmailClient(tenant, userEmail, GMAIL_INSERT_SCOPES);
+  const out: ImportBatchResult = { inserted: 0, failed: 0, errors: [] };
+
+  for (let i = 0; i < messages.length; i++) {
+    const raw = typeof messages[i]?.raw === "string" ? messages[i].raw : "";
+    if (!raw) {
+      out.failed++;
+      out.errors.push({ index: i, message: "Message has no raw content" });
+      continue;
+    }
+    if (raw.length > MAILBOX_MAX_RAW_CHARS) {
+      out.failed++;
+      out.errors.push({ index: i, message: "Message exceeds the size limit" });
+      continue;
+    }
+    const labelIds = sanitizeImportLabelIds(messages[i].labelIds);
+
+    try {
+      await gmail.users.messages.insert(
+        {
+          userId: "me",
+          internalDateSource: "dateHeader",
+          requestBody: { raw, labelIds: labelIds.length ? labelIds : undefined },
+        },
+        { timeout: MAILBOX_API_TIMEOUT_MS }
+      );
+      out.inserted++;
+    } catch (e) {
+      // Retry once with no labels — by far the most common insert rejection is
+      // an unapplicable label, and the mail itself is still worth saving.
+      if (labelIds.length > 0) {
+        try {
+          await gmail.users.messages.insert(
+            {
+              userId: "me",
+              internalDateSource: "dateHeader",
+              requestBody: { raw },
+            },
+            { timeout: MAILBOX_API_TIMEOUT_MS }
+          );
+          out.inserted++;
+          continue;
+        } catch (e2) {
+          out.failed++;
+          out.errors.push({
+            index: i,
+            message: e2 instanceof Error ? e2.message : String(e2),
+          });
+          continue;
+        }
+      }
+      out.failed++;
+      out.errors.push({
+        index: i,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return out;
+}

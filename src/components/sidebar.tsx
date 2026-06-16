@@ -16,6 +16,8 @@ import {
   Share2,
   Sparkles,
   FolderTree,
+  Download,
+  Upload,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -57,6 +59,13 @@ const navigation = [
     items: [
       { name: "Domain Change", href: "/domain-change", icon: Globe },
       { name: "Offboarding", href: "/offboarding", icon: UserMinus },
+    ],
+  },
+  {
+    label: "Backup",
+    items: [
+      { name: "Mailbox Export", href: "/mailbox-export", icon: Download },
+      { name: "Mailbox Import", href: "/mailbox-import", icon: Upload },
     ],
   },
   {
