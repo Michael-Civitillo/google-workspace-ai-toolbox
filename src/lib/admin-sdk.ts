@@ -1770,9 +1770,12 @@ const MAILBOX_API_TIMEOUT_MS = 60_000;
 
 const MAILBOX_EXPORT_DEFAULT_PAGE = 25;
 const MAILBOX_EXPORT_MAX_PAGE = 50;
-// Fetch a handful of raw messages in parallel per page — bounded so a page of
-// large messages can't open dozens of simultaneous downloads.
-const MAILBOX_EXPORT_FETCH_CONCURRENCY = 5;
+// Fetch raw messages in parallel per page. messages.get costs 5 quota units,
+// so 12 in flight peaks at ~60 units/sec — several times faster than a serial
+// walk while staying well under Gmail's 250 units/user/sec budget, with the
+// retry layer absorbing the occasional 429. Bounded so a page of large
+// messages can't open an unreasonable number of simultaneous downloads.
+const MAILBOX_EXPORT_FETCH_CONCURRENCY = 12;
 
 /** Hard cap on messages accepted in a single import batch. */
 export const MAILBOX_IMPORT_BATCH_CAP = 25;
@@ -2026,13 +2029,20 @@ export async function exportMailboxPage(
             ),
           { retryServerErrors: true }
         );
+        // A message with no raw body (e.g. a Chat / structured item) can't be
+        // re-imported, so record it as skipped rather than writing an empty,
+        // unimportable line that the importer would later count as a failure.
+        if (!r.data.raw) {
+          skipped.push({ id, error: "Message has no exportable raw content" });
+          continue;
+        }
         messages[idx] = {
           id: r.data.id || id,
           threadId: r.data.threadId || "",
           internalDate: r.data.internalDate ?? null,
           labelIds: r.data.labelIds || [],
           sizeEstimate: r.data.sizeEstimate ?? 0,
-          raw: r.data.raw || "",
+          raw: r.data.raw,
         };
       } catch (e) {
         // Don't let one unfetchable message abort the whole mailbox export —
@@ -2121,8 +2131,12 @@ export async function resolveImportLabels(
       continue;
     }
 
-    const nameLower = (sl.name || "").toLowerCase();
-    if (!nameLower) continue;
+    // Reject empty or implausibly long names before calling create — Gmail
+    // caps label names at 225 chars, so anything longer is junk from a
+    // malformed/crafted export and would only waste a failing API round trip.
+    const name = (sl.name || "").trim();
+    if (!name || name.length > 225) continue;
+    const nameLower = name.toLowerCase();
 
     const existing = byNameLower.get(nameLower);
     if (existing) {
@@ -2140,7 +2154,7 @@ export async function resolveImportLabels(
             {
               userId: "me",
               requestBody: {
-                name: sl.name,
+                name,
                 labelListVisibility: "labelShow",
                 messageListVisibility: "show",
               },
@@ -2179,11 +2193,16 @@ export interface ImportBatchResult {
   errors: Array<{ index: number; message: string }>;
 }
 
+// A real message carries a handful of labels; cap the array so a crafted
+// export can't attach a huge label list to inflate the insert payload.
+const MAX_LABELS_PER_MESSAGE = 100;
+
 /** Drop label IDs that are malformed or can't be applied on insert. */
 function sanitizeImportLabelIds(labelIds: unknown): string[] {
   if (!Array.isArray(labelIds)) return [];
   const out: string[] = [];
   for (const l of labelIds) {
+    if (out.length >= MAX_LABELS_PER_MESSAGE) break;
     if (typeof l !== "string") continue;
     if (!GMAIL_LABEL_ID_RE.test(l)) continue;
     if (NON_IMPORTABLE_LABELS.has(l)) continue;
@@ -2258,9 +2277,21 @@ export async function importMessageBatch(
       );
       out.inserted++;
     } catch (e) {
-      // Retry once with no labels — by far the most common insert rejection is
-      // an unapplicable label, and the mail itself is still worth saving.
-      if (labelIds.length > 0) {
+      // Retry once with no labels — the most common insert rejection is an
+      // unapplicable label. But ONLY when the first attempt definitely did not
+      // commit: a 4xx (other than 429) is a clean rejection by Gmail, so the
+      // message was never stored and re-inserting can't duplicate it. A 5xx,
+      // timeout, or network error is ambiguous — the message may have
+      // committed before the response was lost — so we must NOT re-insert, or
+      // we'd silently store a duplicate (messages.insert has no dedup key).
+      const status = httpStatusOf(e);
+      const cleanlyRejected =
+        labelIds.length > 0 &&
+        status !== null &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429;
+      if (cleanlyRejected) {
         try {
           await withGmailRetry(
             () =>

@@ -59,8 +59,16 @@ function formatBytes(n: number): string {
 }
 
 function downloadNdjson(filename: string, lines: string[]) {
-  // Each line is already a JSON string; join with newlines into one Blob.
-  const blob = new Blob([lines.join("\n") + "\n"], {
+  // Build the Blob from the array directly (each line followed by a newline)
+  // rather than lines.join("\n"). A single joined string would both triple
+  // peak memory and, past V8's ~512 MB string cap, throw "Invalid string
+  // length" — destroying a large export. The Blob constructor concatenates the
+  // parts internally without ever materialising one giant string.
+  const parts: BlobPart[] = [];
+  for (const line of lines) {
+    parts.push(line, "\n");
+  }
+  const blob = new Blob(parts, {
     type: "application/x-ndjson;charset=utf-8",
   });
   const url = URL.createObjectURL(blob);
@@ -240,7 +248,7 @@ export default function MailboxExport() {
             {summary.skipped > 0 &&
               ` ${summary.skipped.toLocaleString()} message${
                 summary.skipped === 1 ? "" : "s"
-              } could not be fetched after retries and were left out — re-run the export to try them again.`}
+              } could not be exported (no raw content, or still unreachable after retries) and were left out.`}
           </AlertDescription>
         </Alert>
       )}

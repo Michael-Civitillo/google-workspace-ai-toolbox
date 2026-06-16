@@ -79,18 +79,24 @@ async function* readLines(file: File): AsyncGenerator<string> {
     }
     if (buf.length > 0) yield buf;
   } finally {
-    reader.releaseLock();
+    // cancel() both aborts the underlying stream (when we break early, e.g. on
+    // reading only the header) and releases the reader lock — leaving the File
+    // stream pipeline closed rather than dangling.
+    await reader.cancel().catch(() => {});
   }
 }
 
-/** Read just the first line of a file (the export header) without a full pass. */
+/**
+ * Read just the first line of a file (the export header). Uses the same line
+ * reader as the import pass so the two agree on decoding (BOM handling) and
+ * there's no size limit on the header line — a mailbox with thousands of
+ * labels can produce a header well over a few MB.
+ */
 async function readHeaderLine(file: File): Promise<string> {
-  // Headers are small; 5 MB is far more than enough even for thousands of
-  // labels, and avoids decoding a multi-GB file just to read line one.
-  const slice = file.slice(0, 5 * 1024 * 1024);
-  const text = await slice.text();
-  const nl = text.indexOf("\n");
-  return nl >= 0 ? text.slice(0, nl) : text;
+  for await (const line of readLines(file)) {
+    return line;
+  }
+  return "";
 }
 
 export default function MailboxImport() {
