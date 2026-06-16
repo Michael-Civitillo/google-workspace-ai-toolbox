@@ -1847,10 +1847,96 @@ export interface MailboxExportPage {
   /** Gmail's rough total-message estimate, for progress display. */
   resultSizeEstimate: number | null;
   /**
+   * Messages on this page that couldn't be fetched even after retries (e.g.
+   * deleted mid-walk, or a persistent backend error). They're reported rather
+   * than aborting the whole export — a backup with a known, listed gap beats a
+   * backup that dies on message 9,001 of 50,000.
+   */
+  skipped: Array<{ id: string; error: string }>;
+  /**
    * The mailbox's labels. Returned only on the first page (no `pageToken`),
    * so the client can write them once into the export header.
    */
   labels?: GmailLabelInfo[];
+}
+
+/** Best-effort extraction of an HTTP status from a googleapis error. */
+function httpStatusOf(e: unknown): number | null {
+  if (typeof e !== "object" || e === null) return null;
+  const err = e as {
+    code?: unknown;
+    status?: unknown;
+    response?: { status?: unknown };
+  };
+  // Try each source in turn and return the first that yields a real number —
+  // gaxios sometimes puts a non-numeric string (e.g. "ERR_BAD_REQUEST") in
+  // `.code` while the actual HTTP status lives on `.response.status`.
+  for (const raw of [err.status, err.response?.status, err.code]) {
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/**
+ * Decide whether a failed Gmail call is worth retrying.
+ *
+ * 429 (rate limit) is always safe — the request was rejected before any work.
+ * Gmail also signals per-user rate limits as 403 with a rate/quota message, so
+ * we sniff those. 5xx backend blips and bare network errors are retriable only
+ * for idempotent reads (`retryServerErrors`), never for inserts, where a 5xx
+ * might have committed the message and a blind retry would duplicate it.
+ */
+function isRetriableGmailError(
+  e: unknown,
+  opts: { retryServerErrors: boolean }
+): boolean {
+  const status = httpStatusOf(e);
+  const msg =
+    typeof e === "object" && e && "message" in e
+      ? String((e as { message?: unknown }).message ?? "").toLowerCase()
+      : "";
+  const rateLimited =
+    msg.includes("rate limit") ||
+    msg.includes("ratelimit") ||
+    msg.includes("user rate") ||
+    msg.includes("quota");
+  if (status === 429) return true;
+  if (status === 403 && rateLimited) return true;
+  if (opts.retryServerErrors) {
+    if (status !== null && status >= 500 && status <= 599) return true;
+    if (
+      status === null &&
+      (msg.includes("econnreset") ||
+        msg.includes("etimedout") ||
+        msg.includes("socket hang up") ||
+        msg.includes("network") ||
+        msg.includes("timeout"))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Retry a Gmail call with exponential backoff + jitter on transient errors. */
+async function withGmailRetry<T>(
+  fn: () => Promise<T>,
+  opts: { retries?: number; retryServerErrors: boolean }
+): Promise<T> {
+  const retries = opts.retries ?? 5;
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (e) {
+      attempt++;
+      if (attempt > retries || !isRetriableGmailError(e, opts)) throw e;
+      const backoff = Math.min(8000, 300 * 2 ** (attempt - 1));
+      const jitter = Math.floor(Math.random() * 300);
+      await new Promise((r) => setTimeout(r, backoff + jitter));
+    }
+  }
 }
 
 /** List a mailbox's labels (system + user). Read-only. */
@@ -1862,9 +1948,13 @@ export async function listGmailLabels(
     throw new Error("userEmail must be a valid email address");
   }
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
-  const res = await gmail.users.labels.list(
-    { userId: "me" },
-    { timeout: MAILBOX_API_TIMEOUT_MS }
+  const res = await withGmailRetry(
+    () =>
+      gmail.users.labels.list(
+        { userId: "me" },
+        { timeout: MAILBOX_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
   return (res.data.labels || []).map((l) => ({
     id: l.id || "",
@@ -1900,14 +1990,18 @@ export async function exportMailboxPage(
 
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
 
-  const listRes = await gmail.users.messages.list(
-    {
-      userId: "me",
-      maxResults: pageSize,
-      pageToken: opts.pageToken,
-      includeSpamTrash: opts.includeSpamTrash ?? false,
-    },
-    { timeout: MAILBOX_API_TIMEOUT_MS }
+  const listRes = await withGmailRetry(
+    () =>
+      gmail.users.messages.list(
+        {
+          userId: "me",
+          maxResults: pageSize,
+          pageToken: opts.pageToken,
+          includeSpamTrash: opts.includeSpamTrash ?? false,
+        },
+        { timeout: MAILBOX_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 
   const ids = (listRes.data.messages || [])
@@ -1917,23 +2011,34 @@ export async function exportMailboxPage(
   // Preserve list order in the output so the export reads in the same order
   // Gmail returned it (newest first), even though fetches complete out of order.
   const messages: (ExportedMessage | undefined)[] = new Array(ids.length);
+  const skipped: Array<{ id: string; error: string }> = [];
   let cursor = 0;
   const worker = async () => {
     while (cursor < ids.length) {
       const idx = cursor++;
       const id = ids[idx];
-      const r = await gmail.users.messages.get(
-        { userId: "me", id, format: "raw" },
-        { timeout: MAILBOX_API_TIMEOUT_MS }
-      );
-      messages[idx] = {
-        id: r.data.id || id,
-        threadId: r.data.threadId || "",
-        internalDate: r.data.internalDate ?? null,
-        labelIds: r.data.labelIds || [],
-        sizeEstimate: r.data.sizeEstimate ?? 0,
-        raw: r.data.raw || "",
-      };
+      try {
+        const r = await withGmailRetry(
+          () =>
+            gmail.users.messages.get(
+              { userId: "me", id, format: "raw" },
+              { timeout: MAILBOX_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
+        );
+        messages[idx] = {
+          id: r.data.id || id,
+          threadId: r.data.threadId || "",
+          internalDate: r.data.internalDate ?? null,
+          labelIds: r.data.labelIds || [],
+          sizeEstimate: r.data.sizeEstimate ?? 0,
+          raw: r.data.raw || "",
+        };
+      } catch (e) {
+        // Don't let one unfetchable message abort the whole mailbox export —
+        // record it and move on.
+        skipped.push({ id, error: e instanceof Error ? e.message : String(e) });
+      }
     }
   };
   await Promise.all(
@@ -1946,6 +2051,7 @@ export async function exportMailboxPage(
   const page: MailboxExportPage = {
     user: userEmail.toLowerCase(),
     messages: messages.filter((m): m is ExportedMessage => !!m),
+    skipped,
     nextPageToken: listRes.data.nextPageToken || null,
     resultSizeEstimate: listRes.data.resultSizeEstimate ?? null,
   };
@@ -1986,9 +2092,13 @@ export async function resolveImportLabels(
   // every message that carried it.
   const byNameLower = new Map<string, string>();
   const refreshExisting = async () => {
-    const res = await gmail.users.labels.list(
-      { userId: "me" },
-      { timeout: MAILBOX_API_TIMEOUT_MS }
+    const res = await withGmailRetry(
+      () =>
+        gmail.users.labels.list(
+          { userId: "me" },
+          { timeout: MAILBOX_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
     );
     byNameLower.clear();
     for (const l of res.data.labels || []) {
@@ -2021,16 +2131,23 @@ export async function resolveImportLabels(
     }
 
     try {
-      const created = await gmail.users.labels.create(
-        {
-          userId: "me",
-          requestBody: {
-            name: sl.name,
-            labelListVisibility: "labelShow",
-            messageListVisibility: "show",
-          },
-        },
-        { timeout: MAILBOX_API_TIMEOUT_MS }
+      // Safe to retry server errors: a 5xx that actually created the label
+      // surfaces as a 409 on the retry, which the catch below turns into a
+      // re-list + map rather than a duplicate.
+      const created = await withGmailRetry(
+        () =>
+          gmail.users.labels.create(
+            {
+              userId: "me",
+              requestBody: {
+                name: sl.name,
+                labelListVisibility: "labelShow",
+                messageListVisibility: "show",
+              },
+            },
+            { timeout: MAILBOX_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
       );
       if (created.data.id) {
         map[sourceId] = created.data.id;
@@ -2120,13 +2237,24 @@ export async function importMessageBatch(
     const labelIds = sanitizeImportLabelIds(messages[i].labelIds);
 
     try {
-      await gmail.users.messages.insert(
-        {
-          userId: "me",
-          internalDateSource: "dateHeader",
-          requestBody: { raw, labelIds: labelIds.length ? labelIds : undefined },
-        },
-        { timeout: MAILBOX_API_TIMEOUT_MS }
+      // 429-only retry: insert is NOT idempotent, so a 5xx (which might have
+      // committed the message) must surface as a failure rather than risk a
+      // duplicate on a blind retry. Rate-limit rejections never reach Gmail's
+      // store, so backing off and retrying those is safe.
+      await withGmailRetry(
+        () =>
+          gmail.users.messages.insert(
+            {
+              userId: "me",
+              internalDateSource: "dateHeader",
+              requestBody: {
+                raw,
+                labelIds: labelIds.length ? labelIds : undefined,
+              },
+            },
+            { timeout: MAILBOX_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: false }
       );
       out.inserted++;
     } catch (e) {
@@ -2134,13 +2262,17 @@ export async function importMessageBatch(
       // an unapplicable label, and the mail itself is still worth saving.
       if (labelIds.length > 0) {
         try {
-          await gmail.users.messages.insert(
-            {
-              userId: "me",
-              internalDateSource: "dateHeader",
-              requestBody: { raw },
-            },
-            { timeout: MAILBOX_API_TIMEOUT_MS }
+          await withGmailRetry(
+            () =>
+              gmail.users.messages.insert(
+                {
+                  userId: "me",
+                  internalDateSource: "dateHeader",
+                  requestBody: { raw },
+                },
+                { timeout: MAILBOX_API_TIMEOUT_MS }
+              ),
+            { retryServerErrors: false }
           );
           out.inserted++;
           continue;

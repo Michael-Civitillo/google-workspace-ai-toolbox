@@ -19,6 +19,7 @@ import {
   StopCircle,
   Info,
   CheckCircle2,
+  AlertTriangle,
 } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 
@@ -46,6 +47,7 @@ interface ExportPage {
   messages: ExportedMessage[];
   nextPageToken: string | null;
   resultSizeEstimate: number | null;
+  skipped?: Array<{ id: string; error: string }>;
   labels?: GmailLabel[];
 }
 
@@ -89,6 +91,7 @@ export default function MailboxExport() {
     user: string;
     exported: number;
     bytes: number;
+    skipped: number;
     cancelled: boolean;
   } | null>(null);
 
@@ -108,6 +111,7 @@ export default function MailboxExport() {
     const lines: string[] = [];
     let exported = 0;
     let bytes = 0;
+    let skipped = 0;
     let exportUser = user.trim().toLowerCase();
 
     try {
@@ -154,6 +158,7 @@ export default function MailboxExport() {
           exported++;
           bytes += m.raw.length;
         }
+        skipped += page.skipped?.length ?? 0;
         setProgress({
           exported,
           bytes,
@@ -167,15 +172,20 @@ export default function MailboxExport() {
       setError("Failed to connect to the API");
     } finally {
       setRunning(false);
-      // Offer a download whenever we captured at least one message — even on
-      // cancel or a mid-walk error, so partial backups aren't thrown away.
-      if (exported > 0) {
-        const date = new Date().toISOString().slice(0, 10);
-        downloadNdjson(`mailbox-${exportUser}-${date}.ndjson`, lines);
+      // Download whenever we captured at least one message — even on cancel or
+      // a mid-walk error, so partial backups aren't thrown away. Still show a
+      // summary when nothing was captured but messages were skipped, so a fully
+      // failed run isn't silent.
+      if (exported > 0 || skipped > 0) {
+        if (exported > 0) {
+          const date = new Date().toISOString().slice(0, 10);
+          downloadNdjson(`mailbox-${exportUser}-${date}.ndjson`, lines);
+        }
         setSummary({
           user: exportUser,
           exported,
           bytes,
+          skipped,
           cancelled: cancelRef.current,
         });
       }
@@ -203,13 +213,34 @@ export default function MailboxExport() {
       )}
 
       {summary && (
-        <Alert className="mb-6 border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40">
-          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-          <AlertDescription className="text-emerald-800 dark:text-emerald-300 text-sm">
+        <Alert
+          className={`mb-6 ${
+            summary.skipped > 0
+              ? "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
+              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
+          }`}
+        >
+          {summary.skipped > 0 ? (
+            <AlertTriangle className="h-4 w-4 text-amber-600" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+          )}
+          <AlertDescription
+            className={`text-sm ${
+              summary.skipped > 0
+                ? "text-amber-800 dark:text-amber-300"
+                : "text-emerald-800 dark:text-emerald-300"
+            }`}
+          >
             {summary.cancelled ? "Export cancelled — " : "Export complete — "}
             saved {summary.exported.toLocaleString()} message
             {summary.exported === 1 ? "" : "s"} (≈{formatBytes(summary.bytes)})
-            from {summary.user}. The file has been downloaded.
+            from {summary.user}.
+            {summary.exported > 0 ? " The file has been downloaded." : ""}
+            {summary.skipped > 0 &&
+              ` ${summary.skipped.toLocaleString()} message${
+                summary.skipped === 1 ? "" : "s"
+              } could not be fetched after retries and were left out — re-run the export to try them again.`}
           </AlertDescription>
         </Alert>
       )}

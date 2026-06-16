@@ -4,8 +4,9 @@ import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 
-// Label lists are tiny — a mailbox with thousands of labels is pathological.
-const MAX_BODY_BYTES = 1 * 1024 * 1024;
+// Label lists are small, but a mailbox near Gmail's ~10k-label ceiling with
+// long names can still approach a few MB of JSON — give it headroom.
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_LABELS = 10_000;
 
 /**
