@@ -22,7 +22,10 @@ const MAX_LABELS = 10_000;
 export async function POST(request: NextRequest) {
   const lenHeader = request.headers.get("content-length");
   if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+    return NextResponse.json(
+      { success: false, error: "Label payload is too large" },
+      { status: 413 }
+    );
   }
 
   let raw = "";
@@ -30,7 +33,10 @@ export async function POST(request: NextRequest) {
     raw = await request.text();
   } catch {}
   if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+    return NextResponse.json(
+      { success: false, error: "Label payload is too large" },
+      { status: 413 }
+    );
   }
   let body: Record<string, unknown> = {};
   try {

@@ -14,9 +14,9 @@ import { audit } from "@/lib/audit";
  * to disk page by page. The first page (no pageToken) also carries the
  * mailbox's label set for the export header.
  *
- * Capped server-side at 50 messages per request so a page of large messages
- * can't blow the response size. The client chains `nextPageToken` to walk the
- * rest of the mailbox.
+ * Defaults to 25 messages per request and is capped server-side at 50 so a
+ * page of large messages can't blow the response size. The client chains
+ * `nextPageToken` to walk the rest of the mailbox.
  */
 export async function GET(request: NextRequest) {
   const tenant = tenantFromRequest(request);
@@ -36,8 +36,10 @@ export async function GET(request: NextRequest) {
     let pageSize: number | undefined;
     if (pageSizeRaw !== null) {
       pageSize = Number(pageSizeRaw);
-      if (!Number.isFinite(pageSize)) {
-        throw new ValidationError("pageSize must be a number");
+      if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 50) {
+        throw new ValidationError(
+          "pageSize must be an integer between 1 and 50"
+        );
       }
     }
 

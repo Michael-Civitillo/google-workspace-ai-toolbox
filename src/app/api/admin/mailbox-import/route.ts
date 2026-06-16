@@ -9,10 +9,12 @@ import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 
 // Raw messages carry attachments, so the import body is allowed to be large.
-// The client batches by cumulative size to stay comfortably under this; a
-// single message can be up to ~50 MB so the cap leaves headroom for one big
-// message plus a few small ones.
-const MAX_BODY_BYTES = 50 * 1024 * 1024;
+// A single base64url message can be ~72 MB (MAILBOX_MAX_RAW_CHARS), so the cap
+// sits above that plus JSON envelope overhead — otherwise a lone max-size
+// message could never fit once wrapped in `{ user, messages: [...] }`. The
+// client batches by cumulative raw size well under this for multi-message
+// batches, and sends a single oversized message on its own.
+const MAX_BODY_BYTES = 80 * 1024 * 1024;
 
 /**
  * Insert a batch of raw messages from an export into the target mailbox.
@@ -32,7 +34,10 @@ const MAX_BODY_BYTES = 50 * 1024 * 1024;
 export async function POST(request: NextRequest) {
   const lenHeader = request.headers.get("content-length");
   if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+    return NextResponse.json(
+      { success: false, error: "Import batch is too large" },
+      { status: 413 }
+    );
   }
 
   let raw = "";
@@ -40,7 +45,10 @@ export async function POST(request: NextRequest) {
     raw = await request.text();
   } catch {}
   if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
+    return NextResponse.json(
+      { success: false, error: "Import batch is too large" },
+      { status: 413 }
+    );
   }
   let body: Record<string, unknown> = {};
   try {

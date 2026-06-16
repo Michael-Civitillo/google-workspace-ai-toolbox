@@ -26,8 +26,11 @@ import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 const EXPORT_TYPE = "gws-mailbox-export";
 
-// Mirror the server batch cap, and bound each request by cumulative raw size
-// so a batch of large messages never blows the import body limit.
+// Mirror the server batch cap (MAILBOX_IMPORT_BATCH_CAP), and bound each
+// request's cumulative raw size well under the server body cap (80 MB) so a
+// multi-message batch plus JSON overhead never trips the limit. A single
+// message larger than this budget is sent on its own (it can still be up to
+// ~72 MB, which fits under the body cap).
 const IMPORT_BATCH_COUNT = 25;
 const IMPORT_BATCH_BYTES = 20 * 1024 * 1024;
 
@@ -234,18 +237,34 @@ export default function MailboxImport() {
           setProgress({ inserted, failed });
           continue;
         }
-        if (typeof msg.raw !== "string" || !msg.raw) continue;
+        // A line with no raw content can't be imported — count it as a failure
+        // rather than dropping it silently, so the summary stays honest.
+        if (typeof msg.raw !== "string" || !msg.raw) {
+          failed++;
+          if (collectedErrors.length < 50) {
+            collectedErrors.push(`Line ${lineNo}: message has no raw content — skipped`);
+          }
+          setProgress({ inserted, failed });
+          continue;
+        }
 
-        // Remap label IDs from the source mailbox to the target. Unknown IDs
-        // (e.g. stable system labels) pass through unchanged.
+        // Remap label IDs from the source mailbox to the target. IDs that
+        // didn't resolve (a user label whose create failed) are dropped so the
+        // server's retry path can't strip every label off the message — system
+        // labels always resolve (mapped to themselves) and survive.
         const labelIds = Array.isArray(msg.labelIds)
-          ? msg.labelIds.map((id) => labelMap[id] ?? id)
+          ? msg.labelIds
+              .map((id) => labelMap[id])
+              .filter((id): id is string => typeof id === "string")
           : undefined;
 
-        batch.push({ raw: msg.raw, labelIds });
-        batchBytes += msg.raw.length;
-
-        if (batch.length >= IMPORT_BATCH_COUNT || batchBytes >= IMPORT_BATCH_BYTES) {
+        // Flush BEFORE adding when this message would push the batch over a
+        // limit, so a batch never exceeds the count cap or the byte budget
+        // (a single oversized message is sent on its own).
+        if (
+          batch.length >= IMPORT_BATCH_COUNT ||
+          (batch.length > 0 && batchBytes + msg.raw.length > IMPORT_BATCH_BYTES)
+        ) {
           const ok = await flush();
           if (!ok) {
             setRunning(false);
@@ -253,6 +272,9 @@ export default function MailboxImport() {
             return;
           }
         }
+
+        batch.push({ raw: msg.raw, labelIds });
+        batchBytes += msg.raw.length;
       }
 
       if (!cancelRef.current) {

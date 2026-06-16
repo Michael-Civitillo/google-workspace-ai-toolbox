@@ -1776,15 +1776,43 @@ const MAILBOX_EXPORT_FETCH_CONCURRENCY = 5;
 
 /** Hard cap on messages accepted in a single import batch. */
 export const MAILBOX_IMPORT_BATCH_CAP = 25;
-// Gmail rejects messages larger than ~50 MB. base64url inflates the payload by
-// ~4/3, so 50 MB of raw text is comfortably above the real ceiling while still
-// rejecting obviously bogus input early.
-const MAILBOX_MAX_RAW_CHARS = 50 * 1024 * 1024;
+// Gmail accepts messages up to ~50 MB of decoded RFC 822 bytes. `format=raw`
+// returns those bytes base64url-encoded, which inflates them by ~4/3 — so a
+// max-size message is ~67 MB of characters. The cap is set above that (with
+// margin) so a large-but-legal message isn't rejected before it reaches Gmail,
+// while still rejecting obviously bogus input early. Keep this comfortably
+// below the import route's body cap (see MAX_BODY_BYTES there).
+export const MAILBOX_MAX_RAW_CHARS = 72 * 1024 * 1024;
 
 // Gmail label IDs are short opaque tokens (e.g. "INBOX", "Label_42",
 // "CATEGORY_PERSONAL"). Reject anything that doesn't look like one before it
 // reaches the API.
 const GMAIL_LABEL_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * The complete, fixed set of Gmail system-label IDs. These IDs are identical
+ * across every mailbox, so a message tagged with one can be imported as-is.
+ * We key "is this a system label?" off this set rather than the `type` field
+ * in the export header — that field is supplied by the (operator-uploaded)
+ * file and must not be trusted to decide whether to map an ID straight through
+ * or to match a user label by name.
+ */
+const SYSTEM_LABEL_IDS = new Set([
+  "INBOX",
+  "SENT",
+  "DRAFT",
+  "TRASH",
+  "SPAM",
+  "STARRED",
+  "UNREAD",
+  "IMPORTANT",
+  "CHAT",
+  "CATEGORY_PERSONAL",
+  "CATEGORY_SOCIAL",
+  "CATEGORY_PROMOTIONS",
+  "CATEGORY_UPDATES",
+  "CATEGORY_FORUMS",
+]);
 
 /**
  * System labels that must never be applied via messages.insert. CHAT is
@@ -1951,6 +1979,11 @@ export async function resolveImportLabels(
 
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_LABELS_SCOPES);
 
+  // Only USER labels are matched/created by name. System labels are excluded
+  // from this map so a source user-label literally named "Important" (or
+  // "Inbox", "Sent", …) can never be remapped onto the target's IMPORTANT/
+  // INBOX/SENT system label — which would silently force-mark or un-archive
+  // every message that carried it.
   const byNameLower = new Map<string, string>();
   const refreshExisting = async () => {
     const res = await gmail.users.labels.list(
@@ -1959,7 +1992,9 @@ export async function resolveImportLabels(
     );
     byNameLower.clear();
     for (const l of res.data.labels || []) {
-      if (l.id && l.name) byNameLower.set(l.name.toLowerCase(), l.id);
+      if (l.id && l.name && (l.type || "") !== "system") {
+        byNameLower.set(l.name.toLowerCase(), l.id);
+      }
     }
   };
   await refreshExisting();
@@ -1969,8 +2004,9 @@ export async function resolveImportLabels(
     const sourceId = sl?.id;
     if (!sourceId || !GMAIL_LABEL_ID_RE.test(sourceId)) continue;
 
-    // System labels share IDs across mailboxes — map straight through.
-    if ((sl.type || "") === "system") {
+    // System labels share IDs across mailboxes — map straight through. Decide
+    // this from the known ID set, not the file-supplied `type`.
+    if (SYSTEM_LABEL_IDS.has(sourceId)) {
       map[sourceId] = sourceId;
       continue;
     }
@@ -1985,14 +2021,17 @@ export async function resolveImportLabels(
     }
 
     try {
-      const created = await gmail.users.labels.create({
-        userId: "me",
-        requestBody: {
-          name: sl.name,
-          labelListVisibility: "labelShow",
-          messageListVisibility: "show",
+      const created = await gmail.users.labels.create(
+        {
+          userId: "me",
+          requestBody: {
+            name: sl.name,
+            labelListVisibility: "labelShow",
+            messageListVisibility: "show",
+          },
         },
-      });
+        { timeout: MAILBOX_API_TIMEOUT_MS }
+      );
       if (created.data.id) {
         map[sourceId] = created.data.id;
         byNameLower.set(nameLower, created.data.id);
