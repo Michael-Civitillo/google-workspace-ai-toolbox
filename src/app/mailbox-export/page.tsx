@@ -189,16 +189,19 @@ export default function MailboxExport() {
 
         // mbox is a bare message stream — it carries no header or label set.
         if (exportFormat === "ndjson" && lines.length === 0) {
-          lines.push(
-            JSON.stringify({
-              type: EXPORT_TYPE,
-              version: EXPORT_VERSION,
-              sourceUser: page.user,
-              exportedAt: new Date().toISOString(),
-              includeSpamTrash,
-              labels: page.labels ?? [],
-            })
-          );
+          const headerLine = JSON.stringify({
+            type: EXPORT_TYPE,
+            version: EXPORT_VERSION,
+            sourceUser: page.user,
+            exportedAt: new Date().toISOString(),
+            includeSpamTrash,
+            labels: page.labels ?? [],
+          });
+          lines.push(headerLine);
+          // +1 for the newline appended to each line at download time. Tracking
+          // emitted bytes (here and below) keeps the reported size consistent
+          // with mbox and close to the actual downloaded file.
+          bytes += headerLine.length + 1;
         }
 
         for (const m of page.messages) {
@@ -214,18 +217,17 @@ export default function MailboxExport() {
               skipped++;
             }
           } else {
-            lines.push(
-              JSON.stringify({
-                id: m.id,
-                threadId: m.threadId,
-                internalDate: m.internalDate,
-                labelIds: m.labelIds,
-                sizeEstimate: m.sizeEstimate,
-                raw: m.raw,
-              })
-            );
+            const line = JSON.stringify({
+              id: m.id,
+              threadId: m.threadId,
+              internalDate: m.internalDate,
+              labelIds: m.labelIds,
+              sizeEstimate: m.sizeEstimate,
+              raw: m.raw,
+            });
+            lines.push(line);
             exported++;
-            bytes += m.raw.length;
+            bytes += line.length + 1;
           }
         }
         skipped += page.skipped?.length ?? 0;
@@ -367,10 +369,12 @@ export default function MailboxExport() {
               <Label>Export format</Label>
               <Select
                 value={format}
-                onValueChange={(v) => v && setFormat(v as "ndjson" | "mbox")}
+                onValueChange={(v) => {
+                  if (v === "ndjson" || v === "mbox") setFormat(v);
+                }}
                 disabled={running}
               >
-                <SelectTrigger className="w-full">
+                <SelectTrigger className="w-full" aria-label="Export format">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
