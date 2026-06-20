@@ -9,6 +9,38 @@ const GMAIL_DELEGATION_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.basic",
 ];
 
+// Delegation bodies are tiny (two emails) — cap aggressively so a malicious
+// caller can't stream a huge payload that then gets echoed into audit.log.
+const MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * Read the request body as JSON, rejecting anything over MAX_BODY_BYTES.
+ * Returns null when the body is too large so the caller can return a 413.
+ */
+async function readBody(
+  request: NextRequest
+): Promise<Record<string, unknown> | null> {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) return null;
+  let raw = "";
+  try {
+    raw = await request.text();
+  } catch {}
+  if (raw.length > MAX_BODY_BYTES) return null;
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function tooLarge() {
+  return NextResponse.json(
+    { success: false, error: "Body too large" },
+    { status: 413 }
+  );
+}
+
 export async function GET(request: NextRequest) {
   try {
     const tenant = tenantFromRequest(request);
@@ -22,10 +54,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  let body: Record<string, unknown> = {};
-  try {
-    body = await request.json();
-  } catch {}
+  const body = await readBody(request);
+  if (body === null) return tooLarge();
   let tenant = null;
   try {
     tenant = tenantFromRequest(request, body);
@@ -63,10 +93,8 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  let body: Record<string, unknown> = {};
-  try {
-    body = await request.json();
-  } catch {}
+  const body = await readBody(request);
+  if (body === null) return tooLarge();
   let tenant = null;
   try {
     tenant = tenantFromRequest(request, body);

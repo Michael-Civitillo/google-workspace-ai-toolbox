@@ -12,6 +12,10 @@ const GMAIL_SETTINGS_SCOPES = [
 
 const ALLOWED_ACTIONS = new Set(["keep", "archive", "trash", "markRead"]);
 
+// Forwarding bodies are tiny — cap aggressively so a malicious caller can't
+// stream a huge payload that then gets echoed into audit.log.
+const MAX_BODY_BYTES = 16 * 1024;
+
 const DISPOSITION_MAP: Record<string, string> = {
   keep: "leaveInInbox",
   archive: "archive",
@@ -39,9 +43,26 @@ export async function GET(request: NextRequest) {
  * caller must explicitly opt in with `confirmExternal: "<target email>"`.
  */
 export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
+  let rawBody = "";
+  try {
+    rawBody = await request.text();
+  } catch {}
+  if (rawBody.length > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
   let body: Record<string, unknown> = {};
   try {
-    body = await request.json();
+    body = rawBody ? JSON.parse(rawBody) : {};
   } catch {}
   let tenant = null;
   try {

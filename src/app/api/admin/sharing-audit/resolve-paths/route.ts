@@ -12,10 +12,32 @@ import { requireEmail, ValidationError } from "@/lib/validate";
  * Body: { user, fileIds[] }
  * Returns: { paths: { [fileId]: string } }
  */
+// The body is a user email plus an array of Drive file IDs (resolve caps the
+// batch at 1,000 files; each id is <=256 chars). 1 MB leaves generous headroom
+// while still rejecting an oversized payload up front.
+const MAX_BODY_BYTES = 1 * 1024 * 1024;
+
 export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
+  let raw = "";
+  try {
+    raw = await request.text();
+  } catch {}
+  if (raw.length > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
   let body: Record<string, unknown> = {};
   try {
-    body = await request.json();
+    body = raw ? JSON.parse(raw) : {};
   } catch {}
 
   try {
