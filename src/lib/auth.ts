@@ -50,11 +50,12 @@ function bytesToHex(buf: ArrayBuffer): string {
 
 function hexToBytes(hex: string): Uint8Array | null {
   if (hex.length % 2 !== 0) return null;
+  // Reject anything that isn't pure hex up front: parseInt would silently
+  // accept a half-valid pair (e.g. "1g" -> 0x01) and yield wrong bytes.
+  if (!/^[0-9a-fA-F]*$/.test(hex)) return null;
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    const v = parseInt(hex.substr(i * 2, 2), 16);
-    if (Number.isNaN(v)) return null;
-    out[i] = v;
+    out[i] = parseInt(hex.substr(i * 2, 2), 16);
   }
   return out;
 }
