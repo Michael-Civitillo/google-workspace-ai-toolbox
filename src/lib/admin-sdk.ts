@@ -1,5 +1,5 @@
 import { google, type drive_v3, type admin_directory_v1, type admin_datatransfer_v1 } from "googleapis";
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import type { Tenant } from "./tenant-types";
 import {
   isValidEmail,
@@ -37,6 +37,31 @@ const SCOPES = {
   DRIVE_FULL: "https://www.googleapis.com/auth/drive",
 } as const;
 
+interface ServiceAccountCreds {
+  client_email?: string;
+  private_key?: string;
+}
+
+/**
+ * Cache parsed service-account credentials keyed by file path, invalidated on
+ * mtime change. Every client construction used to re-read and re-parse the key
+ * file synchronously — a blocking disk read on the request path repeated for
+ * each paginated call. A cheap stat keeps key rotation visible without a full
+ * read+parse on every call.
+ */
+const credsCache = new Map<string, { mtimeMs: number; creds: ServiceAccountCreds }>();
+
+function loadCredentials(credFile: string): ServiceAccountCreds {
+  const mtimeMs = statSync(credFile).mtimeMs;
+  const cached = credsCache.get(credFile);
+  if (cached && cached.mtimeMs === mtimeMs) {
+    return cached.creds;
+  }
+  const creds = JSON.parse(readFileSync(credFile, "utf-8")) as ServiceAccountCreds;
+  credsCache.set(credFile, { mtimeMs, creds });
+  return creds;
+}
+
 /**
  * Build a JWT auth client for a tenant.
  *
@@ -60,7 +85,7 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     );
   }
 
-  const creds = JSON.parse(readFileSync(credFile, "utf-8"));
+  const creds = loadCredentials(credFile);
   return new google.auth.JWT({
     email: creds.client_email,
     key: creds.private_key,
