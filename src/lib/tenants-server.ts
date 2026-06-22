@@ -60,7 +60,7 @@ function readStore(): TenantStore {
   }
 }
 
-function writeStoreAtomic(store: TenantStore): void {
+async function writeStoreAtomic(store: TenantStore): Promise<void> {
   // Write to temp file then rename — guarantees we never leave a half-written
   // tenants.json on disk if the process is killed mid-write.
   writeFileSync(STORE_TMP_PATH, JSON.stringify(store, null, 2), {
@@ -83,12 +83,10 @@ function writeStoreAtomic(store: TenantStore): void {
       const transient =
         code === "EPERM" || code === "EBUSY" || code === "EACCES";
       if (!transient || attempt === MAX_ATTEMPTS) break;
-      // Tiny synchronous backoff. We're inside withLock() so this only
-      // blocks one request at a time, never the event loop forever.
-      const until = Date.now() + 25 * attempt;
-      while (Date.now() < until) {
-        // busy-wait — short enough not to matter, can't await inside sync write
-      }
+      // Yield with a real timer instead of spinning — the withLock() mutex
+      // already serialises writers, so awaiting here never interleaves a
+      // concurrent read-modify-write, and it keeps the event loop free.
+      await new Promise((r) => setTimeout(r, 25 * attempt));
     }
   }
   try {
@@ -97,7 +95,7 @@ function writeStoreAtomic(store: TenantStore): void {
   throw lastError;
 }
 
-async function withLock<T>(fn: () => T): Promise<T> {
+async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
   const previous = writeLock;
   let release: () => void = () => {};
   writeLock = new Promise<void>((res) => {
@@ -155,17 +153,17 @@ export function resolveTenant(tenantId: string | null | undefined): Tenant | nul
 }
 
 export async function setActiveTenant(id: string): Promise<void> {
-  await withLock(() => {
+  await withLock(async () => {
     const store = readStore();
     const tenant = store.tenants.find((t) => t.id === id);
     if (!tenant) throw new Error(`Tenant "${id}" not found`);
     store.activeTenantId = id;
-    writeStoreAtomic(store);
+    await writeStoreAtomic(store);
   });
 }
 
 export async function addTenant(tenant: Omit<Tenant, "id">): Promise<Tenant> {
-  return withLock(() => {
+  return withLock(async () => {
     const store = readStore();
     const id =
       Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -174,7 +172,7 @@ export async function addTenant(tenant: Omit<Tenant, "id">): Promise<Tenant> {
     if (store.tenants.length === 1) {
       store.activeTenantId = id;
     }
-    writeStoreAtomic(store);
+    await writeStoreAtomic(store);
     return newTenant;
   });
 }
@@ -183,18 +181,18 @@ export async function updateTenant(
   id: string,
   updates: Partial<Omit<Tenant, "id">>
 ): Promise<Tenant> {
-  return withLock(() => {
+  return withLock(async () => {
     const store = readStore();
     const idx = store.tenants.findIndex((t) => t.id === id);
     if (idx === -1) throw new Error(`Tenant "${id}" not found`);
     store.tenants[idx] = { ...store.tenants[idx], ...updates };
-    writeStoreAtomic(store);
+    await writeStoreAtomic(store);
     return store.tenants[idx];
   });
 }
 
 export async function deleteTenant(id: string): Promise<void> {
-  await withLock(() => {
+  await withLock(async () => {
     const store = readStore();
     const idx = store.tenants.findIndex((t) => t.id === id);
     if (idx === -1) throw new Error(`Tenant "${id}" not found`);
@@ -202,6 +200,6 @@ export async function deleteTenant(id: string): Promise<void> {
     if (store.activeTenantId === id) {
       store.activeTenantId = store.tenants[0]?.id ?? null;
     }
-    writeStoreAtomic(store);
+    await writeStoreAtomic(store);
   });
 }

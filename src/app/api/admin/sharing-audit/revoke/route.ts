@@ -11,6 +11,11 @@ const VALID_CATEGORIES: ReadonlySet<RevokeCategory> = new Set([
   "group",
 ]);
 
+// The body is a user email plus an array of Drive file IDs (revoke caps the
+// batch at 200 files; each id is <=256 chars). 1 MB leaves generous headroom
+// while still rejecting an oversized payload before it reaches audit.log.
+const MAX_BODY_BYTES = 1 * 1024 * 1024;
+
 /**
  * Strip every external permission from each requested file.
  *
@@ -23,9 +28,26 @@ const VALID_CATEGORIES: ReadonlySet<RevokeCategory> = new Set([
  * file's failure never aborts the rest of the batch.
  */
 export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
+  let raw = "";
+  try {
+    raw = await request.text();
+  } catch {}
+  if (raw.length > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
   let body: Record<string, unknown> = {};
   try {
-    body = await request.json();
+    body = raw ? JSON.parse(raw) : {};
   } catch {}
 
   let tenant = null;

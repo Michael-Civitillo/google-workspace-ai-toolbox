@@ -25,10 +25,32 @@ export async function GET(request: NextRequest) {
  * the calendarId — i.e. the caller has typed the calendar they intend to
  * remove access from.
  */
+// Transfer bodies are tiny (a couple of emails + a calendar id) — cap
+// aggressively so a malicious caller can't stream a huge payload that then
+// gets echoed into audit.log.
+const MAX_BODY_BYTES = 16 * 1024;
+
 export async function POST(request: NextRequest) {
+  const lenHeader = request.headers.get("content-length");
+  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
+  let raw = "";
+  try {
+    raw = await request.text();
+  } catch {}
+  if (raw.length > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
   let body: Record<string, unknown> = {};
   try {
-    body = await request.json();
+    body = raw ? JSON.parse(raw) : {};
   } catch {}
   let tenant = null;
   try {
