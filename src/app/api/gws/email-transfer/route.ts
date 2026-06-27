@@ -5,6 +5,7 @@ import { listDomains } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError, emailDomain } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const GMAIL_SETTINGS_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.sharing",
@@ -43,27 +44,13 @@ export async function GET(request: NextRequest) {
  * caller must explicitly opt in with `confirmExternal: "<target email>"`.
  */
 export async function POST(request: NextRequest) {
-  const lenHeader = request.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
       { success: false, error: "Body too large" },
       { status: 413 }
     );
   }
-  let rawBody = "";
-  try {
-    rawBody = await request.text();
-  } catch {}
-  if (rawBody.length > MAX_BODY_BYTES) {
-    return NextResponse.json(
-      { success: false, error: "Body too large" },
-      { status: 413 }
-    );
-  }
-  let body: Record<string, unknown> = {};
-  try {
-    body = rawBody ? JSON.parse(rawBody) : {};
-  } catch {}
   let tenant = null;
   try {
     tenant = tenantFromRequest(request, body);

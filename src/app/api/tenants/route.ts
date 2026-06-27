@@ -11,6 +11,7 @@ import {
   validateCredentialsFilePath,
   ValidationError,
 } from "@/lib/validate";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 // Tenant config bodies are tiny — cap aggressively.
 const MAX_BODY_BYTES = 16 * 1024;
@@ -22,16 +23,11 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const lenHeader = req.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+  const body = await readCappedJson(req, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
   try {
-    const raw = await req.text();
-    if (raw.length > MAX_BODY_BYTES) {
-      return NextResponse.json({ error: "Body too large" }, { status: 413 });
-    }
-    const body = raw ? JSON.parse(raw) : {};
     const { name, color, credentialsFile, adminEmail, geminiApiKey } = body;
 
     if (!name || typeof name !== "string" || !name.trim()) {

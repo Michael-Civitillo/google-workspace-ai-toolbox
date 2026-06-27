@@ -9,6 +9,7 @@ import {
   type ActionId,
 } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const ParsedCommandSchema = z.object({
   action: z.string().describe("The action ID from the available actions list"),
@@ -29,23 +30,10 @@ const MAX_BODY_BYTES = 16 * 1024; // commands are short — cap to keep AI bills
 const MAX_COMMAND_CHARS = 4_000;
 
 export async function POST(request: NextRequest) {
-  // Cheap header reject, then enforce the cap on the bytes actually read —
-  // a chunked request can omit/understate Content-Length.
-  const lenHeader = request.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
-  let raw = "";
-  try {
-    raw = await request.text();
-  } catch {}
-  if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
-  }
-  let body: Record<string, unknown> = {};
-  try {
-    body = raw ? JSON.parse(raw) : {};
-  } catch {}
   try {
     const tenant = tenantFromRequest(request, body);
     const command = body.command;

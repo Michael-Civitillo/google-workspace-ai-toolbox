@@ -15,6 +15,7 @@ import {
   emailDomain,
 } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -45,24 +46,10 @@ const GMAIL_VACATION_SCOPES = [
  * }
  */
 export async function POST(request: NextRequest) {
-  // Cheap header reject, then enforce the cap on the bytes actually read —
-  // a chunked request can omit/understate Content-Length.
-  const lenHeader = request.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
-
-  let raw = "";
-  try {
-    raw = await request.text();
-  } catch {}
-  if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
-  }
-  let body: Record<string, unknown> = {};
-  try {
-    body = raw ? JSON.parse(raw) : {};
-  } catch {}
 
   let tenant = null;
   const step = String(body.step || "");

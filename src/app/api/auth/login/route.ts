@@ -7,6 +7,7 @@ import {
   SESSION_TTL,
 } from "@/lib/auth";
 import { rateLimit, clientKey } from "@/lib/rate-limit";
+import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const MAX_BODY_BYTES = 4 * 1024; // login bodies are tiny — cap aggressively
 
@@ -35,20 +36,8 @@ export async function POST(req: NextRequest) {
   }
 
   // Bound the body size so a malicious caller can't blow up server memory.
-  // Check the header for a cheap early reject, then enforce on the bytes we
-  // actually read — a chunked request can omit or understate Content-Length.
-  const lengthHeader = req.headers.get("content-length");
-  if (lengthHeader && Number(lengthHeader) > MAX_BODY_BYTES) {
-    return NextResponse.json({ error: "Body too large" }, { status: 413 });
-  }
-
-  let raw: string;
-  try {
-    raw = await req.text();
-  } catch {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
-  }
-  if (raw.length > MAX_BODY_BYTES) {
+  const raw = await readCappedBody(req, MAX_BODY_BYTES);
+  if (raw === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
 

@@ -3,6 +3,7 @@ import { tenantFromRequest } from "@/lib/gws";
 import { buildGmailClient } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const GMAIL_DELEGATION_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.sharing",
@@ -12,27 +13,6 @@ const GMAIL_DELEGATION_SCOPES = [
 // Delegation bodies are tiny (two emails) — cap aggressively so a malicious
 // caller can't stream a huge payload that then gets echoed into audit.log.
 const MAX_BODY_BYTES = 16 * 1024;
-
-/**
- * Read the request body as JSON, rejecting anything over MAX_BODY_BYTES.
- * Returns null when the body is too large so the caller can return a 413.
- */
-async function readBody(
-  request: NextRequest
-): Promise<Record<string, unknown> | null> {
-  const lenHeader = request.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) return null;
-  let raw = "";
-  try {
-    raw = await request.text();
-  } catch {}
-  if (raw.length > MAX_BODY_BYTES) return null;
-  try {
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
 
 function tooLarge() {
   return NextResponse.json(
@@ -54,8 +34,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const body = await readBody(request);
-  if (body === null) return tooLarge();
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
   try {
     tenant = tenantFromRequest(request, body);
@@ -93,8 +73,8 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const body = await readBody(request);
-  if (body === null) return tooLarge();
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
   try {
     tenant = tenantFromRequest(request, body);
