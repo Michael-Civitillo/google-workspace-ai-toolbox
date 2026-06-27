@@ -43,22 +43,49 @@ interface ServiceAccountCreds {
 }
 
 /**
- * Cache parsed service-account credentials keyed by file path, invalidated on
- * mtime change. Every client construction used to re-read and re-parse the key
- * file synchronously — a blocking disk read on the request path repeated for
- * each paginated call. A cheap stat keeps key rotation visible without a full
- * read+parse on every call.
+ * Cache parsed service-account credentials keyed by file path. Every client
+ * construction used to re-read and re-parse the key file synchronously — a
+ * blocking disk read on the request path repeated for each paginated call. A
+ * cheap stat avoids the full read+parse on every call.
+ *
+ * Invalidation triggers on any of: mtime change, size change, or the entry
+ * aging past the TTL. mtime alone is too weak — a key rotation that preserves
+ * the timestamp (cp -p, restore-from-backup, mtime-preserving deploy, or a
+ * coarse-resolution filesystem) would otherwise serve a revoked key until the
+ * process restarts. The size check catches the common rotation case at once,
+ * and the TTL bounds worst-case staleness even if mtime and size both happen
+ * to match. The TTL is long enough that a paginated walk still reuses the
+ * cache rather than re-reading per page.
  */
-const credsCache = new Map<string, { mtimeMs: number; creds: ServiceAccountCreds }>();
+const CREDS_CACHE_TTL_MS = 30_000;
+
+interface CredsCacheEntry {
+  mtimeMs: number;
+  size: number;
+  loadedAt: number;
+  creds: ServiceAccountCreds;
+}
+
+const credsCache = new Map<string, CredsCacheEntry>();
 
 function loadCredentials(credFile: string): ServiceAccountCreds {
-  const mtimeMs = statSync(credFile).mtimeMs;
+  const stat = statSync(credFile);
   const cached = credsCache.get(credFile);
-  if (cached && cached.mtimeMs === mtimeMs) {
+  if (
+    cached &&
+    cached.mtimeMs === stat.mtimeMs &&
+    cached.size === stat.size &&
+    Date.now() - cached.loadedAt < CREDS_CACHE_TTL_MS
+  ) {
     return cached.creds;
   }
   const creds = JSON.parse(readFileSync(credFile, "utf-8")) as ServiceAccountCreds;
-  credsCache.set(credFile, { mtimeMs, creds });
+  credsCache.set(credFile, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    loadedAt: Date.now(),
+    creds,
+  });
   return creds;
 }
 
