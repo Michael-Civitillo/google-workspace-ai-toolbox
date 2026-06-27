@@ -7,6 +7,7 @@ import {
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 // Raw messages carry attachments, so the import body is allowed to be large.
 // A single base64url message can be ~72 MB (MAILBOX_MAX_RAW_CHARS), so the cap
@@ -32,28 +33,13 @@ const MAX_BODY_BYTES = 80 * 1024 * 1024;
  * of the audit log — only counts are recorded.
  */
 export async function POST(request: NextRequest) {
-  const lenHeader = request.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
       { success: false, error: "Import batch is too large" },
       { status: 413 }
     );
   }
-
-  let raw = "";
-  try {
-    raw = await request.text();
-  } catch {}
-  if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json(
-      { success: false, error: "Import batch is too large" },
-      { status: 413 }
-    );
-  }
-  let body: Record<string, unknown> = {};
-  try {
-    body = raw ? JSON.parse(raw) : {};
-  } catch {}
 
   const tenant = tenantFromRequest(request, body);
   let user: string | null = null;

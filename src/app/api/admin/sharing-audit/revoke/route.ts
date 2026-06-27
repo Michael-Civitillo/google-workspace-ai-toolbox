@@ -3,6 +3,7 @@ import { revokeExternalPermissions, type RevokeCategory } from "@/lib/admin-sdk"
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const VALID_CATEGORIES: ReadonlySet<RevokeCategory> = new Set([
   "anyone",
@@ -28,27 +29,13 @@ const MAX_BODY_BYTES = 1 * 1024 * 1024;
  * file's failure never aborts the rest of the batch.
  */
 export async function POST(request: NextRequest) {
-  const lenHeader = request.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
       { success: false, error: "Body too large" },
       { status: 413 }
     );
   }
-  let raw = "";
-  try {
-    raw = await request.text();
-  } catch {}
-  if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json(
-      { success: false, error: "Body too large" },
-      { status: 413 }
-    );
-  }
-  let body: Record<string, unknown> = {};
-  try {
-    body = raw ? JSON.parse(raw) : {};
-  } catch {}
 
   let tenant = null;
   try {

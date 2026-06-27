@@ -103,7 +103,12 @@ async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
   });
   try {
     await previous;
-    return fn();
+    // `await` (not a bare `return fn()`) so the lock is held until the async
+    // critical section fully settles. Without it the `finally` below would run
+    // release() the moment fn() returns its pending promise — freeing the lock
+    // mid-write and letting a concurrent writer read stale state and clobber
+    // the shared temp file.
+    return await fn();
   } finally {
     release();
   }
