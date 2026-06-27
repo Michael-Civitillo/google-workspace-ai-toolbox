@@ -160,11 +160,13 @@ export default function MailboxExport() {
     const pinnedTenantId = tenantId;
     const exportFormat = format;
 
-    // NDJSON accumulates one JSON line per message (line 1 is a header with the
-    // source user + labels); mbox accumulates each message's bytes as a
-    // "From "-delimited entry. Only the array for the chosen format is used.
-    const lines: string[] = [];
-    const mboxParts: BlobPart[] = [];
+    // Accumulate the output as Blob parts so the file is never materialised as
+    // one giant string — past V8's ~512 MB string cap that would throw "Invalid
+    // string length" and destroy a large export. NDJSON pushes each JSON line
+    // plus its newline (line 1 is a header with the source user + labels); mbox
+    // pushes each message's "From "-delimited bytes.
+    const parts: BlobPart[] = [];
+    let headerWritten = false;
     let exported = 0;
     let bytes = 0;
     let skipped = 0;
@@ -188,7 +190,7 @@ export default function MailboxExport() {
         exportUser = page.user;
 
         // mbox is a bare message stream — it carries no header or label set.
-        if (exportFormat === "ndjson" && lines.length === 0) {
+        if (exportFormat === "ndjson" && !headerWritten) {
           const headerLine = JSON.stringify({
             type: EXPORT_TYPE,
             version: EXPORT_VERSION,
@@ -197,10 +199,11 @@ export default function MailboxExport() {
             includeSpamTrash,
             labels: page.labels ?? [],
           });
-          lines.push(headerLine);
-          // +1 for the newline appended to each line at download time. Tracking
-          // emitted bytes (here and below) keeps the reported size consistent
-          // with mbox and close to the actual downloaded file.
+          parts.push(headerLine, "\n");
+          headerWritten = true;
+          // +1 for the newline pushed after each line. Tracking emitted bytes
+          // (here and below) keeps the reported size consistent with mbox and
+          // close to the actual downloaded file.
           bytes += headerLine.length + 1;
         }
 
@@ -210,7 +213,7 @@ export default function MailboxExport() {
             // mbox; count it as skipped rather than aborting the export.
             try {
               const entry = mboxEntry(m.raw, m.internalDate);
-              mboxParts.push(entry);
+              parts.push(entry);
               bytes += entry.length;
               exported++;
             } catch {
@@ -225,7 +228,7 @@ export default function MailboxExport() {
               sizeEstimate: m.sizeEstimate,
               raw: m.raw,
             });
-            lines.push(line);
+            parts.push(line, "\n");
             exported++;
             bytes += line.length + 1;
           }
@@ -254,18 +257,10 @@ export default function MailboxExport() {
           if (exportFormat === "mbox") {
             downloadBlob(
               `mailbox-${exportUser}-${date}.mbox`,
-              mboxParts,
+              parts,
               "application/mbox"
             );
           } else {
-            // Build the Blob from the line array directly (each line plus a
-            // newline) rather than lines.join("\n"). A single joined string
-            // would both triple peak memory and, past V8's ~512 MB string cap,
-            // throw "Invalid string length" — destroying a large export. The
-            // Blob constructor concatenates the parts without ever
-            // materialising one giant string.
-            const parts: BlobPart[] = [];
-            for (const line of lines) parts.push(line, "\n");
             downloadBlob(
               `mailbox-${exportUser}-${date}.ndjson`,
               parts,
