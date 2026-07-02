@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -111,6 +111,16 @@ export default function MailboxImport() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const cancelRef = useRef(false);
+  // Stop the insert loop if the user navigates away mid-import — otherwise it
+  // keeps writing messages into the mailbox invisibly after the page is gone.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      cancelRef.current = true;
+    };
+  }, []);
 
   const [progress, setProgress] = useState<{
     inserted: number;
@@ -199,6 +209,7 @@ export default function MailboxImport() {
 
       const flush = async () => {
         if (batch.length === 0) return true;
+        if (!alive.current) return false;
         const res = await tfetch(
           "/api/admin/mailbox-import",
           {
@@ -228,7 +239,7 @@ export default function MailboxImport() {
       for await (const line of readLines(file)) {
         lineNo++;
         if (lineNo === 1) continue; // header line, already parsed
-        if (cancelRef.current) break;
+        if (cancelRef.current || !alive.current) break;
         const trimmed = line.trim();
         if (!trimmed) continue;
 

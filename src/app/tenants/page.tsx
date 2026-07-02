@@ -2,6 +2,10 @@
 
 import { useEffect, useState, useCallback } from "react";
 import {
+  setCurrentTenantState,
+  notifyTenantsChanged,
+} from "@/lib/tenant-client";
+import {
   Card,
   CardContent,
   CardDescription,
@@ -82,13 +86,20 @@ export default function TenantsPage() {
 
   const load = useCallback(() => {
     setLoading(true);
-    fetch("/api/tenants")
+    return fetch("/api/tenants")
       .then((r) => r.json())
       .then((data) => {
-        setState({
-          tenants: data.tenants ?? [],
-          activeTenantId: data.activeTenantId ?? null,
-        });
+        const tenants: Tenant[] = data.tenants ?? [];
+        const activeId: string | null = data.activeTenantId ?? null;
+        setState({ tenants, activeTenantId: activeId });
+        // Keep the module-scoped current tenant (used by tfetch's x-tenant-id
+        // header and confirm dialogs) in sync with the server's active tenant.
+        // After a delete this also adopts the server's newly-promoted active
+        // tenant, so tfetch never keeps sending a now-deleted id.
+        setCurrentTenantState(
+          activeId,
+          activeId ? tenants.find((t) => t.id === activeId) ?? null : null
+        );
       })
       .catch(() => setError("Failed to load tenants"))
       .finally(() => setLoading(false));
@@ -132,6 +143,9 @@ export default function TenantsPage() {
       setAdding(false);
       setForm(defaultForm());
       load();
+      notifyTenantsChanged();
+    } catch {
+      setError("Network error — tenant not saved");
     } finally {
       setSaving(false);
     }
@@ -161,6 +175,9 @@ export default function TenantsPage() {
       if (!res.ok) return setError(data.error ?? "Failed to update tenant");
       setEditingId(null);
       load();
+      notifyTenantsChanged();
+    } catch {
+      setError("Network error — changes not saved");
     } finally {
       setSaving(false);
     }
@@ -172,11 +189,17 @@ export default function TenantsPage() {
       const res = await fetch(`/api/tenants/${id}`, { method: "DELETE" });
       if (res.ok) {
         setDeleteTarget(null);
+        // load() refetches and adopts the server's newly-promoted active tenant
+        // into the module state, so if we just deleted the pinned tenant, tfetch
+        // stops sending its (now-rejected) id.
         load();
+        notifyTenantsChanged();
       } else {
         const data = await res.json();
         setError(data.error ?? "Failed to delete tenant");
       }
+    } catch {
+      setError("Network error — tenant not deleted");
     } finally {
       setSaving(false);
     }
@@ -188,7 +211,19 @@ export default function TenantsPage() {
       const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
       if (res.ok) {
         setState((prev) => ({ ...prev, activeTenantId: id }));
+        // Sync the module-scoped current tenant so subsequent operations (and
+        // the tfetch x-tenant-id header) target the tenant just activated — not
+        // the previously-selected one — without waiting for a reload.
+        setCurrentTenantState(
+          id,
+          state.tenants.find((t) => t.id === id) ?? null
+        );
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? "Failed to switch tenant");
       }
+    } catch {
+      setError("Network error — could not switch tenant");
     } finally {
       setSwitching(null);
     }

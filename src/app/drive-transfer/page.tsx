@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -77,6 +77,11 @@ interface ProgressTotals {
   done: boolean;
 }
 
+// Server hard-caps the initial folder selection (TRANSFER_FOLDER_SELECTION_CAP).
+// Mirror it client-side so a too-large selection is caught before the confirm
+// dialog instead of aborting the first chunk after it.
+const FOLDER_SELECTION_CAP = 100;
+
 export default function DriveTransfer() {
   const { tenant, id: tenantId } = useCurrentTenant();
 
@@ -94,6 +99,21 @@ export default function DriveTransfer() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const cancelRef = useRef(false);
+  // Bumped on every tree reset (new root load or a change of "from" user).
+  // Async folder loads capture the value at dispatch and discard their results
+  // if it changed meanwhile, so a slow load for the previous user can't
+  // repopulate the tree after the user switched.
+  const loadSeq = useRef(0);
+  // Stop the chunked transfer loop and skip post-unmount state updates when the
+  // user navigates away.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      cancelRef.current = true;
+    };
+  }, []);
   const [progress, setProgress] = useState<ProgressTotals | null>(null);
   const [completion, setCompletion] = useState<
     | { tone: "success" | "error"; message: string }
@@ -101,6 +121,8 @@ export default function DriveTransfer() {
   >(null);
 
   function resetTree() {
+    // Invalidate any in-flight folder loads so their results are discarded.
+    loadSeq.current++;
     setNodes({});
     setRootIds(null);
     setRootNextToken(null);
@@ -114,6 +136,9 @@ export default function DriveTransfer() {
     setError(null);
     setRootLoading(true);
     resetTree();
+    // resetTree() just bumped the sequence; capture it and bail if it changes
+    // (a new load / user switch) before our results come back.
+    const seq = loadSeq.current;
     try {
       const res = await tfetch(
         `/api/admin/drive-transfer/folders?user=${encodeURIComponent(fromUser)}`,
@@ -121,6 +146,7 @@ export default function DriveTransfer() {
         tenantId
       );
       const data = await res.json();
+      if (seq !== loadSeq.current) return;
       if (!data.success) {
         setError(data.error || "Failed to load Drive folders");
         return;
@@ -141,6 +167,7 @@ export default function DriveTransfer() {
         };
         ids.push(f.id);
       }
+      if (seq !== loadSeq.current) return;
       setNodes(newNodes);
       setRootIds(ids);
       setRootNextToken(payload.nextPageToken);
@@ -201,6 +228,10 @@ export default function DriveTransfer() {
   }
 
   async function loadChildren(folderId: string, pageToken?: string) {
+    // Pin the tree generation this load belongs to; if the tree is reset (new
+    // root load / user switch) before results arrive, discard them so we don't
+    // graft the old user's subfolders onto the new tree.
+    const seq = loadSeq.current;
     setNodes((prev) => ({
       ...prev,
       [folderId]: { ...prev[folderId], loadingChildren: true },
@@ -212,6 +243,7 @@ export default function DriveTransfer() {
         (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
       const res = await tfetch(url, {}, tenantId);
       const data = await res.json();
+      if (seq !== loadSeq.current) return;
       if (!data.success) {
         setError(data.error || "Failed to load subfolders");
         setNodes((prev) => ({
@@ -251,6 +283,7 @@ export default function DriveTransfer() {
         return next;
       });
     } catch {
+      if (seq !== loadSeq.current) return;
       setError("Failed to connect to the API");
       setNodes((prev) => ({
         ...prev,
@@ -286,11 +319,13 @@ export default function DriveTransfer() {
       .filter(Boolean) as string[];
   }, [selected, nodes]);
 
+  const overSelectionCap = selected.size > FOLDER_SELECTION_CAP;
   const canConfirm =
     !!fromUser.trim() &&
     !!toUser.trim() &&
     fromUser.trim().toLowerCase() !== toUser.trim().toLowerCase() &&
     selected.size > 0 &&
+    !overSelectionCap &&
     !busy;
 
   async function runTransfer() {
@@ -592,6 +627,18 @@ export default function DriveTransfer() {
                   them automatically rather than removing access.
                 </AlertDescription>
               </Alert>
+
+              {overSelectionCap && (
+                <Alert className="mt-4 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
+                  <AlertTriangle className="h-4 w-4 text-red-600" />
+                  <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+                    You&apos;ve selected {selected.size} folders — the maximum
+                    per run is {FOLDER_SELECTION_CAP}. Unselect{" "}
+                    {selected.size - FOLDER_SELECTION_CAP} before transferring
+                    (each selected folder includes everything inside it).
+                  </AlertDescription>
+                </Alert>
+              )}
 
               <div className="mt-4 flex items-center gap-3 flex-wrap">
                 <Button

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -232,6 +232,9 @@ function csvCell(c: string): string {
   return v.replace(/"/g, '""');
 }
 
+/** Server caps resolve-paths at 1,000 ids per request; chunk to match. */
+const PATH_RESOLVE_CHUNK = 1000;
+
 /**
  * Ask the server to walk Drive's parent chain for every flagged file
  * across these audit results, one user at a time (since impersonation is
@@ -250,22 +253,29 @@ async function fetchPathsForResults(
       continue;
     }
     try {
-      const res = await tfetch(
-        "/api/admin/sharing-audit/resolve-paths",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            user: r.user,
-            fileIds: r.files.map((f) => f.id),
-          }),
-        },
-        tenantId
-      );
-      const data = await res.json();
-      out[r.user] = data?.success
-        ? (data.data?.paths as Record<string, string>) ?? {}
-        : {};
+      // resolve-paths caps a batch at 1,000 file ids; a single user can exceed
+      // that after chained audit pages. Chunk and merge so users with the most
+      // flagged files still get their paths (previously the whole request 400'd
+      // and their CSV path column came back empty).
+      const ids = r.files.map((f) => f.id);
+      const merged: Record<string, string> = {};
+      for (let i = 0; i < ids.length; i += PATH_RESOLVE_CHUNK) {
+        const chunk = ids.slice(i, i + PATH_RESOLVE_CHUNK);
+        const res = await tfetch(
+          "/api/admin/sharing-audit/resolve-paths",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ user: r.user, fileIds: chunk }),
+          },
+          tenantId
+        );
+        const data = await res.json();
+        if (data?.success) {
+          Object.assign(merged, (data.data?.paths as Record<string, string>) ?? {});
+        }
+      }
+      out[r.user] = merged;
     } catch {
       out[r.user] = {};
     }
@@ -315,6 +325,17 @@ export default function SharingAudit() {
   );
   const cancelRef = useRef(false);
   const singleCancelRef = useRef(false);
+  // Stop in-flight scans and skip post-unmount state updates when the user
+  // navigates away — otherwise the loops keep hitting the API invisibly.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      cancelRef.current = true;
+      singleCancelRef.current = true;
+    };
+  }, []);
   const [includeSuspended, setIncludeSuspended] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
@@ -337,6 +358,10 @@ export default function SharingAudit() {
     [categoryFilter]
   );
   const noCategoriesSelected = activeCategories.size === 0;
+  // Latest category filter, read by the memoized FileRow's revoke handler so a
+  // filter change is honored even when the row itself isn't re-rendered.
+  const categoryFilterRef = useRef(categoryFilter);
+  categoryFilterRef.current = categoryFilter;
 
   // Export-CSV state. Resolution can take many seconds for large audits so
   // we surface a "Resolving paths…" indicator on the export button.
@@ -389,6 +414,12 @@ export default function SharingAudit() {
     setSingleResult(null);
     setSingleSelected(new Set());
     setRevokeNotice(null);
+    // Clear any prior tenant-wide scan state. The single-user results card only
+    // renders when perUser is empty, so without this a single-user audit run
+    // after a tenant-wide scan would appear to do nothing.
+    setPerUser([]);
+    setTenantSelected({});
+    setTenantUserCount(null);
     singleCancelRef.current = false;
     // Pin the tenant for the whole scan so a switch mid-walk can't redirect
     // later pages to a different tenant.
@@ -1327,7 +1358,9 @@ export default function SharingAudit() {
                                     user: p.user,
                                     files: [f],
                                     scope: { kind: "tenant", userIndex: idx },
-                                    categories: categoriesFromFilter(categoryFilter),
+                                    categories: categoriesFromFilter(
+                                      categoryFilterRef.current
+                                    ),
                                   })
                                 }
                                 revokeDisabled={revokeBusy || noCategoriesSelected}
@@ -1493,7 +1526,9 @@ export default function SharingAudit() {
                             user: singleResult.user,
                             files: [f],
                             scope: { kind: "single" },
-                            categories: categoriesFromFilter(categoryFilter),
+                            categories: categoriesFromFilter(
+                              categoryFilterRef.current
+                            ),
                           })
                         }
                         revokeDisabled={revokeBusy || noCategoriesSelected}
@@ -1545,7 +1580,20 @@ export default function SharingAudit() {
   );
 }
 
-function FileRow({
+const FileRow = memo(_FileRow, (prev, next) =>
+  // Skip re-render unless something the row actually displays changed. The
+  // onToggle/onRevoke closures are recreated every parent render but are safe to
+  // keep stale: they only call setState-style handlers with values that are
+  // stable per row (file id, user index), and the one changeable input — the
+  // category filter used by revoke — is read live from a ref, not captured here.
+  // This stops a single checkbox toggle from re-rendering every row across a
+  // multi-thousand-file tenant-wide scan.
+  prev.file === next.file &&
+  prev.selected === next.selected &&
+  prev.revokeDisabled === next.revokeDisabled
+);
+
+function _FileRow({
   file,
   selected,
   onToggle,

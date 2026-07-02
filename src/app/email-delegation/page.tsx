@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -29,6 +29,10 @@ export default function EmailDelegation() {
   const [user, setUser] = useState("");
   const [delegate, setDelegate] = useState("");
   const [delegates, setDelegates] = useState<Delegate[]>([]);
+  // The mailbox owner the currently-displayed list was actually fetched for.
+  // Remove actions target THIS, not the live input, so editing the owner field
+  // after searching can't send a delete to the wrong mailbox.
+  const [listedOwner, setListedOwner] = useState("");
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -52,8 +56,10 @@ export default function EmailDelegation() {
 
       if (result.success && result.data?.delegates) {
         setDelegates(result.data.delegates);
+        setListedOwner(user.trim());
       } else if (result.success) {
         setDelegates([]);
+        setListedOwner(user.trim());
         setMessage({ type: "success", text: "No delegates found for this user." });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to list delegates" });
@@ -64,6 +70,13 @@ export default function EmailDelegation() {
       setLoading(false);
     }
   };
+
+  // Clear a stale list when the tenant changes — a list fetched for tenant A
+  // must never drive removals against tenant B.
+  useEffect(() => {
+    setDelegates([]);
+    setListedOwner("");
+  }, [tenantId]);
 
   const addDelegate = async () => {
     if (!user || !delegate) return;
@@ -101,6 +114,7 @@ export default function EmailDelegation() {
   };
 
   const removeDelegate = async (delegateEmail: string) => {
+    if (!listedOwner) return;
     setRemoving(delegateEmail);
     setMessage(null);
 
@@ -110,7 +124,8 @@ export default function EmailDelegation() {
         {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user, delegate: delegateEmail }),
+          // Target the owner the list was fetched for, not the live input.
+          body: JSON.stringify({ user: listedOwner, delegate: delegateEmail }),
         },
         tenantId
       );
@@ -119,7 +134,7 @@ export default function EmailDelegation() {
       if (result.success) {
         setMessage({
           type: "success",
-          text: `Successfully removed ${delegateEmail} as a delegate`,
+          text: `Successfully removed ${delegateEmail} as a delegate from ${listedOwner}`,
         });
         setConfirmRemoveTarget(null);
         await listDelegates();
@@ -315,13 +330,13 @@ export default function EmailDelegation() {
         open={!!confirmRemoveTarget}
         onOpenChange={(o) => !removing && !o && setConfirmRemoveTarget(null)}
         title="Remove mailbox delegate"
-        summary={`${confirmRemoveTarget ?? ""} will lose access to ${user}'s mailbox.`}
+        summary={`${confirmRemoveTarget ?? ""} will lose access to ${listedOwner}'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="medium"
         confirmLabel="Remove delegate"
         busy={!!removing}
         changes={[
-          { label: "Mailbox owner", after: user },
+          { label: "Mailbox owner", after: listedOwner },
           {
             label: "Delegate to remove",
             before: confirmRemoveTarget ?? "",

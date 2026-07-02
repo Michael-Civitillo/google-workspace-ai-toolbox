@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { notifyTenantsChanged } from "@/lib/tenant-client";
 import Link from "next/link";
 import {
   Card,
@@ -222,8 +223,13 @@ export default function OnboardingPage() {
           () => null
         );
         setCreatedTenantId(newId);
+        // Tell the persistent sidebar switcher to refetch so it shows the new
+        // tenant instead of the "Add a tenant" placeholder until a full reload.
+        notifyTenantsChanged();
       }
       await refreshStatus();
+    } catch {
+      setTenantError("Network error — tenant not saved");
     } finally {
       setSavingTenant(false);
     }

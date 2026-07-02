@@ -15,7 +15,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
       <main className="flex-1 min-h-screen">
         <div className="fixed top-4 right-4 z-40">
-          <ThemeToggle variant="icon" />
+          <ThemeToggle />
         </div>
         {children}
       </main>
@@ -24,7 +24,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <main className="flex-1 ml-64 bg-muted/30 min-h-screen">
       <div className="fixed top-4 right-4 z-40">
-        <ThemeToggle variant="icon" />
+        <ThemeToggle />
       </div>
       <div className="p-8">
         <div className="mx-auto w-full max-w-6xl">{children}</div>

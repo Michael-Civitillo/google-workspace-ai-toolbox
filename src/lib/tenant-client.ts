@@ -16,28 +16,51 @@ import type { Tenant } from "./tenant-types";
 let _currentTenantId: string | null = null;
 let _currentTenant: Tenant | null = null;
 const listeners = new Set<(id: string | null) => void>();
+const tenantsChangedListeners = new Set<() => void>();
 
-export function setCurrentTenantId(id: string | null) {
+function notify() {
+  for (const fn of listeners) fn(_currentTenantId);
+}
+
+/**
+ * Set the current tenant id and full object together, then notify subscribers.
+ *
+ * Setting BOTH before notifying is deliberate: `useCurrentTenant`'s subscriber
+ * reads `_currentTenant` at notify time, so updating the id first and the object
+ * second (two separate setters) made the hook briefly return the NEW id paired
+ * with the OLD/`null` tenant — which surfaced the wrong "Running against …"
+ * tenant in confirmation dialogs. Always go through this setter.
+ */
+export function setCurrentTenantState(
+  id: string | null,
+  tenant: Tenant | null
+) {
   _currentTenantId = id;
-  for (const fn of listeners) fn(id);
-}
-
-export function setCurrentTenant(t: Tenant | null) {
-  _currentTenant = t;
-}
-
-export function getCurrentTenantId(): string | null {
-  return _currentTenantId;
-}
-
-export function getCurrentTenant(): Tenant | null {
-  return _currentTenant;
+  _currentTenant = tenant;
+  notify();
 }
 
 export function subscribeTenantId(fn: (id: string | null) => void): () => void {
   listeners.add(fn);
   return () => {
     listeners.delete(fn);
+  };
+}
+
+/**
+ * Broadcast that the set of tenants (not just the active one) changed — added,
+ * deleted, or renamed. The sidebar switcher lives in the persistent layout and
+ * never remounts on client navigation, so it subscribes to this to re-fetch its
+ * list instead of showing stale names until a full reload.
+ */
+export function notifyTenantsChanged() {
+  for (const fn of tenantsChangedListeners) fn();
+}
+
+export function subscribeTenantsChanged(fn: () => void): () => void {
+  tenantsChangedListeners.add(fn);
+  return () => {
+    tenantsChangedListeners.delete(fn);
   };
 }
 
@@ -83,4 +106,3 @@ export function useCurrentTenant(): { id: string | null; tenant: Tenant | null }
 
   return { id, tenant };
 }
-
