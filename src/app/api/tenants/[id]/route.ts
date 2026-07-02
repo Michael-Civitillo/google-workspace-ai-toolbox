@@ -23,7 +23,17 @@ export async function PUT(
     const { id } = await params;
     const { name, color, credentialsFile, adminEmail, geminiApiKey } = body;
 
-    if (color && !TENANT_COLORS.includes(color as TenantColor)) {
+    // Validate on "present" (!== undefined), not on truthiness — otherwise a
+    // null/""/false slips past the check yet is still written below, corrupting
+    // the stored tenant (e.g. TENANT_COLOR_CLASSES[null] is undefined and the
+    // UI crashes rendering it).
+    if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+      return NextResponse.json(
+        { error: "name must be a non-empty string" },
+        { status: 400 }
+      );
+    }
+    if (color !== undefined && !TENANT_COLORS.includes(color as TenantColor)) {
       return NextResponse.json({ error: "invalid color" }, { status: 400 });
     }
     if (adminEmail !== undefined && !isValidEmail(adminEmail)) {

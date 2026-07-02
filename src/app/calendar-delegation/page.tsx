@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -55,6 +55,10 @@ export default function CalendarDelegation() {
   const [delegateEmail, setDelegateEmail] = useState("");
   const [role, setRole] = useState("reader");
   const [aclRules, setAclRules] = useState<AclRule[]>([]);
+  // The calendar the displayed rules were actually fetched for. Remove actions
+  // target THIS, not the live input, so editing the field after searching can't
+  // send a delete against a different calendar.
+  const [listedCalendar, setListedCalendar] = useState("");
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -78,8 +82,10 @@ export default function CalendarDelegation() {
 
       if (result.success && result.data?.items) {
         setAclRules(result.data.items);
+        setListedCalendar(calendarId.trim());
       } else if (result.success) {
         setAclRules([]);
+        setListedCalendar(calendarId.trim());
         setMessage({ type: "success", text: "No ACL rules found." });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to list ACL rules" });
@@ -90,6 +96,13 @@ export default function CalendarDelegation() {
       setLoading(false);
     }
   };
+
+  // Clear a stale rules list when the tenant changes — rules fetched for tenant
+  // A must never drive removals against tenant B.
+  useEffect(() => {
+    setAclRules([]);
+    setListedCalendar("");
+  }, [tenantId]);
 
   const addAcl = async () => {
     if (!calendarId || !delegateEmail || !role) return;
@@ -127,6 +140,7 @@ export default function CalendarDelegation() {
   };
 
   const removeAcl = async (ruleId: string) => {
+    if (!listedCalendar) return;
     setRemoving(ruleId);
     setMessage(null);
 
@@ -136,7 +150,8 @@ export default function CalendarDelegation() {
         {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ calendarId, ruleId }),
+          // Target the calendar the list was fetched for, not the live input.
+          body: JSON.stringify({ calendarId: listedCalendar, ruleId }),
         },
         tenantId
       );
@@ -365,14 +380,14 @@ export default function CalendarDelegation() {
         open={!!confirmRemove}
         onOpenChange={(o) => !removing && !o && setConfirmRemove(null)}
         title="Remove calendar access"
-        summary={`Revoke ${confirmRemove?.scope?.value ?? ""}'s ${confirmRemove?.role ?? ""} access to ${calendarId}.`}
+        summary={`Revoke ${confirmRemove?.scope?.value ?? ""}'s ${confirmRemove?.role ?? ""} access to ${listedCalendar}.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity={confirmRemove?.role === "owner" ? "high" : "medium"}
         confirmPhrase={confirmRemove?.role === "owner" ? confirmRemove?.scope?.value : undefined}
         confirmLabel="Remove access"
         busy={!!removing}
         changes={[
-          { label: "Calendar", after: calendarId },
+          { label: "Calendar", after: listedCalendar },
           {
             label: "Removing",
             before: `${confirmRemove?.scope?.value ?? ""} (${confirmRemove?.role ?? ""})`,

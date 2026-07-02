@@ -41,10 +41,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const tenant = tenantFromRequest(request, body);
+  let tenant = null;
   let user: string | null = null;
   let batchSize = 0;
   try {
+    // Resolve inside the try so a stale/deleted tenantId surfaces as this
+    // route's JSON error (and its error-path audit) rather than an unhandled
+    // non-JSON 500.
+    tenant = tenantFromRequest(request, body);
     user = requireEmail(body.user, "user");
 
     if (!Array.isArray(body.messages)) {

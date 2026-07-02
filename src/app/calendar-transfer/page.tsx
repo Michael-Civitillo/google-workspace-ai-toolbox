@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -29,12 +29,40 @@ export default function CalendarTransfer() {
   const [removeSourceAccess, setRemoveSourceAccess] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Tenant's verified domains, for detecting an external target. null = not yet
+  // loaded / lookup failed → treat targets as external (fail-safe), matching the
+  // server's fail-closed guard so we always send the required confirmExternal.
+  const [verifiedDomains, setVerifiedDomains] = useState<string[] | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error" | "warning";
     text: string;
   } | null>(null);
 
+  useEffect(() => {
+    setVerifiedDomains(null);
+    tfetch("/api/admin/domains")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.success && Array.isArray(d.data)) {
+          setVerifiedDomains(
+            d.data
+              .filter((x: { verified?: boolean }) => x.verified)
+              .map((x: { domainName: string }) => x.domainName.toLowerCase())
+          );
+        }
+      })
+      .catch(() => {});
+  }, [tenantId]);
+
   const effectiveCalendarId = calendarId || sourceUser;
+  const targetDomain = targetUser.includes("@")
+    ? targetUser.slice(targetUser.indexOf("@") + 1).toLowerCase()
+    : "";
+  // External if we know the verified set and the domain isn't in it, OR if we
+  // couldn't load the set at all (fail-safe — the server enforces this too).
+  const targetIsExternal =
+    !!targetUser &&
+    (verifiedDomains === null || !verifiedDomains.includes(targetDomain));
 
   const transferCalendar = async () => {
     if (!sourceUser || !targetUser) return;
@@ -58,6 +86,9 @@ export default function CalendarTransfer() {
             removeConfirmation: removeSourceAccess
               ? effectiveCalendarId
               : undefined,
+            // Granting ownership to a target outside the tenant's verified
+            // domains requires explicit confirmation server-side.
+            confirmExternal: targetIsExternal ? targetUser : undefined,
           }),
         },
         tenantId
@@ -257,13 +288,25 @@ export default function CalendarTransfer() {
               : `Grant ${targetUser} owner access. ${sourceUser} keeps existing access.`
           }
           tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
-          severity={removeSourceAccess ? "high" : "medium"}
-          confirmPhrase={removeSourceAccess ? effectiveCalendarId : undefined}
+          severity={removeSourceAccess || targetIsExternal ? "high" : "medium"}
+          confirmPhrase={
+            targetIsExternal
+              ? targetUser
+              : removeSourceAccess
+                ? effectiveCalendarId
+                : undefined
+          }
           confirmLabel={removeSourceAccess ? "Transfer and revoke" : "Grant ownership"}
           busy={loading}
           changes={changes}
           warnings={
-            removeSourceAccess ? (
+            targetIsExternal ? (
+              <>
+                <strong>{targetUser}</strong> is outside this tenant&apos;s
+                verified domains — you are granting calendar ownership to an
+                external account. Type the target address to confirm.
+              </>
+            ) : removeSourceAccess ? (
               <>
                 <strong>Removing source access</strong> on a secondary calendar
                 cannot be self-recovered if the calendar has no other owners.

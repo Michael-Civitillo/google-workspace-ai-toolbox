@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildGmailClient, isAlreadyExistsError } from "@/lib/admin-sdk";
-import { listDomains } from "@/lib/admin-sdk";
-import { requireEmail, ValidationError, emailDomain } from "@/lib/validate";
+import {
+  buildGmailClient,
+  isAlreadyExistsError,
+  isExternalTarget,
+} from "@/lib/admin-sdk";
+import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
@@ -23,18 +26,6 @@ const DISPOSITION_MAP: Record<string, string> = {
   trash: "trash",
   markRead: "markRead",
 };
-
-export async function GET(request: NextRequest) {
-  try {
-    const tenant = tenantFromRequest(request);
-    const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
-    const gmail = buildGmailClient(tenant, user, GMAIL_SETTINGS_SCOPES);
-    const res = await gmail.users.labels.list({ userId: "me" });
-    return NextResponse.json({ success: true, data: res.data });
-  } catch (e) {
-    return errorResponse(e);
-  }
-}
 
 /**
  * Set up email forwarding from source to target user.
@@ -66,22 +57,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // External-domain check.
-    let isExternal = false;
-    try {
-      const domains = await listDomains(tenant);
-      const tenantDomains = new Set(
-        domains.filter((d) => d.verified).map((d) => d.domainName)
-      );
-      isExternal = !tenantDomains.has(emailDomain(targetUser));
-    } catch (e) {
-      // Fail closed: treat as external when we can't enumerate domains.
-      isExternal = true;
-      console.warn(
-        "email-transfer: could not list domains, treating target as external:",
-        e
-      );
-    }
+    // External-domain check (shared, fail-closed helper).
+    const isExternal = await isExternalTarget(tenant, targetUser);
 
     if (isExternal) {
       const confirm =
@@ -120,11 +97,17 @@ export async function POST(request: NextRequest) {
           outcome: "error",
           error: msg,
         });
-        return NextResponse.json({
-          success: false,
-          error: `Failed to create forwarding address: ${msg}`,
-          step: "create_forwarding",
-        });
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Failed to create forwarding address: ${msg}`,
+            step: "create_forwarding",
+          },
+          // 502: the failure is upstream (Google), not a bad client request. Use
+          // a real error status so monitors keying on res.ok don't read it as
+          // success — the body still carries success:false and the step.
+          { status: 502 }
+        );
       }
     }
 
@@ -154,11 +137,16 @@ export async function POST(request: NextRequest) {
       error: autoForwardError,
     });
 
-    return NextResponse.json({
-      success: !autoForwardError,
-      data: { forwardingAddress: forwardData, autoForwarding: autoForwardData, isExternal },
-      error: autoForwardError,
-    });
+    return NextResponse.json(
+      {
+        success: !autoForwardError,
+        data: { forwardingAddress: forwardData, autoForwarding: autoForwardData, isExternal },
+        error: autoForwardError,
+      },
+      // The forwarding address was created; enabling auto-forwarding is what
+      // failed upstream. Signal that with 502 so the status matches the body.
+      { status: autoForwardError ? 502 : 200 }
+    );
   } catch (e) {
     audit({
       action: "email_transfer",

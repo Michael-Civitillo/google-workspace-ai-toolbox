@@ -42,6 +42,11 @@ export default function EmailTransfer() {
   const [targetUser, setTargetUser] = useState("");
   const [action, setAction] = useState("keep");
   const [verifiedDomains, setVerifiedDomains] = useState<string[]>([]);
+  // Whether the verified-domain set actually loaded. If it didn't, we can't
+  // tell internal from external, so we must treat the target as external
+  // (fail-safe) — the server fails closed the same way and would otherwise
+  // reject with a confirmExternal instruction the UI never surfaced.
+  const [domainsKnown, setDomainsKnown] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{
@@ -51,6 +56,7 @@ export default function EmailTransfer() {
 
   useEffect(() => {
     let cancelled = false;
+    setDomainsKnown(false);
     tfetch("/api/admin/domains", {}, tenantId)
       .then((r) => r.json())
       .then((data) => {
@@ -63,11 +69,15 @@ export default function EmailTransfer() {
               )
               .map((d: { domainName: string }) => d.domainName.toLowerCase())
           );
+          setDomainsKnown(true);
         } else {
           setVerifiedDomains([]);
+          setDomainsKnown(false);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setDomainsKnown(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -76,10 +86,12 @@ export default function EmailTransfer() {
   const targetDomain = targetUser.includes("@")
     ? targetUser.split("@")[1].toLowerCase()
     : "";
+  // Treat the target as external if it's outside the verified set OR if we
+  // couldn't load the set (fail-safe): either way we send confirmExternal and
+  // escalate the dialog, so a real external transfer is never silently blocked.
   const isExternal =
     !!targetDomain &&
-    verifiedDomains.length > 0 &&
-    !verifiedDomains.includes(targetDomain);
+    (!domainsKnown || !verifiedDomains.includes(targetDomain));
 
   const transferEmail = async () => {
     if (!sourceUser || !targetUser) return;

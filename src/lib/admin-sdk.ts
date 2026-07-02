@@ -22,6 +22,15 @@ export function buildCalendarClient(tenant: Tenant | null, impersonateEmail: str
 
 const ADMIN_API_TIMEOUT_MS = 30_000;
 
+// Set a default per-request timeout on EVERY googleapis call. gaxios ships with
+// no default, so a stalled TLS connection to Google (mid-handshake blackhole,
+// dropped keepalive) would otherwise hang a handler forever — the failure mode
+// that lets an offboarding step spin indefinitely. Calls that need longer
+// (mailbox raw fetches) pass an explicit per-call `timeout`, which overrides
+// this floor. This covers the Gmail/Calendar settings + ACL calls that route
+// handlers make directly, which previously had no timeout at all.
+google.options({ timeout: ADMIN_API_TIMEOUT_MS });
+
 const SCOPES = {
   USER: "https://www.googleapis.com/auth/admin.directory.user",
   USER_SECURITY:
@@ -100,6 +109,17 @@ function loadCredentials(credFile: string): ServiceAccountCreds {
  * The service account in your tenant must be authorised in the Admin Console
  * for every scope listed in `scopes`.
  */
+/**
+ * Cache built JWT clients. google-auth-library caches the fetched access token
+ * per JWT instance, so reusing the instance avoids a fresh signed-JWT grant
+ * against Google's OAuth endpoint on every call/page (~100-250ms each). Keyed by
+ * credential file + impersonated subject + scope set, and — crucially — by the
+ * file's mtime/size so a key rotation produces a new instance rather than
+ * serving a stale (possibly revoked) token for the life of the process.
+ */
+const JWT_CACHE_MAX = 100;
+const jwtCache = new Map<string, InstanceType<typeof google.auth.JWT>>();
+
 function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
   const credFile =
     tenant?.credentialsFile ||
@@ -112,13 +132,28 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     );
   }
 
+  const stat = statSync(credFile);
+  const cacheKey = `${credFile}|${subject.toLowerCase()}|${[...scopes]
+    .sort()
+    .join(",")}|${stat.mtimeMs}|${stat.size}`;
+  const cached = jwtCache.get(cacheKey);
+  if (cached) return cached;
+
   const creds = loadCredentials(credFile);
-  return new google.auth.JWT({
+  const jwt = new google.auth.JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes,
     subject,
   });
+  // Bound the cache. A rotation or new subject/scope set adds keys; evict the
+  // oldest insertion when we exceed the cap so it can't grow without limit.
+  if (jwtCache.size >= JWT_CACHE_MAX) {
+    const oldest = jwtCache.keys().next().value;
+    if (oldest !== undefined) jwtCache.delete(oldest);
+  }
+  jwtCache.set(cacheKey, jwt);
+  return jwt;
 }
 
 function impersonatedAdminFor(tenant: Tenant | null, override?: string): string {
@@ -239,9 +274,13 @@ export async function getUser(
     throw new Error("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
-  const res = await client.users.get(
-    { userKey: userEmail, projection: "full" },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  const res = await withGoogleRetry(
+    () =>
+      client.users.get(
+        { userKey: userEmail, projection: "full" },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 
   const user = res.data;
@@ -273,9 +312,13 @@ export async function userExists(
   }
   const { client } = getAdminClient(tenant);
   try {
-    await client.users.get(
-      { userKey: email, projection: "basic", fields: "primaryEmail" },
-      { timeout: ADMIN_API_TIMEOUT_MS }
+    await withGoogleRetry(
+      () =>
+        client.users.get(
+          { userKey: email, projection: "basic", fields: "primaryEmail" },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
     );
     return true;
   } catch (e: unknown) {
@@ -289,9 +332,13 @@ export async function listDomains(
   tenant: Tenant | null
 ): Promise<DomainInfo[]> {
   const { client } = getAdminClient(tenant);
-  const res = await client.domains.list(
-    { customer: "my_customer" },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  const res = await withGoogleRetry(
+    () =>
+      client.domains.list(
+        { customer: "my_customer" },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 
   return (res.data.domains || []).map((d) => ({
@@ -299,6 +346,31 @@ export async function listDomains(
     isPrimary: d.isPrimary || false,
     verified: d.verified || false,
   }));
+}
+
+/**
+ * Whether `email`'s domain is NOT one of the tenant's verified domains — i.e.
+ * granting access/forwarding to it sends data outside the org. Fails CLOSED
+ * (treats the target as external) when domains can't be enumerated, so a
+ * transient error can't silently downgrade an external target to "internal" and
+ * skip the confirmation gate. Shared by every flow that hands data to a target
+ * user (email forwarding, calendar ownership, offboarding successor) so the
+ * external-target rule can't drift between them.
+ */
+export async function isExternalTarget(
+  tenant: Tenant | null,
+  email: string
+): Promise<boolean> {
+  try {
+    const verified = new Set(
+      (await listDomains(tenant))
+        .filter((d) => d.verified)
+        .map((d) => d.domainName)
+    );
+    return !verified.has(emailDomain(email));
+  } catch {
+    return true;
+  }
 }
 
 export interface ListedUser {
@@ -323,18 +395,22 @@ export async function listUsers(
   opts: { pageToken?: string; pageSize?: number } = {}
 ): Promise<{ users: ListedUser[]; nextPageToken: string | null }> {
   const { client } = getAdminClient(tenant);
-  const res = await client.users.list(
-    {
-      customer: "my_customer",
-      maxResults: Math.min(500, Math.max(1, opts.pageSize ?? 500)),
-      pageToken: opts.pageToken,
-      orderBy: "email",
-      projection: "basic",
-      // Trim payload — we only care about who exists and basic status.
-      fields:
-        "nextPageToken, users(primaryEmail, name/fullName, isAdmin, suspended, orgUnitPath)",
-    },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  const res = await withGoogleRetry(
+    () =>
+      client.users.list(
+        {
+          customer: "my_customer",
+          maxResults: Math.min(500, Math.max(1, opts.pageSize ?? 500)),
+          pageToken: opts.pageToken,
+          orderBy: "email",
+          projection: "basic",
+          // Trim payload — we only care about who exists and basic status.
+          fields:
+            "nextPageToken, users(primaryEmail, name/fullName, isAdmin, suspended, orgUnitPath)",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 
   const users: ListedUser[] = (res.data.users || []).map((u) => ({
@@ -398,9 +474,22 @@ export async function changePrimaryDomain(
     throw new Error(`Domain "${newDomain}" is not verified — refusing to change primary email to an unverified domain`);
   }
 
-  const exists = await userExists(tenant, currentEmail);
-  if (!exists) {
-    throw new Error(`No user found with email "${currentEmail}"`);
+  // `userKey` resolves aliases to the same account, so the string compare above
+  // can miss an alias of the admin. Resolve the canonical record: it doubles as
+  // the existence check and lets us re-check the real primary email.
+  let targetInfo: UserInfo;
+  try {
+    targetInfo = await getUser(tenant, currentEmail);
+  } catch (e) {
+    if (isNotFoundError(e)) {
+      throw new Error(`No user found with email "${currentEmail}"`);
+    }
+    throw e;
+  }
+  if (targetInfo.primaryEmail.toLowerCase() === impersonatedAdmin) {
+    throw new Error(
+      "Refusing to change the primary email of the admin account this tool is impersonating — that would break subsequent admin operations. Use the Google Admin Console for this change."
+    );
   }
 
   const conflict = await userExists(tenant, newEmail);
@@ -452,12 +541,25 @@ export async function suspendUser(
       "Refusing to suspend the admin this tool is impersonating — would lock the toolbox out."
     );
   }
-  await client.users.update(
-    {
-      userKey: userEmail,
-      requestBody: { suspended: true },
-    },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  // `userKey` accepts aliases and resolves them to the same account, so resolve
+  // the canonical primary email before suspending: an alias of the admin would
+  // otherwise slip past the string compare above and lock the toolbox out.
+  const target = await getUser(tenant, userEmail);
+  if (target.primaryEmail.toLowerCase() === impersonatedAdmin) {
+    throw new Error(
+      "Refusing to suspend the admin this tool is impersonating — would lock the toolbox out."
+    );
+  }
+  await withGoogleRetry(
+    () =>
+      client.users.update(
+        {
+          userKey: userEmail,
+          requestBody: { suspended: true },
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 }
 
@@ -473,9 +575,13 @@ export async function signOutAllSessions(
     throw new Error("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
-  await client.users.signOut(
-    { userKey: userEmail },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  await withGoogleRetry(
+    () =>
+      client.users.signOut(
+        { userKey: userEmail },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 }
 
@@ -492,9 +598,13 @@ export async function listOAuthTokens(
     throw new Error("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
-  const res = await client.tokens.list(
-    { userKey: userEmail },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  const res = await withGoogleRetry(
+    () =>
+      client.tokens.list(
+        { userKey: userEmail },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
   return (res.data.items || []).map((t) => ({
     clientId: t.clientId || "",
@@ -507,24 +617,38 @@ export async function listOAuthTokens(
 export async function revokeAllOAuthTokens(
   tenant: Tenant | null,
   userEmail: string
-): Promise<{ revoked: number; failed: number }> {
+): Promise<{
+  revoked: number;
+  failed: number;
+  errors: Array<{ clientId: string; message: string }>;
+}> {
   const tokens = await listOAuthTokens(tenant, userEmail);
-  if (tokens.length === 0) return { revoked: 0, failed: 0 };
+  if (tokens.length === 0) return { revoked: 0, failed: 0, errors: [] };
   const { client } = getAdminClient(tenant);
   let revoked = 0;
   let failed = 0;
+  const errors: Array<{ clientId: string; message: string }> = [];
   for (const t of tokens) {
     try {
-      await client.tokens.delete(
-        { userKey: userEmail, clientId: t.clientId },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+      await withGoogleRetry(
+        () =>
+          client.tokens.delete(
+            { userKey: userEmail, clientId: t.clientId },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
       );
       revoked++;
-    } catch {
+    } catch (e) {
       failed++;
+      // Keep the reason: "3 tokens failed to revoke" is undiagnosable without it.
+      errors.push({
+        clientId: t.clientId,
+        message: e instanceof Error ? e.message : String(e),
+      });
     }
   }
-  return { revoked, failed };
+  return { revoked, failed, errors };
 }
 
 /**
@@ -713,29 +837,33 @@ export async function listExternallySharedFiles(
 
   while (scanned < SHARING_AUDIT_FILE_CAP) {
     const remaining = SHARING_AUDIT_FILE_CAP - scanned;
-    const res: { data: drive_v3.Schema$FileList } = await drive.files.list(
-      {
-        // Files the user can see — focus on shared items only to keep the
-        // audit cheap. `q="visibility != 'limited'"` would miss link-shared
-        // items, so we use the broader filter and check permissions client-side.
-        //
-        // NOTE: the inline `permissions` field is capped by Drive at ~100
-        // entries per file with no pagination here, so a file shared with more
-        // than ~100 principals can under-report external permissions in the
-        // audit. The revoke path (revokeForOneFile) re-lists permissions with
-        // full pagination, so remediation is unaffected — only the audit
-        // preview count can be short for pathologically over-shared files.
-        q: "trashed = false and 'me' in owners",
-        fields:
-          "nextPageToken, files(id, name, mimeType, webViewLink, ownedByMe, permissions(type, role, emailAddress, domain, allowFileDiscovery))",
-        pageSize: Math.min(100, remaining),
-        pageToken,
-        // Includes shared drive support so company-shared content isn't missed.
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        corpora: "user",
-      },
-      { timeout: ADMIN_API_TIMEOUT_MS }
+    const res: { data: drive_v3.Schema$FileList } = await withGoogleRetry(
+      () =>
+        drive.files.list(
+          {
+            // Files the user can see — focus on shared items only to keep the
+            // audit cheap. `q="visibility != 'limited'"` would miss link-shared
+            // items, so we use the broader filter and check permissions client-side.
+            //
+            // NOTE: the inline `permissions` field is capped by Drive at ~100
+            // entries per file with no pagination here, so a file shared with more
+            // than ~100 principals can under-report external permissions in the
+            // audit. The revoke path (revokeForOneFile) re-lists permissions with
+            // full pagination, so remediation is unaffected — only the audit
+            // preview count can be short for pathologically over-shared files.
+            q: "trashed = false and 'me' in owners",
+            fields:
+              "nextPageToken, files(id, name, mimeType, webViewLink, ownedByMe, permissions(type, role, emailAddress, domain, allowFileDiscovery))",
+            pageSize: Math.min(100, remaining),
+            pageToken,
+            // Includes shared drive support so company-shared content isn't missed.
+            supportsAllDrives: true,
+            includeItemsFromAllDrives: true,
+            corpora: "user",
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
     );
 
     const files = res.data.files || [];
@@ -840,13 +968,17 @@ export async function resolveFilePaths(
     if (cached !== undefined) return cached;
     const p = (async (): Promise<FolderNode | null> => {
       try {
-        const meta = await drive.files.get(
-          {
-            fileId: id,
-            fields: "id, name, parents, driveId",
-            supportsAllDrives: true,
-          },
-          { timeout: ADMIN_API_TIMEOUT_MS }
+        const meta = await withGoogleRetry(
+          () =>
+            drive.files.get(
+              {
+                fileId: id,
+                fields: "id, name, parents, driveId",
+                supportsAllDrives: true,
+              },
+              { timeout: ADMIN_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
         );
         return {
           name: meta.data.name || "(untitled)",
@@ -866,9 +998,9 @@ export async function resolveFilePaths(
     if (cached !== undefined) return cached;
     const p = (async (): Promise<string> => {
       try {
-        const d = await drive.drives.get(
-          { driveId },
-          { timeout: ADMIN_API_TIMEOUT_MS }
+        const d = await withGoogleRetry(
+          () => drive.drives.get({ driveId }, { timeout: ADMIN_API_TIMEOUT_MS }),
+          { retryServerErrors: true }
         );
         return `Shared Drive: ${d.data.name || driveId}`;
       } catch {
@@ -1087,6 +1219,11 @@ export interface RevokeOptions {
 
 /** Per-batch cap — protects the request handler from a runaway client. */
 const REVOKE_FILE_CAP = 200;
+// Revoke files with bounded concurrency. Each file needs files.get +
+// permissions.list + N deletes; 8 in flight keeps a 200-file batch well within
+// Drive's ~12k queries/min per-user budget while the retry layer absorbs the
+// occasional 429.
+const REVOKE_CONCURRENCY = 8;
 
 /**
  * Strip every external permission from each requested file owned (or
@@ -1132,33 +1269,70 @@ export async function revokeExternalPermissions(
       .filter((d) => d.verified)
       .map((d) => d.domainName.toLowerCase())
   );
+  // Fail closed. classifyPermission treats any collaborator outside
+  // verifiedDomains as "external", so an empty set (domain re-verification
+  // regression, an omitted `verified` field, or a failed domains fetch) would
+  // reclassify EVERY internal collaborator as external and delete them. The
+  // ownership-transfer path guards the same way — this destructive path must
+  // too, rather than fail open.
+  if (verifiedDomains.size === 0) {
+    throw new Error(
+      "No verified domains resolved for this tenant — refusing to revoke sharing, as every collaborator would be misclassified as external. Check the tenant's domain configuration and try again."
+    );
+  }
+  if (!verifiedDomains.has(emailDomain(userEmail))) {
+    throw new Error(
+      `Owner's domain (${emailDomain(
+        userEmail
+      )}) is not a verified domain of this tenant — refusing to revoke sharing to avoid misclassifying internal collaborators.`
+    );
+  }
 
   const drive = getDriveClientWritable(tenant, userEmail);
-  // Built lazily inside the loop only if we actually need it — keeps the
-  // common all-clean batch from doing an extra JWT exchange against
-  // Google's auth servers.
+  // Built lazily only if we actually need it — keeps the common all-clean batch
+  // from doing an extra JWT exchange against Google's auth servers. Shared
+  // across workers; the lazy init races benignly (both would build an
+  // equivalent client), so no lock is needed.
   let adminDrive: drive_v3.Drive | null = null;
   const getAdminDrive = () => {
     if (!adminDrive) adminDrive = getDriveClientAsAdmin(tenant);
     return adminDrive;
   };
 
-  const results: RevokeFileOutcome[] = [];
-  for (const rawFileId of fileIds) {
-    const fileId = String(rawFileId || "").trim();
-    if (!fileId) continue;
-    results.push(
-      await revokeForOneFile(
+  // Process files with bounded concurrency. Each file's permission ops are
+  // independent and idempotent (notFound deletes count as success), so a worker
+  // pool is safe and cuts a 200-file batch from minutes to tens of seconds,
+  // keeping the response inside typical reverse-proxy timeouts. Results are
+  // written by original index so per-file outcomes stay in request order.
+  const trimmed = fileIds.map((f) => String(f || "").trim());
+  const results: RevokeFileOutcome[] = new Array(trimmed.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < trimmed.length) {
+      const idx = cursor++;
+      const fileId = trimmed[idx];
+      if (!fileId) continue;
+      results[idx] = await revokeForOneFile(
         drive,
         getAdminDrive,
         fileId,
         verifiedDomains,
         allowedCategories
-      )
-    );
-  }
+      );
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(REVOKE_CONCURRENCY, trimmed.length || 1) },
+      worker
+    )
+  );
 
-  return { user: userEmail.toLowerCase(), results };
+  return {
+    user: userEmail.toLowerCase(),
+    // Drop holes left by blank ids (skipped above) so the shape is unchanged.
+    results: results.filter((r): r is RevokeFileOutcome => r !== undefined),
+  };
 }
 
 async function revokeForOneFile(
@@ -1178,27 +1352,35 @@ async function revokeForOneFile(
   const perms: drive_v3.Schema$Permission[] = [];
   let fileName: string | undefined;
   try {
-    const meta = await drive.files.get(
-      {
-        fileId,
-        fields: "id, name",
-        supportsAllDrives: true,
-      },
-      { timeout: ADMIN_API_TIMEOUT_MS }
+    const meta = await withGoogleRetry(
+      () =>
+        drive.files.get(
+          {
+            fileId,
+            fields: "id, name",
+            supportsAllDrives: true,
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
     );
     fileName = meta.data.name ?? undefined;
     let pageToken: string | undefined;
     do {
-      const r = await drive.permissions.list(
-        {
-          fileId,
-          fields:
-            "nextPageToken, permissions(id, type, role, emailAddress, domain, allowFileDiscovery)",
-          pageSize: 100,
-          pageToken,
-          supportsAllDrives: true,
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+      const r = await withGoogleRetry(
+        () =>
+          drive.permissions.list(
+            {
+              fileId,
+              fields:
+                "nextPageToken, permissions(id, type, role, emailAddress, domain, allowFileDiscovery)",
+              pageSize: 100,
+              pageToken,
+              supportsAllDrives: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
       );
       perms.push(...(r.data.permissions || []));
       pageToken = r.data.nextPageToken ?? undefined;
@@ -1241,15 +1423,22 @@ async function revokeForOneFile(
       });
       continue;
     }
+    // Capture in a local so the narrowing survives inside the retry closures
+    // below (TS drops property narrowing across a function boundary).
+    const permissionId = p.id;
 
     try {
-      await drive.permissions.delete(
-        {
-          fileId,
-          permissionId: p.id,
-          supportsAllDrives: true,
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+      await withGoogleRetry(
+        () =>
+          drive.permissions.delete(
+            {
+              fileId,
+              permissionId,
+              supportsAllDrives: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
       );
       outcome.removed++;
     } catch (e) {
@@ -1261,14 +1450,18 @@ async function revokeForOneFile(
         // Retry as a domain admin with useDomainAdminAccess. This is the
         // only path Drive permits for inherited Shared Drive permissions.
         try {
-          await getAdminDrive().permissions.delete(
-            {
-              fileId,
-              permissionId: p.id,
-              supportsAllDrives: true,
-              useDomainAdminAccess: true,
-            },
-            { timeout: ADMIN_API_TIMEOUT_MS }
+          await withGoogleRetry(
+            () =>
+              getAdminDrive().permissions.delete(
+                {
+                  fileId,
+                  permissionId,
+                  supportsAllDrives: true,
+                  useDomainAdminAccess: true,
+                },
+                { timeout: ADMIN_API_TIMEOUT_MS }
+              ),
+            { retryServerErrors: true }
           );
           outcome.removed++;
           outcome.removedAsAdmin = (outcome.removedAsAdmin ?? 0) + 1;
@@ -1435,6 +1628,11 @@ export interface DriveTransferProgress {
 
 /** Per-request work budget. Bounded so each call stays well under request timeouts. */
 const TRANSFER_BATCH_BUDGET = 500;
+// Transfer a page's children with bounded concurrency. Each item costs
+// permissions.list + an update/create; 6 in flight keeps a 500-item chunk to
+// tens of seconds (inside typical proxy timeouts) while staying well under
+// Drive's per-user quota, with the retry layer absorbing the occasional 429.
+const TRANSFER_CHILD_CONCURRENCY = 6;
 
 /** Hard cap on initial folder selections to keep cursors small. */
 const TRANSFER_FOLDER_SELECTION_CAP = 100;
@@ -1491,6 +1689,11 @@ function sanitizeCursor(cursor: unknown): DriveTransferCursor {
   for (const q of c.queue) {
     if (typeof q !== "string") throw new Error("cursor.queue entries must be strings");
     assertDriveFolderId(q);
+    // buildInitialTransferCursor refuses "root"; the continuation path must too,
+    // or a crafted cursor could walk and transfer the entire My Drive.
+    if (q === "root") {
+      throw new Error("cursor may not reference My Drive root");
+    }
     queue.push(q);
   }
   let current: DriveTransferCursor["current"] = null;
@@ -1504,6 +1707,9 @@ function sanitizeCursor(cursor: unknown): DriveTransferCursor {
       throw new Error("cursor.current.folderId must be a string");
     }
     assertDriveFolderId(cur.folderId);
+    if (cur.folderId === "root") {
+      throw new Error("cursor may not reference My Drive root");
+    }
     let pageToken: string | null = null;
     if (cur.pageToken !== null && cur.pageToken !== undefined) {
       if (typeof cur.pageToken !== "string" || cur.pageToken.length > 4096) {
@@ -1610,20 +1816,30 @@ export async function transferDriveFoldersOwnership(
 
     const folderId = local.current.folderId;
     const escapedParent = folderId.replace(/'/g, "\\'");
-    const q = `'${escapedParent}' in parents and trashed = false and 'me' in owners`;
+    // List EVERY child, not just those owned by the source. A subfolder owned
+    // by someone else can still contain files the departing user owns; if we
+    // pruned it here we'd never descend into it and would silently leave those
+    // files behind (they'd be deleted with the account). transferOneItem
+    // classifies each item — owned items transfer, others are counted under
+    // notOwned — so the counters stay honest and match the documented contract.
+    const q = `'${escapedParent}' in parents and trashed = false`;
     const pageSize = Math.min(100, Math.max(1, budget));
 
     let listRes;
     try {
-      listRes = await drive.files.list(
-        {
-          q,
-          fields: "nextPageToken, files(id, name, mimeType)",
-          pageSize,
-          pageToken: local.current.pageToken ?? undefined,
-          corpora: "user",
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+      listRes = await withGoogleRetry(
+        () =>
+          drive.files.list(
+            {
+              q,
+              fields: "nextPageToken, files(id, name, mimeType)",
+              pageSize,
+              pageToken: local.current!.pageToken ?? undefined,
+              corpora: "user",
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
       );
     } catch (e) {
       // Record the listing failure against the folder itself and move on so
@@ -1639,32 +1855,52 @@ export async function transferDriveFoldersOwnership(
       continue;
     }
 
-    for (const child of listRes.data.files || []) {
-      const childId = child.id;
-      if (!childId) continue;
-      const result = await transferOneItem(drive, childId, toUserLower);
-      applyTransferResult(out, childId, child.name ?? null, result);
-      if (child.mimeType === DRIVE_FOLDER_MIME) {
-        if (local.queue.length >= TRANSFER_QUEUE_HARD_CAP) {
-          out.errors.push({
-            id: childId,
-            name: child.name ?? null,
-            message:
-              "Skipped: cursor queue hard cap reached — re-run after this chunk completes",
-          });
-        } else {
-          local.queue.push(childId);
+    // Transfer this page's children with bounded concurrency. Each item is
+    // independent and transferOneItem is idempotent, so ordering doesn't affect
+    // the counters or the queue. pageSize <= budget, so processing the whole
+    // page never overruns the chunk budget. JS is single-threaded, so the
+    // synchronous counter/queue mutations below can't interleave mid-statement.
+    const children = listRes.data.files || [];
+    // Subfolders discovered this page, collected during the parallel pass and
+    // enqueued serially afterwards so the queue hard-cap check can't race.
+    const discoveredFolders: Array<{ id: string; name: string | null }> = [];
+    let childCursor = 0;
+    const childWorker = async () => {
+      while (childCursor < children.length) {
+        const child = children[childCursor++];
+        const childId = child.id;
+        if (!childId) continue;
+        const result = await transferOneItem(drive, childId, toUserLower);
+        applyTransferResult(out, childId, child.name ?? null, result);
+        if (child.mimeType === DRIVE_FOLDER_MIME) {
+          discoveredFolders.push({ id: childId, name: child.name ?? null });
         }
       }
-      budget--;
-      if (budget === 0) break;
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(TRANSFER_CHILD_CONCURRENCY, children.length || 1) },
+        childWorker
+      )
+    );
+    for (const f of discoveredFolders) {
+      if (local.queue.length >= TRANSFER_QUEUE_HARD_CAP) {
+        out.errors.push({
+          id: f.id,
+          name: f.name,
+          message:
+            "Skipped: cursor queue hard cap reached — re-run after this chunk completes",
+        });
+      } else {
+        local.queue.push(f.id);
+      }
     }
+    budget -= children.length;
 
-    if (listRes.data.nextPageToken && budget > 0) {
+    // Save resume state; the `while (budget > 0)` guard breaks the loop when the
+    // chunk budget is spent, and nextCursor below carries `local` to the client.
+    if (listRes.data.nextPageToken) {
       local.current.pageToken = listRes.data.nextPageToken;
-    } else if (listRes.data.nextPageToken && budget === 0) {
-      local.current.pageToken = listRes.data.nextPageToken;
-      break;
     } else {
       local.current = null;
     }
@@ -1703,18 +1939,32 @@ async function transferOneItem(
   fileId: string,
   toUserLower: string
 ): Promise<TransferOneOutcome> {
-  let perms: drive_v3.Schema$Permission[];
+  const perms: drive_v3.Schema$Permission[] = [];
   try {
-    const res = await drive.permissions.list(
-      {
-        fileId,
-        fields: "permissions(id, type, role, emailAddress)",
-        pageSize: 100,
-        supportsAllDrives: true,
-      },
-      { timeout: ADMIN_API_TIMEOUT_MS }
-    );
-    perms = res.data.permissions || [];
+    // Paginate: a file with >100 permissions could hide the target user's
+    // existing grant on a later page, which would make us take the create path
+    // for an already-owned file and misreport it. Include nextPageToken in the
+    // field mask (a single-page fetch can't paginate without it).
+    let pageToken: string | undefined;
+    do {
+      const res = await withGoogleRetry(
+        () =>
+          drive.permissions.list(
+            {
+              fileId,
+              fields:
+                "nextPageToken, permissions(id, type, role, emailAddress)",
+              pageSize: 100,
+              pageToken,
+              supportsAllDrives: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
+      );
+      perms.push(...(res.data.permissions || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
   } catch (e) {
     if (isNotFoundError(e)) {
       return { kind: "notOwned", reason: "File no longer accessible" };
@@ -1736,32 +1986,45 @@ async function transferOneItem(
 
   try {
     if (targetPerm?.id) {
-      await drive.permissions.update(
-        {
-          fileId,
-          permissionId: targetPerm.id,
-          requestBody: { role: "owner" },
-          transferOwnership: true,
-          supportsAllDrives: true,
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+      // Promoting an existing grant to owner is idempotent, so a 5xx retry is
+      // safe here.
+      await withGoogleRetry(
+        () =>
+          drive.permissions.update(
+            {
+              fileId,
+              permissionId: targetPerm.id!,
+              requestBody: { role: "owner" },
+              transferOwnership: true,
+              supportsAllDrives: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
       );
     } else {
-      await drive.permissions.create(
-        {
-          fileId,
-          requestBody: {
-            type: "user",
-            role: "owner",
-            emailAddress: toUserLower,
-          },
-          transferOwnership: true,
-          // Drive ignores sendNotificationEmail=false for ownership transfers
-          // and always sends a notification; leaving the field off avoids API
-          // warnings while documenting the behaviour for future readers.
-          supportsAllDrives: true,
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+      // Only retry rate-limit rejections for create: a 5xx might have committed
+      // the ownership grant, and a blind retry could surface a confusing
+      // "already owner" error, so leave server-error retries off.
+      await withGoogleRetry(
+        () =>
+          drive.permissions.create(
+            {
+              fileId,
+              requestBody: {
+                type: "user",
+                role: "owner",
+                emailAddress: toUserLower,
+              },
+              transferOwnership: true,
+              // Drive ignores sendNotificationEmail=false for ownership transfers
+              // and always sends a notification; leaving the field off avoids API
+              // warnings while documenting the behaviour for future readers.
+              supportsAllDrives: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: false }
       );
     }
     return { kind: "transferred" };
@@ -1828,9 +2091,23 @@ const MAILBOX_EXPORT_MAX_PAGE = 50;
 // retry layer absorbing the occasional 429. Bounded so a page of large
 // messages can't open an unreasonable number of simultaneous downloads.
 const MAILBOX_EXPORT_FETCH_CONCURRENCY = 12;
+// Cumulative raw-byte budget per returned page. A single Gmail message can be
+// ~67 MB base64url, so a page capped only by message count (up to 50) could
+// hold multiple GB and throw `RangeError: Invalid string length` when
+// NextResponse.json stringifies it (V8 caps strings near 1 GB) — leaving that
+// pageToken permanently unfinishable. Once a page's fetched bytes reach this
+// budget we stop and return the remaining ids as `pendingIds` for the next
+// call. With ~12-way concurrency the worst-case page is budget + (concurrency-1)
+// x max-message, comfortably under the string cap. Always fetch at least one id
+// so a lone oversized message still makes progress.
+const MAILBOX_EXPORT_PAGE_BYTE_BUDGET = 48 * 1024 * 1024;
 
 /** Hard cap on messages accepted in a single import batch. */
 export const MAILBOX_IMPORT_BATCH_CAP = 25;
+// Insert messages with bounded concurrency. Gmail's insert quota (~10/user/sec)
+// comfortably allows a few in flight; 3 keeps throughput up without tripping
+// sustained rate limits.
+const MAILBOX_IMPORT_INSERT_CONCURRENCY = 3;
 // Gmail accepts messages up to ~50 MB of decoded RFC 822 bytes. `format=raw`
 // returns those bytes base64url-encoded, which inflates them by ~4/3 — so a
 // max-size message is ~67 MB of characters. The cap is set above that (with
@@ -1909,8 +2186,16 @@ export interface MailboxExportPage {
    */
   skipped: Array<{ id: string; error: string }>;
   /**
-   * The mailbox's labels. Returned only on the first page (no `pageToken`),
-   * so the client can write them once into the export header.
+   * Message ids from the CURRENT list page that weren't fetched because the
+   * page's cumulative byte budget was reached. Non-null means "call again with
+   * these `pendingIds` (and the same `nextPageToken`) before advancing to the
+   * next list page." Null/empty when the whole list page was fetched.
+   */
+  pendingIds: string[] | null;
+  /**
+   * The mailbox's labels. Returned only on the very first call (no `pageToken`
+   * and no `pendingIds`), so the client can write them once into the export
+   * header.
    */
   labels?: GmailLabelInfo[];
 }
@@ -1934,15 +2219,18 @@ function httpStatusOf(e: unknown): number | null {
 }
 
 /**
- * Decide whether a failed Gmail call is worth retrying.
+ * Decide whether a failed Google API call (Gmail, Drive, or Admin SDK) is worth
+ * retrying.
  *
  * 429 (rate limit) is always safe — the request was rejected before any work.
- * Gmail also signals per-user rate limits as 403 with a rate/quota message, so
- * we sniff those. 5xx backend blips and bare network errors are retriable only
- * for idempotent reads (`retryServerErrors`), never for inserts, where a 5xx
- * might have committed the message and a blind retry would duplicate it.
+ * Google also signals per-user rate limits as 403 with a rate/quota message
+ * (Drive's `userRateLimitExceeded`, Gmail's `rateLimitExceeded`), so we sniff
+ * those. 5xx backend blips and bare network errors are retriable only for
+ * idempotent operations (`retryServerErrors`), never for non-idempotent writes
+ * like message inserts, where a 5xx might have committed and a blind retry would
+ * duplicate.
  */
-function isRetriableGmailError(
+function isRetriableGoogleError(
   e: unknown,
   opts: { retryServerErrors: boolean }
 ): boolean {
@@ -1974,8 +2262,8 @@ function isRetriableGmailError(
   return false;
 }
 
-/** Retry a Gmail call with exponential backoff + jitter on transient errors. */
-async function withGmailRetry<T>(
+/** Retry a Google API call with exponential backoff + jitter on transient errors. */
+async function withGoogleRetry<T>(
   fn: () => Promise<T>,
   opts: { retries?: number; retryServerErrors: boolean }
 ): Promise<T> {
@@ -1986,7 +2274,7 @@ async function withGmailRetry<T>(
       return await fn();
     } catch (e) {
       attempt++;
-      if (attempt > retries || !isRetriableGmailError(e, opts)) throw e;
+      if (attempt > retries || !isRetriableGoogleError(e, opts)) throw e;
       const backoff = Math.min(8000, 300 * 2 ** (attempt - 1));
       const jitter = Math.floor(Math.random() * 300);
       await new Promise((r) => setTimeout(r, backoff + jitter));
@@ -2003,7 +2291,7 @@ export async function listGmailLabels(
     throw new Error("userEmail must be a valid email address");
   }
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
-  const res = await withGmailRetry(
+  const res = await withGoogleRetry(
     () =>
       gmail.users.labels.list(
         { userId: "me" },
@@ -2022,9 +2310,12 @@ export async function listGmailLabels(
  * Export one page of a user's mailbox.
  *
  * Lists up to `pageSize` message IDs (default 25, capped at 50), then fetches
- * each as its raw MIME blob with bounded concurrency. The first page (called
- * without a `pageToken`) also carries the label set so the client can record
- * it once in the export header. Read-only.
+ * each as its raw MIME blob with bounded concurrency, stopping once the page's
+ * cumulative byte budget is reached and returning any unfetched ids as
+ * `pendingIds`. The client re-calls with those `pendingIds` (carrying the same
+ * `nextPageToken`) before advancing to the next list page. The very first call
+ * (no `pageToken` and no `pendingIds`) also carries the label set so the client
+ * can record it once in the export header. Read-only.
  */
 export async function exportMailboxPage(
   tenant: Tenant | null,
@@ -2033,6 +2324,8 @@ export async function exportMailboxPage(
     pageToken?: string;
     pageSize?: number;
     includeSpamTrash?: boolean;
+    /** Unfetched ids from a prior page whose byte budget was reached. */
+    pendingIds?: string[];
   } = {}
 ): Promise<MailboxExportPage> {
   if (!isValidEmail(userEmail)) {
@@ -2045,35 +2338,56 @@ export async function exportMailboxPage(
 
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
 
-  const listRes = await withGmailRetry(
-    () =>
-      gmail.users.messages.list(
-        {
-          userId: "me",
-          maxResults: pageSize,
-          pageToken: opts.pageToken,
-          includeSpamTrash: opts.includeSpamTrash ?? false,
-        },
-        { timeout: MAILBOX_API_TIMEOUT_MS }
-      ),
-    { retryServerErrors: true }
-  );
-
-  const ids = (listRes.data.messages || [])
-    .map((m) => m.id)
-    .filter((id): id is string => !!id);
+  // Two continuation modes:
+  //  - pendingIds present → keep draining the current list page's ids; carry
+  //    its nextPageToken (opts.pageToken) through unchanged.
+  //  - otherwise → list the next page of ids as usual.
+  let ids: string[];
+  let listNextPageToken: string | null;
+  let resultSizeEstimate: number | null;
+  const continuing = !!(opts.pendingIds && opts.pendingIds.length > 0);
+  if (continuing) {
+    ids = opts.pendingIds!;
+    listNextPageToken = opts.pageToken ?? null;
+    resultSizeEstimate = null;
+  } else {
+    const listRes = await withGoogleRetry(
+      () =>
+        gmail.users.messages.list(
+          {
+            userId: "me",
+            maxResults: pageSize,
+            pageToken: opts.pageToken,
+            includeSpamTrash: opts.includeSpamTrash ?? false,
+          },
+          { timeout: MAILBOX_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    ids = (listRes.data.messages || [])
+      .map((m) => m.id)
+      .filter((id): id is string => !!id);
+    listNextPageToken = listRes.data.nextPageToken || null;
+    resultSizeEstimate = listRes.data.resultSizeEstimate ?? null;
+  }
 
   // Preserve list order in the output so the export reads in the same order
   // Gmail returned it (newest first), even though fetches complete out of order.
   const messages: (ExportedMessage | undefined)[] = new Array(ids.length);
   const skipped: Array<{ id: string; error: string }> = [];
+  // Cumulative raw bytes fetched this page. Once it reaches the budget we stop
+  // claiming new ids; workers claim sequentially, so the fetched set is always a
+  // prefix [0, cursor) and the tail is returned as pendingIds. The `?? 0` and
+  // `budgetReached` flag guarantee at least one message is fetched.
+  let accumulatedBytes = 0;
+  let budgetReached = false;
   let cursor = 0;
   const worker = async () => {
-    while (cursor < ids.length) {
+    while (cursor < ids.length && !budgetReached) {
       const idx = cursor++;
       const id = ids[idx];
       try {
-        const r = await withGmailRetry(
+        const r = await withGoogleRetry(
           () =>
             gmail.users.messages.get(
               { userId: "me", id, format: "raw" },
@@ -2096,6 +2410,12 @@ export async function exportMailboxPage(
           sizeEstimate: r.data.sizeEstimate ?? 0,
           raw: r.data.raw,
         };
+        accumulatedBytes += r.data.raw.length;
+        if (accumulatedBytes >= MAILBOX_EXPORT_PAGE_BYTE_BUDGET) {
+          // Stop starting new fetches; in-flight ones finish and fill their
+          // (contiguous, lower) indices before the pool drains.
+          budgetReached = true;
+        }
       } catch (e) {
         // Don't let one unfetchable message abort the whole mailbox export —
         // record it and move on.
@@ -2110,14 +2430,21 @@ export async function exportMailboxPage(
     )
   );
 
+  // Ids never claimed (cursor points past the last claimed index) roll over to
+  // the next call. Claims are sequential, so this tail is exactly the unfetched
+  // remainder of the current list page.
+  const pendingIds = cursor < ids.length ? ids.slice(cursor) : null;
+
   const page: MailboxExportPage = {
     user: userEmail.toLowerCase(),
     messages: messages.filter((m): m is ExportedMessage => !!m),
     skipped,
-    nextPageToken: listRes.data.nextPageToken || null,
-    resultSizeEstimate: listRes.data.resultSizeEstimate ?? null,
+    nextPageToken: listNextPageToken,
+    resultSizeEstimate,
+    pendingIds,
   };
-  if (!opts.pageToken) {
+  // Labels belong on the first call only (no pageToken and not a continuation).
+  if (!opts.pageToken && !continuing) {
     page.labels = await listGmailLabels(tenant, userEmail);
   }
   return page;
@@ -2154,7 +2481,7 @@ export async function resolveImportLabels(
   // every message that carried it.
   const byNameLower = new Map<string, string>();
   const refreshExisting = async () => {
-    const res = await withGmailRetry(
+    const res = await withGoogleRetry(
       () =>
         gmail.users.labels.list(
           { userId: "me" },
@@ -2200,7 +2527,7 @@ export async function resolveImportLabels(
       // Safe to retry server errors: a 5xx that actually created the label
       // surfaces as a 409 on the retry, which the catch below turns into a
       // re-list + map rather than a duplicate.
-      const created = await withGmailRetry(
+      const created = await withGoogleRetry(
         () =>
           gmail.users.labels.create(
             {
@@ -2293,17 +2620,17 @@ export async function importMessageBatch(
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_INSERT_SCOPES);
   const out: ImportBatchResult = { inserted: 0, failed: 0, errors: [] };
 
-  for (let i = 0; i < messages.length; i++) {
+  const insertOne = async (i: number): Promise<void> => {
     const raw = typeof messages[i]?.raw === "string" ? messages[i].raw : "";
     if (!raw) {
       out.failed++;
       out.errors.push({ index: i, message: "Message has no raw content" });
-      continue;
+      return;
     }
     if (raw.length > MAILBOX_MAX_RAW_CHARS) {
       out.failed++;
       out.errors.push({ index: i, message: "Message exceeds the size limit" });
-      continue;
+      return;
     }
     const labelIds = sanitizeImportLabelIds(messages[i].labelIds);
 
@@ -2312,7 +2639,7 @@ export async function importMessageBatch(
       // committed the message) must surface as a failure rather than risk a
       // duplicate on a blind retry. Rate-limit rejections never reach Gmail's
       // store, so backing off and retrying those is safe.
-      await withGmailRetry(
+      await withGoogleRetry(
         () =>
           gmail.users.messages.insert(
             {
@@ -2345,7 +2672,7 @@ export async function importMessageBatch(
         status !== 429;
       if (cleanlyRejected) {
         try {
-          await withGmailRetry(
+          await withGoogleRetry(
             () =>
               gmail.users.messages.insert(
                 {
@@ -2358,14 +2685,14 @@ export async function importMessageBatch(
             { retryServerErrors: false }
           );
           out.inserted++;
-          continue;
+          return;
         } catch (e2) {
           out.failed++;
           out.errors.push({
             index: i,
             message: e2 instanceof Error ? e2.message : String(e2),
           });
-          continue;
+          return;
         }
       }
       out.failed++;
@@ -2374,7 +2701,26 @@ export async function importMessageBatch(
         message: e instanceof Error ? e.message : String(e),
       });
     }
-  }
+  };
+
+  // Insert with bounded concurrency. Each message is independent and insert
+  // order doesn't matter (dates come from each message's own header), so a small
+  // worker pool roughly triples throughput over a serial loop while staying well
+  // under Gmail's insert quota (~10 inserts/user/sec). The per-message failure
+  // isolation and no-blind-retry duplicate protection above are unchanged, and
+  // the synchronous counter/array mutations can't interleave mid-statement.
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < messages.length) {
+      await insertOne(cursor++);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAILBOX_IMPORT_INSERT_CONCURRENCY, messages.length) },
+      worker
+    )
+  );
 
   return out;
 }

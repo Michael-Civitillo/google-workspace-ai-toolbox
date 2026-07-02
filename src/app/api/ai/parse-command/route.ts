@@ -61,6 +61,14 @@ export async function POST(request: NextRequest) {
     const { object } = await generateObject({
       model: getModel(tenant),
       schema: ParsedCommandSchema,
+      // Disable Gemini's native structured output. `params` is a
+      // `z.record(string, string)`, which compiles to a JSON-schema OBJECT with
+      // no fixed `properties` — Gemini rejects that ("properties should be
+      // non-empty for OBJECT type"), which would make every parse throw. With
+      // native structured outputs off, the AI SDK falls back to JSON mode and
+      // still validates the result against the zod schema, so the arbitrary
+      // key/value params map works.
+      providerOptions: { google: { structuredOutputs: false } },
       prompt: `You are a Google Workspace admin assistant. Parse the following natural language command into a structured action.
 
 Available actions:
@@ -102,6 +110,12 @@ User command: ${JSON.stringify(command)}`,
       success: true,
       data: {
         ...object,
+        // Return the schema-VALIDATED params (zod strips unknown keys) rather
+        // than the model's raw output, so a hallucinated field — e.g. an
+        // `confirmExternal` that a route would treat as an approval — can never
+        // be forwarded to execution. Fall back to the raw params only when
+        // validation failed (and validParams:false blocks execution anyway).
+        params: parsed.success ? parsed.data : object.params,
         validParams: parsed.success,
         validationError: parsed.success
           ? null

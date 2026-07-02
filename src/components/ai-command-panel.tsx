@@ -58,6 +58,9 @@ export function AICommandPanel() {
   const [parsing, setParsing] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // Result payload from a read-only "list" action, rendered below the panel so
+  // the answer isn't silently discarded (e.g. "Who has access to …").
+  const [readResult, setReadResult] = useState<unknown>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -68,6 +71,7 @@ export function AICommandPanel() {
     setParsing(true);
     setParsed(null);
     setMessage(null);
+    setReadResult(null);
 
     try {
       const res = await tfetch("/api/ai/parse-command", {
@@ -118,10 +122,16 @@ export function AICommandPanel() {
       const result = await res.json();
 
       if (result.success) {
-        setMessage({
-          type: "success",
-          text: `Done! ${parsed.explanation}`,
-        });
+        const isRead = READ_ONLY_ACTIONS.has(parsed.action);
+        if (isRead) {
+          // Surface the actual answer (delegates / ACL list) instead of just a
+          // "Done!" toast with the data thrown away.
+          setReadResult(result.data ?? null);
+          setMessage({ type: "success", text: parsed.explanation });
+        } else {
+          setMessage({ type: "success", text: `Done! ${parsed.explanation}` });
+          setReadResult(null);
+        }
         setParsed(null);
         setCommand("");
         setConfirmOpen(false);
@@ -163,6 +173,19 @@ export function AICommandPanel() {
             {message.text}
           </AlertDescription>
         </Alert>
+      )}
+
+      {readResult !== null && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle className="text-base">Result</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <pre className="text-xs bg-muted/50 rounded-md p-3 overflow-auto max-h-80 whitespace-pre-wrap break-words">
+              {JSON.stringify(readResult, null, 2)}
+            </pre>
+          </CardContent>
+        </Card>
       )}
 
       <Card>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -173,6 +173,43 @@ export default function Offboarding() {
   );
   const [lookingUp, setLookingUp] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Verified domains for detecting an external successor. null = unknown
+  // (not loaded / lookup failed) → treat as external, fail-safe, matching the
+  // server guard on the forward/calendar steps.
+  const [verifiedDomains, setVerifiedDomains] = useState<string[] | null>(null);
+
+  // Stop the multi-step run and skip post-unmount state updates if the user
+  // navigates away — the destructive steps must not keep firing invisibly.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setVerifiedDomains(null);
+    tfetch("/api/admin/domains")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.success && Array.isArray(d.data)) {
+          setVerifiedDomains(
+            d.data
+              .filter((x: { verified?: boolean }) => x.verified)
+              .map((x: { domainName: string }) => x.domainName.toLowerCase())
+          );
+        }
+      })
+      .catch(() => {});
+  }, [tenantId]);
+
+  const successorDomain = successor.includes("@")
+    ? successor.slice(successor.indexOf("@") + 1).trim().toLowerCase()
+    : "";
+  const successorIsExternal =
+    !!successorDomain &&
+    (verifiedDomains === null || !verifiedDomains.includes(successorDomain));
 
   const lookup = async () => {
     if (!email.trim()) return;
@@ -261,14 +298,33 @@ export default function Offboarding() {
     if (!preflight) return;
     const pinnedTenantId = tenantId;
     const pinnedSuccessor = successor.trim();
+    // Pin external status at run time so it can't drift mid-run.
+    const pinnedConfirmExternal = successorIsExternal ? pinnedSuccessor : undefined;
     setRunning(true);
     setError(null);
     const newResults: Record<StepId, { status: StepStatus; message?: string }> =
       {} as Record<StepId, { status: StepStatus; message?: string }>;
 
+    // Once any step fails, do NOT run the irreversible account-cutoff steps
+    // (sign-out, suspend). Suspending after a failed forward/calendar step would
+    // strand the leaver — mail unforwarded and, once suspended, Gmail-settings
+    // retries rejected. Holding these back keeps the run re-runnable: fix the
+    // failure and re-run only what's left.
+    let hadFailure = false;
+    const TERMINAL_STEPS: ReadonlySet<StepId> = new Set(["signOut", "suspend"]);
+
     for (const id of RUN_ORDER) {
+      if (!alive.current) return;
       if (!enabled[id]) {
         newResults[id] = { status: "skipped" };
+        setResults({ ...newResults });
+        continue;
+      }
+      if (hadFailure && TERMINAL_STEPS.has(id)) {
+        newResults[id] = {
+          status: "skipped",
+          message: "Not run — an earlier step failed. Resolve it and re-run.",
+        };
         setResults({ ...newResults });
         continue;
       }
@@ -287,25 +343,31 @@ export default function Offboarding() {
               successor: pinnedSuccessor,
               vacationSubject,
               vacationMessage,
+              confirmExternal: pinnedConfirmExternal,
             }),
           },
           pinnedTenantId
         );
         const data = await res.json();
+        const ok = !!data.success;
+        if (!ok) hadFailure = true;
         newResults[id] = {
-          status: data.success ? "success" : "error",
-          message: data.success
+          status: ok ? "success" : "error",
+          message: ok
             ? data.data?.message ||
               data.data?.note ||
               "Done"
             : data.error || "Failed",
         };
       } catch {
+        hadFailure = true;
         newResults[id] = { status: "error", message: "Request failed" };
       }
+      if (!alive.current) return;
       setResults({ ...newResults });
     }
 
+    if (!alive.current) return;
     setRunning(false);
     setConfirmOpen(false);
   };
@@ -586,7 +648,7 @@ export default function Offboarding() {
           open={confirmOpen}
           onOpenChange={(o) => !running && setConfirmOpen(o)}
           title={`Offboard ${preflight.user.primaryEmail}`}
-          summary="Sequential, audited offboarding. Each step runs server-side; failures don't block later steps unless you say so."
+          summary="Sequential, audited offboarding. Each step runs server-side; if any step fails, the account-cutoff steps (sign-out, suspend) are held back so you can fix it and re-run only what's left."
           tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
           severity="high"
           confirmPhrase={preflight.user.primaryEmail}
@@ -595,6 +657,13 @@ export default function Offboarding() {
           changes={buildDiff()}
           warnings={
             <>
+              {successorIsExternal && successor.trim() && (
+                <p className="mb-2">
+                  <strong>{successor.trim()}</strong> is outside this
+                  tenant&apos;s verified domains — mail forwarding and calendar
+                  ownership will be handed to an external account.
+                </p>
+              )}
               <strong>Drive transfer is irreversible without admin support.</strong>{" "}
               Suspending the account is reversible (un-suspend), but revoked
               OAuth tokens and forced sign-outs are not — the user would

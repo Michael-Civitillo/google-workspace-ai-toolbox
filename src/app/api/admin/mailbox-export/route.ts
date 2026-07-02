@@ -19,8 +19,11 @@ import { audit } from "@/lib/audit";
  * `nextPageToken` to walk the rest of the mailbox.
  */
 export async function GET(request: NextRequest) {
-  const tenant = tenantFromRequest(request);
   try {
+    // Resolve inside the try: a stale/deleted tenantId makes resolveTenant throw,
+    // and we want that surfaced as the route's JSON error shape (not an
+    // unhandled non-JSON 500 the client reports as "failed to connect").
+    const tenant = tenantFromRequest(request);
     const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
 
     const rawPageToken = request.nextUrl.searchParams.get("pageToken");
@@ -46,16 +49,35 @@ export async function GET(request: NextRequest) {
     const includeSpamTrash =
       request.nextUrl.searchParams.get("includeSpamTrash") === "true";
 
+    // Continuation of a list page whose byte budget was hit: the client sends
+    // back the unfetched message ids (comma-joined). Validate shape and bound
+    // the count so a caller can't push an unbounded id list into memory.
+    const rawPendingIds = request.nextUrl.searchParams.get("pendingIds");
+    let pendingIds: string[] | undefined;
+    if (rawPendingIds) {
+      const parts = rawPendingIds.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 50) {
+        throw new ValidationError("pendingIds exceeds the per-page limit");
+      }
+      for (const id of parts) {
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+          throw new ValidationError("pendingIds contains a malformed id");
+        }
+      }
+      if (parts.length > 0) pendingIds = parts;
+    }
+
     const result = await exportMailboxPage(tenant, user, {
       pageToken,
       pageSize,
       includeSpamTrash,
+      pendingIds,
     });
 
-    // Audit the start of an export only (the first page). A full mailbox dump
-    // is sensitive — record who pulled whose mail — but auditing every page
-    // would bury the log without adding signal.
-    if (!pageToken) {
+    // Audit the start of an export only (the very first call — no pageToken and
+    // no pendingIds continuation). A full mailbox dump is sensitive — record who
+    // pulled whose mail — but auditing every page would bury the log.
+    if (!pageToken && !pendingIds) {
       audit({
         action: "mailbox_export",
         tenantId: tenant?.id ?? null,

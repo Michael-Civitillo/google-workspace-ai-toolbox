@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -53,6 +53,8 @@ interface ExportPage {
   user: string;
   messages: ExportedMessage[];
   nextPageToken: string | null;
+  /** Unfetched ids from the current list page (byte budget hit) to send back. */
+  pendingIds?: string[] | null;
   resultSizeEstimate: number | null;
   skipped?: Array<{ id: string; error: string }>;
   labels?: GmailLabel[];
@@ -133,6 +135,17 @@ export default function MailboxExport() {
   const [includeSpamTrash, setIncludeSpamTrash] = useState(true);
   const [running, setRunning] = useState(false);
   const cancelRef = useRef(false);
+  // Tracks whether the component is still mounted. Navigating away mid-export
+  // must stop the loop and skip the final download — otherwise the loop keeps
+  // fetching invisibly and drops a surprise multi-GB file minutes later.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      cancelRef.current = true;
+    };
+  }, []);
 
   const [progress, setProgress] = useState<{
     exported: number;
@@ -174,12 +187,16 @@ export default function MailboxExport() {
 
     try {
       let pageToken: string | undefined;
+      let pendingIds: string[] | undefined;
       while (true) {
-        if (cancelRef.current) break;
+        if (cancelRef.current || !alive.current) break;
         const url =
           `/api/admin/mailbox-export?user=${encodeURIComponent(user.trim())}` +
           `&includeSpamTrash=${includeSpamTrash ? "true" : "false"}` +
-          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "") +
+          (pendingIds && pendingIds.length
+            ? `&pendingIds=${encodeURIComponent(pendingIds.join(","))}`
+            : "");
         const res = await tfetch(url, {}, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
@@ -240,13 +257,19 @@ export default function MailboxExport() {
           estimate: page.resultSizeEstimate,
         });
 
-        if (!page.nextPageToken) break;
-        pageToken = page.nextPageToken;
+        // Drain any unfetched ids from this list page first (byte budget hit),
+        // then advance to the next list page. Stop only when both are exhausted.
+        pendingIds = page.pendingIds ?? undefined;
+        pageToken = page.nextPageToken ?? undefined;
+        if (!pageToken && !(pendingIds && pendingIds.length)) break;
       }
     } catch {
       setError("Failed to connect to the API");
     } finally {
       setRunning(false);
+      // If the user navigated away, don't drop a surprise download or push state
+      // into an unmounted component — just stop.
+      if (!alive.current) return;
       // Download whenever we captured at least one message — even on cancel or
       // a mid-walk error, so partial backups aren't thrown away. Still show a
       // summary when nothing was captured but messages were skipped, so a fully

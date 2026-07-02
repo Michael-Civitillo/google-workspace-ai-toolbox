@@ -16,9 +16,15 @@ export async function GET(request: NextRequest) {
     const tenant = tenantFromRequest(request);
     const pageToken = request.nextUrl.searchParams.get("pageToken") || undefined;
     const pageSizeRaw = request.nextUrl.searchParams.get("pageSize");
-    const pageSize = pageSizeRaw ? Math.min(500, Math.max(1, Number(pageSizeRaw))) : undefined;
-    if (pageSizeRaw && !Number.isFinite(pageSize)) {
-      throw new ValidationError("pageSize must be a number");
+    let pageSize: number | undefined;
+    if (pageSizeRaw) {
+      const n = Number(pageSizeRaw);
+      // Require a real integer — a fractional value like 2.5 would otherwise be
+      // forwarded to Google's maxResults verbatim.
+      if (!Number.isInteger(n)) {
+        throw new ValidationError("pageSize must be an integer");
+      }
+      pageSize = Math.min(500, Math.max(1, n));
     }
     const result = await listUsers(tenant, { pageToken, pageSize });
     return NextResponse.json({ success: true, data: result });

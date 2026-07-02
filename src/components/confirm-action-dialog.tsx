@@ -86,9 +86,20 @@ export function ConfirmActionDialog({
   onConfirm,
 }: ConfirmActionDialogProps) {
   const [typed, setTyped] = useState("");
+  const [wasOpen, setWasOpen] = useState(open);
 
-  // Reset typed phrase whenever dialog re-opens, so a previous successful entry
-  // doesn't auto-arm a fresh action.
+  // Reset the typed phrase whenever the dialog transitions to open. handleOpenChange
+  // only fires on user-initiated closes (Cancel/Esc/backdrop); a parent that closes
+  // the dialog programmatically after success just flips the `open` prop, so without
+  // this the phrase persists and the NEXT destructive action (e.g. a bulk revoke
+  // whose phrase is the constant "REVOKE") would open already-armed and be
+  // confirmable in a single click. Done during render — React's "adjust state on
+  // prop change" pattern — rather than in an effect.
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setTyped("");
+  }
+
   function handleOpenChange(next: boolean) {
     if (!next) setTyped("");
     onOpenChange(next);

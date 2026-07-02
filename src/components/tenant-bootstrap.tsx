@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { setCurrentTenant, setCurrentTenantId } from "@/lib/tenant-client";
+import { setCurrentTenantState } from "@/lib/tenant-client";
 import type { Tenant } from "@/lib/tenant-types";
 
 /**
@@ -24,8 +24,10 @@ export function TenantBootstrap() {
         if (cancelled) return;
         const id: string | null = data.activeTenantId ?? null;
         const tenants: Tenant[] = Array.isArray(data.tenants) ? data.tenants : [];
-        setCurrentTenantId(id);
-        setCurrentTenant(id ? tenants.find((t) => t.id === id) ?? null : null);
+        setCurrentTenantState(
+          id,
+          id ? tenants.find((t) => t.id === id) ?? null : null
+        );
       } catch {}
     }
     sync();

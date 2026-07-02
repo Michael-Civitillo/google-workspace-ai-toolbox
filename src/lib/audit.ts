@@ -43,6 +43,12 @@ export interface AuditEntry {
  * mask a real action error to the caller — but the route still returns its
  * own success/failure based on the actual API result.
  */
+// Throttle the "audit write failed" warning so a persistent problem (disk
+// full, deleted log dir, permissions change) surfaces in service logs without
+// flooding them on every mutating request.
+let lastAuditFailureWarn = 0;
+const AUDIT_FAILURE_WARN_INTERVAL_MS = 60_000;
+
 export function audit(entry: AuditEntry): void {
   try {
     const line =
@@ -52,8 +58,18 @@ export function audit(entry: AuditEntry): void {
         params: redactSensitive(entry.params),
       }) + "\n";
     appendFileSync(LOG_PATH, line, { encoding: "utf-8", mode: 0o600 });
-  } catch {
-    // Logging must never throw into the request handler.
+  } catch (e) {
+    // Logging must never throw into the request handler — but a silent failure
+    // means mutating actions run unaudited indefinitely and invisibly, which
+    // defeats the log's purpose. Emit a throttled warning so operators notice.
+    const now = Date.now();
+    if (now - lastAuditFailureWarn >= AUDIT_FAILURE_WARN_INTERVAL_MS) {
+      lastAuditFailureWarn = now;
+      console.error(
+        `[audit] failed to write to ${LOG_PATH} — mutating actions are running unaudited:`,
+        e instanceof Error ? e.message : e
+      );
+    }
   }
 }
 

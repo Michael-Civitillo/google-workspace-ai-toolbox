@@ -1,9 +1,12 @@
 import {
   readFileSync,
-  writeFileSync,
   renameSync,
   existsSync,
   unlinkSync,
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
 } from "fs";
 import path from "path";
 import type { Tenant, PublicTenant } from "./tenant-types";
@@ -33,40 +36,78 @@ const STORE_TMP_PATH = path.join(process.cwd(), "tenants.json.tmp");
  */
 let writeLock: Promise<unknown> = Promise.resolve();
 
+/**
+ * Move the on-disk store aside under a timestamped name so a subsequent write
+ * can't silently overwrite it. Used only when the file is genuinely unusable
+ * (empty or unparseable) — never for a transient read error.
+ */
+function quarantineStore(): void {
+  try {
+    renameSync(STORE_PATH, `${STORE_PATH}.corrupt-${Date.now()}`);
+  } catch {
+    // If we can't even move it, fall through — we still avoid throwing into the
+    // request handler for the corruption case.
+  }
+}
+
 function readStore(): TenantStore {
   if (!existsSync(STORE_PATH)) {
     return { activeTenantId: null, tenants: [] };
   }
+
+  let raw: string;
   try {
-    const raw = readFileSync(STORE_PATH, "utf-8");
-    if (!raw.trim()) return { activeTenantId: null, tenants: [] };
+    raw = readFileSync(STORE_PATH, "utf-8");
+  } catch (e) {
+    // A read failure is NOT corruption — it can be transient (EBUSY/EMFILE, an
+    // antivirus / Search Indexer lock on Windows, fd exhaustion). Quarantining
+    // here would permanently evict a healthy store on a blip. Surface the error
+    // instead: the file stays intact, the next read succeeds, and a
+    // read-modify-write under withLock aborts rather than persisting an empty
+    // store over the real config.
+    throw new Error(
+      `Failed to read tenant store at ${STORE_PATH}: ${
+        e instanceof Error ? e.message : String(e)
+      }`
+    );
+  }
+
+  if (!raw.trim()) {
+    // Existing-but-empty file: preserve it before returning an empty store so a
+    // subsequent write can't overwrite a (possibly externally truncated) config
+    // with no trace. After the rename the path is gone, so this happens once.
+    quarantineStore();
+    return { activeTenantId: null, tenants: [] };
+  }
+
+  try {
     const parsed = JSON.parse(raw);
     return {
       activeTenantId: parsed.activeTenantId ?? null,
       tenants: Array.isArray(parsed.tenants) ? parsed.tenants : [],
     };
   } catch {
-    // The file exists but couldn't be read/parsed. Returning an empty store
-    // would let the next write permanently overwrite every tenant config, so
-    // preserve the unreadable file under a timestamped name first. After the
-    // rename the path no longer exists, so this happens at most once.
-    try {
-      renameSync(STORE_PATH, `${STORE_PATH}.corrupt-${Date.now()}`);
-    } catch {
-      // If we can't even move it, fall through — we still avoid throwing into
-      // the request handler.
-    }
+    // Unparseable content is real corruption — quarantine it so the next write
+    // doesn't clobber the evidence, then start from an empty store.
+    quarantineStore();
     return { activeTenantId: null, tenants: [] };
   }
 }
 
 async function writeStoreAtomic(store: TenantStore): Promise<void> {
-  // Write to temp file then rename — guarantees we never leave a half-written
-  // tenants.json on disk if the process is killed mid-write.
-  writeFileSync(STORE_TMP_PATH, JSON.stringify(store, null, 2), {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
+  // Write to a temp file, fsync it, then rename — guarantees we never leave a
+  // half-written OR zero-length tenants.json on disk if the process is killed
+  // mid-write. The explicit fsync before rename matters: on ext4/xfs a rename
+  // can become durable before the file's data blocks, so a crash could
+  // otherwise leave an empty tenants.json that readStore treats as "no tenants"
+  // and the next write makes permanent.
+  const fd = openSync(STORE_TMP_PATH, "w", 0o600);
+  try {
+    writeSync(fd, JSON.stringify(store, null, 2));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 
   // On Windows the rename can transiently fail with EPERM/EBUSY if
   // antivirus / Windows Search Indexer briefly holds the destination
@@ -76,6 +117,19 @@ async function writeStoreAtomic(store: TenantStore): Promise<void> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       renameSync(STORE_TMP_PATH, STORE_PATH);
+      // Best-effort: fsync the containing directory so the rename itself is
+      // durable. Directory fsync isn't supported on Windows (EPERM/EISDIR) — a
+      // no-op there, so swallow failures rather than fail an otherwise-good write.
+      try {
+        const dirFd = openSync(path.dirname(STORE_PATH), "r");
+        try {
+          fsyncSync(dirFd);
+        } finally {
+          closeSync(dirFd);
+        }
+      } catch {
+        // Directory fsync unsupported on this platform — ignore.
+      }
       return;
     } catch (e) {
       lastError = e;
