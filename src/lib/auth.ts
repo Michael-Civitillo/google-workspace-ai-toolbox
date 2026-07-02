@@ -21,11 +21,25 @@ export function authConfigured(): boolean {
  * APP_PASSWORD offline. Falls back to APP_PASSWORD when no session secret is
  * set, preserving the single-env-var deployment model.
  */
+let warnedSecretFallback = false;
+
 function sessionSecret(): string {
   const explicit = process.env.APP_SESSION_SECRET;
   if (explicit && explicit.length > 0) return explicit;
   const s = process.env.APP_PASSWORD;
   if (!s) throw new Error("APP_PASSWORD is not set");
+  // Falling back to APP_PASSWORD as the HMAC key means a captured session
+  // cookie can be used to brute-force the login password offline. Warn once so
+  // operators know to set a dedicated high-entropy APP_SESSION_SECRET, without
+  // breaking the intentional single-env-var deployment path.
+  if (!warnedSecretFallback) {
+    warnedSecretFallback = true;
+    console.warn(
+      "[auth] APP_SESSION_SECRET is not set — signing sessions with APP_PASSWORD. " +
+        "Set a dedicated high-entropy APP_SESSION_SECRET so a leaked session cookie " +
+        "can't be used to brute-force the login password offline."
+    );
+  }
   return s;
 }
 
