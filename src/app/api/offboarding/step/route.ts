@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
+import type { Tenant } from "@/lib/tenant-types";
 import {
   buildGmailClient,
   buildCalendarClient,
@@ -8,6 +9,7 @@ import {
   suspendUser,
   transferDrive,
   isAlreadyExistsError,
+  isExternalTarget,
 } from "@/lib/admin-sdk";
 import {
   requireEmail,
@@ -51,7 +53,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
 
-  let tenant = null;
+  let tenant: Tenant | null = null;
   const step = String(body.step || "");
   try {
     tenant = tenantFromRequest(request, body);
@@ -61,6 +63,24 @@ export async function POST(request: NextRequest) {
     const auditBase = {
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
+    };
+
+    // Forwarding mail to — or granting calendar ownership to — a successor
+    // outside the tenant's verified domains sends data to an outsider. Mirror
+    // the email-transfer guard: require an explicit typed confirmExternal for an
+    // external successor. Fail-closed if domains can't be enumerated.
+    const requireInternalOrConfirmed = async (successor: string) => {
+      if (await isExternalTarget(tenant, successor)) {
+        const confirm =
+          typeof body.confirmExternal === "string"
+            ? body.confirmExternal.trim().toLowerCase()
+            : "";
+        if (confirm !== successor.toLowerCase()) {
+          throw new ValidationError(
+            `Successor "${successor}" is outside this tenant's verified domains. Set confirmExternal to the exact successor email to proceed.`
+          );
+        }
+      }
     };
 
     switch (step) {
@@ -93,10 +113,13 @@ export async function POST(request: NextRequest) {
             outcome: "error",
             error: msg,
           });
-          return NextResponse.json({
-            success: false,
-            error: msg || "Failed to enable vacation responder",
-          });
+          return NextResponse.json(
+            {
+              success: false,
+              error: msg || "Failed to enable vacation responder",
+            },
+            { status: 502 }
+          );
         }
         audit({
           action: "offboarding.vacation",
@@ -115,6 +138,7 @@ export async function POST(request: NextRequest) {
         if (successor.toLowerCase() === user.toLowerCase()) {
           throw new ValidationError("successor must differ from user");
         }
+        await requireInternalOrConfirmed(successor);
         const gmail = buildGmailClient(tenant, user, GMAIL_FORWARDING_SCOPES);
 
         // Step 1: register the forwarding address on the source mailbox. A
@@ -138,10 +162,13 @@ export async function POST(request: NextRequest) {
               outcome: "error",
               error: msg,
             });
-            return NextResponse.json({
-              success: false,
-              error: `Failed to create forwarding address: ${msg}`,
-            });
+            return NextResponse.json(
+              {
+                success: false,
+                error: `Failed to create forwarding address: ${msg}`,
+              },
+              { status: 502 }
+            );
           }
         }
 
@@ -164,11 +191,14 @@ export async function POST(request: NextRequest) {
             outcome: "error",
             error: msg,
           });
-          return NextResponse.json({
-            success: false,
-            data: { successor, disposition: "archive" },
-            error: msg,
-          });
+          return NextResponse.json(
+            {
+              success: false,
+              data: { successor, disposition: "archive" },
+              error: msg,
+            },
+            { status: 502 }
+          );
         }
         audit({
           action: "offboarding.forward",
@@ -187,6 +217,7 @@ export async function POST(request: NextRequest) {
         if (successor.toLowerCase() === user.toLowerCase()) {
           throw new ValidationError("successor must differ from user");
         }
+        await requireInternalOrConfirmed(successor);
         // Grant ownership only — never auto-remove the source user's access
         // during offboarding. Suspending the account already cuts them off;
         // dropping the ACL on a primary calendar would be rejected anyway.
@@ -208,11 +239,14 @@ export async function POST(request: NextRequest) {
             outcome: "error",
             error: msg,
           });
-          return NextResponse.json({
-            success: false,
-            data: { successor, role: "owner" },
-            error: msg,
-          });
+          return NextResponse.json(
+            {
+              success: false,
+              data: { successor, role: "owner" },
+              error: msg,
+            },
+            { status: 502 }
+          );
         }
         audit({
           action: "offboarding.calendar",
@@ -259,13 +293,16 @@ export async function POST(request: NextRequest) {
             ? `${result.failed} token(s) failed to revoke`
             : undefined,
         });
-        return NextResponse.json({
-          success: result.failed === 0,
-          data: result,
-          error: result.failed > 0
-            ? `${result.failed} of ${result.revoked + result.failed} tokens failed to revoke`
-            : undefined,
-        });
+        return NextResponse.json(
+          {
+            success: result.failed === 0,
+            data: result,
+            error: result.failed > 0
+              ? `${result.failed} of ${result.revoked + result.failed} tokens failed to revoke`
+              : undefined,
+          },
+          { status: result.failed > 0 ? 502 : 200 }
+        );
       }
 
       case "signOut": {

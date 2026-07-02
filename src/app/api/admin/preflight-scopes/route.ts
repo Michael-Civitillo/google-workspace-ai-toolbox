@@ -15,15 +15,18 @@ import { audit } from "@/lib/audit";
  * We only ask Google's OAuth server for tokens.
  */
 export async function GET(request: NextRequest) {
-  const tenant = tenantFromRequest(request);
-  if (!tenant) {
-    return NextResponse.json(
-      { success: false, error: "No tenant resolved — pass tenantId or activate one first" },
-      { status: 400 }
-    );
-  }
-
+  let tenant = null;
   try {
+    // Resolve inside the try: a stale/deleted tenantId makes resolveTenant
+    // throw, and we want that as this route's JSON error, not an unhandled 500.
+    tenant = tenantFromRequest(request);
+    if (!tenant) {
+      return NextResponse.json(
+        { success: false, error: "No tenant resolved — pass tenantId or activate one first" },
+        { status: 400 }
+      );
+    }
+
     const result = await preflightTenantScopes(tenant);
     const failing = result.results.filter((r) => !r.authorized).length;
     audit({
@@ -45,8 +48,8 @@ export async function GET(request: NextRequest) {
     const message = e instanceof Error ? e.message : "Preflight failed";
     audit({
       action: "tenant.preflight_scopes",
-      tenantId: tenant.id,
-      tenantName: tenant.name,
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
       params: {},
       outcome: "error",
       error: message,

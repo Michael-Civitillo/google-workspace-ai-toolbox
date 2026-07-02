@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildCalendarClient } from "@/lib/admin-sdk";
+import { buildCalendarClient, isExternalTarget } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { constantTimeStringEqual } from "@/lib/auth";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 export async function GET(request: NextRequest) {
@@ -66,6 +67,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Granting calendar OWNER to an address outside the tenant's verified
+    // domains hands calendar control to an outsider — mirror the email-transfer
+    // guard and require an explicit typed confirmation for external targets.
+    const isExternal = await isExternalTarget(tenant, targetUser);
+    if (isExternal) {
+      const confirm =
+        typeof body.confirmExternal === "string"
+          ? body.confirmExternal.trim().toLowerCase()
+          : "";
+      if (!constantTimeStringEqual(confirm, targetUser)) {
+        throw new ValidationError(
+          `Target "${targetUser}" is outside this tenant's verified domains. Set confirmExternal to the exact target email to grant it calendar ownership.`
+        );
+      }
+    }
+
     // Step 1: Grant owner access to the target user.
     const cal = buildCalendarClient(tenant, sourceUser);
     let grantData: unknown;
@@ -85,11 +102,15 @@ export async function POST(request: NextRequest) {
         outcome: "error",
         error: msg,
       });
-      return NextResponse.json({
-        success: false,
-        error: `Failed to grant ownership: ${msg}`,
-        step: "grant_ownership",
-      });
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Failed to grant ownership: ${msg}`,
+          step: "grant_ownership",
+        },
+        // Upstream (Google) failure, not a bad request — status matches body.
+        { status: 502 }
+      );
     }
 
     audit({

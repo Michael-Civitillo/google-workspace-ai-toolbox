@@ -7,6 +7,12 @@ import {
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+
+// The largest legitimate body is a continuation cursor: a queue capped at
+// 20,000 ids (~90 chars each) ≈ 2 MB. 4 MB leaves headroom while still
+// rejecting an unbounded payload before it's buffered and parsed.
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 /**
  * Transfer ownership of the selected folders and everything inside them from
@@ -21,10 +27,13 @@ import { audit } from "@/lib/audit";
  * the batch. Items not owned by `fromUser` are silently counted as skipped.
  */
 export async function POST(request: NextRequest) {
-  let body: Record<string, unknown> = {};
-  try {
-    body = await request.json();
-  } catch {}
+  const body = await readCappedJson(request, MAX_BODY_BYTES);
+  if (body === BODY_TOO_LARGE) {
+    return NextResponse.json(
+      { success: false, error: "Body too large" },
+      { status: 413 }
+    );
+  }
 
   let tenant = null;
   let fromUser: string | null = null;
