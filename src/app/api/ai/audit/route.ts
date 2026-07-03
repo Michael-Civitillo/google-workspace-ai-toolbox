@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
 import { getModel } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildGmailClient, buildCalendarClient } from "@/lib/admin-sdk";
+import {
+  buildGmailClient,
+  buildCalendarClient,
+  listGroups,
+} from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
@@ -81,17 +85,48 @@ export async function POST(request: NextRequest) {
       };
     };
 
-    const [emailDelegates, calendarAcl, emailLabels, autoForwarding] =
-      await Promise.all([
-        readOrError(() => gmail.users.settings.delegates.list({ userId: "me" })),
-        readOrError(listAllAcl),
-        readOrError(() => gmail.users.labels.list({ userId: "me" })),
-        readOrError(() =>
-          gmail.users.settings.getAutoForwarding({ userId: "me" })
-        ),
-      ]);
+    // Group memberships run as the tenant admin (groups scope), not as the
+    // audited user — bounded the same way as the calendar ACL walk.
+    const MAX_GROUPS = 200;
+    const listAllGroups = async () => {
+      const groups: unknown[] = [];
+      let pageToken: string | undefined;
+      do {
+        const page = await listGroups(tenant, { userKey: user, pageToken });
+        groups.push(...page.groups);
+        pageToken = page.nextPageToken ?? undefined;
+      } while (pageToken && groups.length < MAX_GROUPS);
+      return {
+        data: {
+          groups: groups.slice(0, MAX_GROUPS),
+          truncatedAt: pageToken ? MAX_GROUPS : null,
+        },
+      };
+    };
 
-    const rawData = { emailDelegates, calendarAcl, emailLabels, autoForwarding };
+    const [
+      emailDelegates,
+      calendarAcl,
+      emailLabels,
+      autoForwarding,
+      groupMemberships,
+    ] = await Promise.all([
+      readOrError(() => gmail.users.settings.delegates.list({ userId: "me" })),
+      readOrError(listAllAcl),
+      readOrError(() => gmail.users.labels.list({ userId: "me" })),
+      readOrError(() =>
+        gmail.users.settings.getAutoForwarding({ userId: "me" })
+      ),
+      readOrError(listAllGroups),
+    ]);
+
+    const rawData = {
+      emailDelegates,
+      calendarAcl,
+      emailLabels,
+      autoForwarding,
+      groupMemberships,
+    };
     const promptData = boundPromptData(rawData);
 
     const { text: summary } = await generateText({
@@ -120,7 +155,8 @@ Write a concise audit report covering:
 2. **Calendar Sharing** — Who can see or edit this user's calendar? What permission level does each person have?
 3. **Email Forwarding** — Is auto-forwarding enabled? Where is mail being forwarded to?
 4. **Mailbox Overview** — How many labels/folders exist? Anything notable?
-5. **Security Concerns** — Flag anything that looks unusual (e.g., forwarding to external domains, owner-level calendar access to unexpected users, unverified delegates)
+5. **Group Memberships** — Which groups does the user belong to? Call out anything that looks like elevated access (admin/finance/security groups).
+6. **Security Concerns** — Flag anything that looks unusual (e.g., forwarding to external domains, owner-level calendar access to unexpected users, unverified delegates)
 
 If any API calls failed, mention that the data wasn't available and why.
 
@@ -160,10 +196,12 @@ function boundPromptData(rawData: {
   calendarAcl: unknown;
   emailLabels: unknown;
   autoForwarding: unknown;
+  groupMemberships: unknown;
 }): Record<string, unknown> {
   const MAX_LABELS = 200;
   const MAX_ACL = 500;
   const MAX_DELEGATES = 100;
+  const MAX_GROUPS = 200;
 
   const capList = (value: unknown, key: string, cap: number): unknown => {
     if (typeof value !== "object" || value === null) return value;
@@ -182,5 +220,6 @@ function boundPromptData(rawData: {
     calendarAcl: capList(rawData.calendarAcl, "items", MAX_ACL),
     emailLabels: capList(rawData.emailLabels, "labels", MAX_LABELS),
     autoForwarding: rawData.autoForwarding,
+    groupMemberships: capList(rawData.groupMemberships, "groups", MAX_GROUPS),
   };
 }

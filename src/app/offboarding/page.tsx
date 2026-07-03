@@ -51,6 +51,7 @@ type StepId =
   | "forward"
   | "calendar"
   | "drive"
+  | "groups"
   | "revokeTokens"
   | "signOut"
   | "suspend";
@@ -113,11 +114,20 @@ const STEPS: StepDefinition[] = [
     emphasis: true,
   },
   {
+    id: "groups",
+    title: "Remove from all groups",
+    description:
+      "Removes the user from every group they belong to — mailing lists, access-control groups, and shared resources.",
+    order: 5,
+    needsSuccessor: false,
+    defaultEnabled: true,
+  },
+  {
     id: "revokeTokens",
     title: "Revoke all OAuth tokens",
     description:
       "Disconnects every third-party app the user authorised (Slack, Zoom, etc.).",
-    order: 5,
+    order: 6,
     needsSuccessor: false,
     defaultEnabled: true,
   },
@@ -126,7 +136,7 @@ const STEPS: StepDefinition[] = [
     title: "Sign out of all sessions",
     description:
       "Invalidates the user's active web/mobile sessions. They'll be forced to log in again — and they won't be able to, after suspension.",
-    order: 6,
+    order: 7,
     needsSuccessor: false,
     defaultEnabled: true,
   },
@@ -135,7 +145,7 @@ const STEPS: StepDefinition[] = [
     title: "Suspend the account",
     description:
       "Final step. The user can no longer sign in. Mail still arrives (for forwarding). Reversible by an admin if needed.",
-    order: 7,
+    order: 8,
     needsSuccessor: false,
     defaultEnabled: true,
     emphasis: true,

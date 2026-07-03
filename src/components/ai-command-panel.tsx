@@ -44,11 +44,13 @@ const DESTRUCTIVE_ACTIONS = new Set([
   "email_transfer",
   "email_delegation_remove",
   "calendar_delegation_remove",
+  "group_member_remove",
 ]);
 
 const READ_ONLY_ACTIONS = new Set([
   "email_delegation_list",
   "calendar_delegation_list",
+  "group_members_list",
 ]);
 
 export function AICommandPanel() {

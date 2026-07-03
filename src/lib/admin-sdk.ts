@@ -37,6 +37,7 @@ const SCOPES = {
     "https://www.googleapis.com/auth/admin.directory.user.security",
   DOMAIN_READONLY:
     "https://www.googleapis.com/auth/admin.directory.domain.readonly",
+  GROUP: "https://www.googleapis.com/auth/admin.directory.group",
   DATA_TRANSFER: "https://www.googleapis.com/auth/admin.datatransfer",
   DRIVE_METADATA_READONLY:
     "https://www.googleapis.com/auth/drive.metadata.readonly",
@@ -189,6 +190,26 @@ function getAdminClient(
     SCOPES.USER_SECURITY,
     SCOPES.DOMAIN_READONLY,
   ]);
+  return {
+    client: google.admin({ version: "directory_v1", auth }),
+    impersonatedAdmin: subject.toLowerCase(),
+  };
+}
+
+/**
+ * Admin SDK Directory client scoped to groups only (impersonating the tenant
+ * admin). Kept separate from getAdminClient on purpose: a JWT requests its
+ * whole scope set in every token grant and domain-wide delegation evaluates
+ * that set as a unit, so folding the groups scope into the shared client
+ * would break every existing directory call for tenants that haven't
+ * authorised the new scope yet.
+ */
+function getGroupsClient(
+  tenant: Tenant | null,
+  adminEmail?: string
+): { client: admin_directory_v1.Admin; impersonatedAdmin: string } {
+  const subject = impersonatedAdminFor(tenant, adminEmail);
+  const auth = buildAuth(tenant, subject, [SCOPES.GROUP]);
   return {
     client: google.admin({ version: "directory_v1", auth }),
     impersonatedAdmin: subject.toLowerCase(),
@@ -707,6 +728,266 @@ export async function revokeAllOAuthTokens(
     )
   );
   return { revoked, failed, errors };
+}
+
+export interface GroupSummary {
+  id: string;
+  email: string;
+  name: string;
+  description: string;
+  directMembersCount: string;
+}
+
+export interface GroupMember {
+  id: string;
+  email: string;
+  role: string;
+  type: string;
+  status: string;
+}
+
+export const GROUP_MEMBER_ROLES = ["MEMBER", "MANAGER", "OWNER"] as const;
+export type GroupMemberRole = (typeof GROUP_MEMBER_ROLES)[number];
+
+// groups.list and members.list cap maxResults at 200 (lower than the 500 the
+// users call allows).
+const GROUPS_MAX_PAGE_SIZE = 200;
+
+/**
+ * Page through groups. Two modes:
+ *   - customer mode (default): every group in the tenant, optionally narrowed
+ *     by a Directory API `query` (e.g. `email:eng-*`).
+ *   - userKey mode: only the groups that user/group is a direct member of.
+ * The API rejects `query` alongside `userKey`, so we do too, up front.
+ */
+export async function listGroups(
+  tenant: Tenant | null,
+  opts: {
+    pageToken?: string;
+    pageSize?: number;
+    query?: string;
+    userKey?: string;
+  } = {}
+): Promise<{ groups: GroupSummary[]; nextPageToken: string | null }> {
+  if (opts.userKey && opts.query) {
+    throw new Error("query cannot be combined with userKey");
+  }
+  if (opts.userKey && !isValidEmail(opts.userKey)) {
+    throw new Error("userKey must be a valid email address");
+  }
+  const { client } = getGroupsClient(tenant);
+  const maxResults = Math.min(
+    GROUPS_MAX_PAGE_SIZE,
+    Math.max(1, opts.pageSize ?? GROUPS_MAX_PAGE_SIZE)
+  );
+  const res = await withGoogleRetry(
+    () =>
+      client.groups.list(
+        {
+          ...(opts.userKey
+            ? { userKey: opts.userKey }
+            : { customer: "my_customer", query: opts.query || undefined }),
+          maxResults,
+          pageToken: opts.pageToken,
+          fields:
+            "nextPageToken, groups(id, email, name, description, directMembersCount)",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+
+  const groups: GroupSummary[] = (res.data.groups || []).map((g) => ({
+    id: g.id || "",
+    email: (g.email || "").toLowerCase(),
+    name: g.name || "",
+    description: g.description || "",
+    directMembersCount: String(g.directMembersCount ?? ""),
+  }));
+  return { groups, nextPageToken: res.data.nextPageToken || null };
+}
+
+/** Page through the direct members of a group. */
+export async function listGroupMembers(
+  tenant: Tenant | null,
+  groupKey: string,
+  opts: { pageToken?: string; pageSize?: number } = {}
+): Promise<{ members: GroupMember[]; nextPageToken: string | null }> {
+  if (!isValidEmail(groupKey)) {
+    throw new Error("groupKey must be a valid email address");
+  }
+  const { client } = getGroupsClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.members.list(
+        {
+          groupKey,
+          maxResults: Math.min(
+            GROUPS_MAX_PAGE_SIZE,
+            Math.max(1, opts.pageSize ?? GROUPS_MAX_PAGE_SIZE)
+          ),
+          pageToken: opts.pageToken,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+
+  const members: GroupMember[] = (res.data.members || []).map((m) => ({
+    id: m.id || "",
+    email: (m.email || "").toLowerCase(),
+    role: m.role || "MEMBER",
+    type: m.type || "",
+    status: m.status || "",
+  }));
+  return { members, nextPageToken: res.data.nextPageToken || null };
+}
+
+/**
+ * Add a member to a group. An existing membership is treated as success
+ * (retry-safe, like forwarding-address creation) — the caller learns which
+ * via `alreadyMember`. No retryServerErrors: the insert is not idempotent
+ * from the API's point of view, and the ambiguity of a timed-out insert is
+ * exactly what the alreadyMember tolerance absorbs on re-run.
+ */
+export async function addGroupMember(
+  tenant: Tenant | null,
+  groupKey: string,
+  memberEmail: string,
+  role: GroupMemberRole
+): Promise<{ alreadyMember: boolean }> {
+  if (!isValidEmail(groupKey)) {
+    throw new Error("groupKey must be a valid email address");
+  }
+  if (!isValidEmail(memberEmail)) {
+    throw new Error("memberEmail must be a valid email address");
+  }
+  const { client } = getGroupsClient(tenant);
+  try {
+    await withGoogleRetry(
+      () =>
+        client.members.insert(
+          {
+            groupKey,
+            requestBody: { email: memberEmail, role },
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: false }
+    );
+    return { alreadyMember: false };
+  } catch (e) {
+    if (isAlreadyExistsError(e)) return { alreadyMember: true };
+    throw e;
+  }
+}
+
+/**
+ * Remove a member from a group. A missing membership is not an error —
+ * `removed: false` tells the caller it was already gone (idempotent re-runs).
+ */
+export async function removeGroupMember(
+  tenant: Tenant | null,
+  groupKey: string,
+  memberEmail: string
+): Promise<{ removed: boolean }> {
+  if (!isValidEmail(groupKey)) {
+    throw new Error("groupKey must be a valid email address");
+  }
+  if (!isValidEmail(memberEmail)) {
+    throw new Error("memberEmail must be a valid email address");
+  }
+  const { client } = getGroupsClient(tenant);
+  try {
+    await withGoogleRetry(
+      () =>
+        client.members.delete(
+          { groupKey, memberKey: memberEmail },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    return { removed: true };
+  } catch (e) {
+    if (isNotFoundError(e)) return { removed: false };
+    throw e;
+  }
+}
+
+/**
+ * Remove a user from every group they are a direct member of. Used by the
+ * offboarding "groups" step. Enumerates memberships first, then deletes with
+ * bounded concurrency (same shape as revokeAllOAuthTokens). A 404 during
+ * removal counts as removed so a re-run after partial failure converges.
+ */
+export async function removeUserFromAllGroups(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<{
+  removed: number;
+  failed: number;
+  errors: Array<{ group: string; message: string }>;
+}> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+
+  // Enumerate every membership up front. Bounded so a pathological tenant
+  // (or a groups-of-groups explosion) can't spin this step forever.
+  const MAX_GROUPS = 2000;
+  const memberships: string[] = [];
+  let pageToken: string | undefined;
+  do {
+    const page = await listGroups(tenant, { userKey: userEmail, pageToken });
+    for (const g of page.groups) {
+      if (g.email) memberships.push(g.email);
+    }
+    pageToken = page.nextPageToken ?? undefined;
+  } while (pageToken && memberships.length < MAX_GROUPS);
+  if (memberships.length > MAX_GROUPS) memberships.length = MAX_GROUPS;
+
+  if (memberships.length === 0) return { removed: 0, failed: 0, errors: [] };
+
+  const { client } = getGroupsClient(tenant);
+  let removed = 0;
+  let failed = 0;
+  const errors: Array<{ group: string; message: string }> = [];
+  const REMOVE_CONCURRENCY = 5;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < memberships.length) {
+      const group = memberships[cursor++];
+      try {
+        await withGoogleRetry(
+          () =>
+            client.members.delete(
+              { groupKey: group, memberKey: userEmail },
+              { timeout: ADMIN_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
+        );
+        removed++;
+      } catch (e) {
+        if (isNotFoundError(e)) {
+          // Already gone (racing admin, previous partial run) — that's the goal.
+          removed++;
+          continue;
+        }
+        failed++;
+        errors.push({
+          group,
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(REMOVE_CONCURRENCY, memberships.length) },
+      worker
+    )
+  );
+  return { removed, failed, errors };
 }
 
 /**

@@ -4,6 +4,7 @@ import type { Tenant } from "@/lib/tenant-types";
 import {
   buildGmailClient,
   buildCalendarClient,
+  removeUserFromAllGroups,
   revokeAllOAuthTokens,
   signOutAllSessions,
   suspendUser,
@@ -38,8 +39,8 @@ const GMAIL_VACATION_SCOPES = [
  * leaves the rest of the steps explicit and recoverable.
  *
  * Body: {
- *   step: "vacation" | "forward" | "calendar" | "drive" | "revokeTokens"
- *       | "signOut" | "suspend",
+ *   step: "vacation" | "forward" | "calendar" | "drive" | "groups"
+ *       | "revokeTokens" | "signOut" | "suspend",
  *   user: string,                         // user being offboarded
  *   successor?: string,                   // for forward/calendar/drive
  *   vacationSubject?: string,             // for vacation
@@ -280,6 +281,32 @@ export async function POST(request: NextRequest) {
             note: "Drive transfer accepted by Google. Files move asynchronously over the next minutes/hours depending on volume.",
           },
         });
+      }
+
+      case "groups": {
+        const result = await removeUserFromAllGroups(tenant, user);
+        audit({
+          action: "offboarding.groups",
+          ...auditBase,
+          params: { user, ...result },
+          outcome: result.failed === 0 ? "success" : "error",
+          error: result.failed > 0
+            ? `${result.failed} group removal(s) failed`
+            : undefined,
+        });
+        return NextResponse.json(
+          {
+            success: result.failed === 0,
+            data: {
+              ...result,
+              message: `Removed from ${result.removed} group${result.removed === 1 ? "" : "s"}`,
+            },
+            error: result.failed > 0
+              ? `${result.failed} of ${result.removed + result.failed} group removals failed`
+              : undefined,
+          },
+          { status: result.failed > 0 ? 502 : 200 }
+        );
       }
 
       case "revokeTokens": {

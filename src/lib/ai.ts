@@ -105,6 +105,34 @@ export const ADMIN_ACTIONS = [
     endpoint: "/api/admin/change-domain",
     method: "POST",
   },
+  {
+    id: "group_member_add",
+    name: "Add Group Member",
+    description: "Add a user to a group (mailing list / access group)",
+    params: [
+      "group (group email)",
+      "member (user email)",
+      "role (MEMBER | MANAGER | OWNER, optional)",
+    ],
+    endpoint: "/api/admin/groups/members",
+    method: "POST",
+  },
+  {
+    id: "group_member_remove",
+    name: "Remove Group Member",
+    description: "Remove a user from a group",
+    params: ["group (group email)", "member (user email)"],
+    endpoint: "/api/admin/groups/members",
+    method: "DELETE",
+  },
+  {
+    id: "group_members_list",
+    name: "List Group Members",
+    description: "Show the members of a group",
+    params: ["group (group email)"],
+    endpoint: "/api/admin/groups/members",
+    method: "GET",
+  },
 ] as const;
 
 export type ActionId = (typeof ADMIN_ACTIONS)[number]["id"];
@@ -123,6 +151,7 @@ const email = () =>
 
 const role = z.enum(["freeBusyReader", "reader", "writer", "owner"]);
 const forwardAction = z.enum(["keep", "archive", "trash", "markRead"]);
+const groupRole = z.enum(["MEMBER", "MANAGER", "OWNER"]);
 
 export const ACTION_PARAM_SCHEMAS: Record<ActionId, z.ZodSchema> = {
   email_delegation_add: z.object({
@@ -162,6 +191,18 @@ export const ACTION_PARAM_SCHEMAS: Record<ActionId, z.ZodSchema> = {
     currentEmail: email(),
     newDomain: z.string().min(1),
     newUsername: z.string().optional(),
+  }),
+  group_member_add: z.object({
+    group: email(),
+    member: email(),
+    role: groupRole.optional(),
+  }),
+  group_member_remove: z.object({
+    group: email(),
+    member: email(),
+  }),
+  group_members_list: z.object({
+    group: email(),
   }),
 };
 

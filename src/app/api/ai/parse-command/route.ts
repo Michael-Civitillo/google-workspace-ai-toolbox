@@ -85,6 +85,10 @@ Important rules:
 - If the command mentions "change domain", "switch domain", "move to domain", use domain_change
 - If the command mentions "who has access", "list delegates", "show access", use the appropriate _list action
 - If the command mentions "remove", "revoke", "take away", use the appropriate _remove action
+- If the command mentions "add to group", "join group", "add to mailing list", "add to distribution list", use group_member_add
+- If the command mentions "remove from group", "leave group", "take off the list", use group_member_remove
+- If the command mentions "who is in the group", "group members", "list members", use group_members_list
+- Default group member role to "MEMBER" if not specified
 - For calendar roles: "view" or "read" = reader, "edit" or "write" = writer, "full control" or "own" = owner, "free/busy" = freeBusyReader
 - Default calendar role to "reader" if not specified
 - Default email forwarding action to "keep" if not specified

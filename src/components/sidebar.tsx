@@ -19,6 +19,7 @@ import {
   Download,
   Upload,
   ScrollText,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -54,6 +55,10 @@ const navigation = [
       },
       { name: "Drive Transfer", href: "/drive-transfer", icon: FolderTree },
     ],
+  },
+  {
+    label: "Directory",
+    items: [{ name: "Groups", href: "/groups", icon: Users }],
   },
   {
     label: "Lifecycle",

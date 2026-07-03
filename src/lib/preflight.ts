@@ -59,6 +59,11 @@ const REQUIRED_SCOPES: ReadonlyArray<{
     feature: "Verified-domain listing (drives external-sharing classification)",
   },
   {
+    scope: "https://www.googleapis.com/auth/admin.directory.group",
+    label: "Directory groups",
+    feature: "Group membership management + offboarding group removal",
+  },
+  {
     scope: "https://www.googleapis.com/auth/admin.datatransfer",
     label: "Data transfer",
     feature: "Drive ownership transfer during offboarding",
