@@ -20,6 +20,7 @@ import {
   Upload,
   ScrollText,
   Users,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -79,6 +80,7 @@ const navigation = [
     items: [
       { name: "Sharing Audit", href: "/sharing-audit", icon: Share2 },
       { name: "User Audit", href: "/audit", icon: Shield },
+      { name: "Activity Reports", href: "/activity-reports", icon: Activity },
       { name: "Audit Log", href: "/audit-log", icon: ScrollText },
     ],
   },

@@ -1,4 +1,10 @@
-import { google, type drive_v3, type admin_directory_v1, type admin_datatransfer_v1 } from "googleapis";
+import {
+  google,
+  type drive_v3,
+  type admin_directory_v1,
+  type admin_datatransfer_v1,
+  type admin_reports_v1,
+} from "googleapis";
 import { readFileSync, statSync } from "fs";
 import type { Tenant } from "./tenant-types";
 import {
@@ -38,6 +44,8 @@ const SCOPES = {
   DOMAIN_READONLY:
     "https://www.googleapis.com/auth/admin.directory.domain.readonly",
   GROUP: "https://www.googleapis.com/auth/admin.directory.group",
+  REPORTS_AUDIT_READONLY:
+    "https://www.googleapis.com/auth/admin.reports.audit.readonly",
   DATA_TRANSFER: "https://www.googleapis.com/auth/admin.datatransfer",
   DRIVE_METADATA_READONLY:
     "https://www.googleapis.com/auth/drive.metadata.readonly",
@@ -212,6 +220,24 @@ function getGroupsClient(
   const auth = buildAuth(tenant, subject, [SCOPES.GROUP]);
   return {
     client: google.admin({ version: "directory_v1", auth }),
+    impersonatedAdmin: subject.toLowerCase(),
+  };
+}
+
+/**
+ * Admin SDK Reports client (impersonating the tenant admin). Scope-isolated
+ * for the same domain-wide-delegation reason as getGroupsClient: tenants that
+ * haven't authorised the reports scope must keep every existing feature
+ * working.
+ */
+function getReportsClient(
+  tenant: Tenant | null,
+  adminEmail?: string
+): { client: admin_reports_v1.Admin; impersonatedAdmin: string } {
+  const subject = impersonatedAdminFor(tenant, adminEmail);
+  const auth = buildAuth(tenant, subject, [SCOPES.REPORTS_AUDIT_READONLY]);
+  return {
+    client: google.admin({ version: "reports_v1", auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -988,6 +1014,101 @@ export async function removeUserFromAllGroups(
     )
   );
   return { removed, failed, errors };
+}
+
+export interface ActivityEvent {
+  /** RFC3339 timestamp of the activity. */
+  time: string;
+  actor: string;
+  ip: string | null;
+  eventType: string;
+  eventName: string;
+  params?: Record<string, string>;
+}
+
+const ACTIVITY_MAX_RESULTS = 1000;
+// Bound the flattened parameter payload per event: values feed AI prompts and
+// JSON responses, and a single admin event can carry arbitrarily long strings.
+const ACTIVITY_MAX_PARAMS = 20;
+const ACTIVITY_PARAM_VALUE_MAX = 200;
+
+/**
+ * Page through Reports API audit activities for one application. Returns one
+ * flattened event per (activity item × nested event) — a single sign-in item
+ * can carry several events (e.g. login_success + login_challenge) and
+ * flattening keeps rows independently filterable and exportable.
+ *
+ * Note Google's Reports data is not real-time: login events can lag from a
+ * few minutes to hours.
+ */
+export async function listActivityEvents(
+  tenant: Tenant | null,
+  opts: {
+    app: "login" | "admin";
+    /** Restrict to one user's activity; omit for everyone. */
+    userKey?: string;
+    /** RFC3339 lower bound. */
+    startTime: string;
+    pageToken?: string;
+    maxResults?: number;
+  }
+): Promise<{ events: ActivityEvent[]; nextPageToken: string | null }> {
+  if (opts.userKey && !isValidEmail(opts.userKey)) {
+    throw new Error("userKey must be a valid email address");
+  }
+  const { client } = getReportsClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.activities.list(
+        {
+          userKey: opts.userKey ?? "all",
+          applicationName: opts.app,
+          startTime: opts.startTime,
+          maxResults: Math.min(
+            ACTIVITY_MAX_RESULTS,
+            Math.max(1, opts.maxResults ?? ACTIVITY_MAX_RESULTS)
+          ),
+          pageToken: opts.pageToken,
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+
+  const events: ActivityEvent[] = [];
+  for (const item of res.data.items || []) {
+    const time = item.id?.time || "";
+    const actor = item.actor?.email || item.actor?.callerType || "(unknown)";
+    const ip = item.ipAddress ?? null;
+    for (const ev of item.events || []) {
+      let params: Record<string, string> | undefined;
+      if (ev.parameters && ev.parameters.length > 0) {
+        params = {};
+        for (const p of ev.parameters.slice(0, ACTIVITY_MAX_PARAMS)) {
+          if (!p.name) continue;
+          const value =
+            p.value ??
+            (p.boolValue !== undefined && p.boolValue !== null
+              ? String(p.boolValue)
+              : p.intValue !== undefined && p.intValue !== null
+                ? String(p.intValue)
+                : p.multiValue
+                  ? p.multiValue.join(", ")
+                  : "");
+          params[p.name] = String(value).slice(0, ACTIVITY_PARAM_VALUE_MAX);
+        }
+      }
+      events.push({
+        time,
+        actor,
+        ip,
+        eventType: ev.type || "",
+        eventName: ev.name || "",
+        ...(params && Object.keys(params).length > 0 ? { params } : {}),
+      });
+    }
+  }
+  return { events, nextPageToken: res.data.nextPageToken || null };
 }
 
 /**

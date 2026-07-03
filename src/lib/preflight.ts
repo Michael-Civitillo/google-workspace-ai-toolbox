@@ -64,6 +64,11 @@ const REQUIRED_SCOPES: ReadonlyArray<{
     feature: "Group membership management + offboarding group removal",
   },
   {
+    scope: "https://www.googleapis.com/auth/admin.reports.audit.readonly",
+    label: "Reports (audit, read)",
+    feature: "Sign-in/admin activity reports + AI security digest",
+  },
+  {
     scope: "https://www.googleapis.com/auth/admin.datatransfer",
     label: "Data transfer",
     feature: "Drive ownership transfer during offboarding",
