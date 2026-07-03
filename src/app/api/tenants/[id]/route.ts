@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updateTenant, deleteTenant, toPublicTenant } from "@/lib/tenants-server";
+import {
+  updateTenant,
+  deleteTenant,
+  toPublicTenant,
+  TenantNotFoundError,
+} from "@/lib/tenants-server";
 import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 import {
   isValidEmail,
@@ -68,7 +73,12 @@ export async function PUT(
     return NextResponse.json({ tenant: toPublicTenant(tenant) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    const status = error instanceof ValidationError ? 400 : 500;
+    const status =
+      error instanceof ValidationError
+        ? 400
+        : error instanceof TenantNotFoundError
+        ? 404
+        : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }
@@ -83,6 +93,7 @@ export async function DELETE(
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = error instanceof TenantNotFoundError ? 404 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

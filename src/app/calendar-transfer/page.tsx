@@ -39,10 +39,17 @@ export default function CalendarTransfer() {
   } | null>(null);
 
   useEffect(() => {
+    // Cancelled flag: on a tenant switch the previous tenant's in-flight
+    // response must not land after (and overwrite) the new tenant's domains —
+    // a stale set could classify an external target as internal and set the
+    // dialog severity wrong. The tenantId pin keeps the request itself
+    // consistent with the tenant this effect run is for.
+    let cancelled = false;
     setVerifiedDomains(null);
-    tfetch("/api/admin/domains")
+    tfetch("/api/admin/domains", {}, tenantId)
       .then((r) => r.json())
       .then((d) => {
+        if (cancelled) return;
         if (d?.success && Array.isArray(d.data)) {
           setVerifiedDomains(
             d.data
@@ -52,6 +59,9 @@ export default function CalendarTransfer() {
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [tenantId]);
 
   const effectiveCalendarId = calendarId || sourceUser;
@@ -97,8 +107,11 @@ export default function CalendarTransfer() {
 
       if (result.success) {
         const note = result.data?.note || "Transfer completed";
-        const isPartial =
-          note.includes("was NOT removed") || note.includes("was not removed");
+        // Partial only when we asked for source-access removal and it didn't
+        // happen. Matching on the note's prose also flagged every successful
+        // default (keep-access) transfer as a warning, making real partial
+        // failures indistinguishable from normal success.
+        const isPartial = removeSourceAccess && result.data?.removed !== true;
         setMessage({
           type: isPartial ? "warning" : "success",
           text: note,

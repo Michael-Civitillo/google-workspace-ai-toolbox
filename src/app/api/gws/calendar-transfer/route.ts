@@ -12,8 +12,22 @@ export async function GET(request: NextRequest) {
     const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
 
     const cal = buildCalendarClient(tenant, user);
-    const res = await cal.calendarList.list();
-    return NextResponse.json({ success: true, data: res.data });
+    // Page through the full calendar list: one call returns at most 250
+    // entries, so a user subscribed to more calendars would get a silently
+    // truncated picker. Bounded so a pathological account can't pin the route.
+    const MAX_CALENDARS = 1000;
+    let res = await cal.calendarList.list({ maxResults: 250 });
+    const items = [...(res.data.items || [])];
+    let pageToken = res.data.nextPageToken ?? undefined;
+    while (pageToken && items.length < MAX_CALENDARS) {
+      res = await cal.calendarList.list({ maxResults: 250, pageToken });
+      items.push(...(res.data.items || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    }
+    return NextResponse.json({
+      success: true,
+      data: { ...res.data, items, nextPageToken: pageToken ?? null },
+    });
   } catch (e) {
     return errorResponse(e);
   }
@@ -154,8 +168,12 @@ export async function POST(request: NextRequest) {
       data: {
         granted: grantData,
         removed: removeError ? null : true,
+        // Surface Google's actual rejection: the old hardcoded "primary
+        // calendars cannot have their owner removed" explanation was only one
+        // of several causes (permissions, stale rule id, transient errors) and
+        // made real failures undiagnosable from the UI.
         note: removeError
-          ? `Ownership granted, but source user's access was NOT removed (Google rejected the deletion — primary calendars cannot have their owner removed). Source user still has access.`
+          ? `Ownership granted, but source user's access was NOT removed — Google rejected the deletion: ${removeError}. Source user still has access.`
           : `Ownership granted to ${targetUser} and source user's access removed.`,
       },
     });

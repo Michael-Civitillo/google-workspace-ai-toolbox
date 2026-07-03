@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  getTenants,
-  getActiveTenantId,
+  getTenantStoreSnapshot,
   addTenant,
   toPublicTenant,
 } from "@/lib/tenants-server";
@@ -17,9 +16,22 @@ import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 const MAX_BODY_BYTES = 16 * 1024;
 
 export async function GET() {
-  const tenants = getTenants().map(toPublicTenant);
-  const activeTenantId = getActiveTenantId();
-  return NextResponse.json({ tenants, activeTenantId });
+  try {
+    // One snapshot read: separate getters would read the store twice, and a
+    // concurrent write between them could pair a fresh list with a stale
+    // active id.
+    const { tenants, activeTenantId } = getTenantStoreSnapshot();
+    return NextResponse.json({
+      tenants: tenants.map(toPublicTenant),
+      activeTenantId,
+    });
+  } catch (error) {
+    // A transient store read failure must come back as JSON — every consumer
+    // does res.json() unconditionally and would otherwise choke on the
+    // framework's HTML error page.
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }
 
 export async function POST(req: NextRequest) {

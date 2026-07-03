@@ -40,8 +40,10 @@ interface PreflightUser {
 }
 interface Preflight {
   user: PreflightUser;
-  tokenCount: number;
+  /** Null when the token listing failed — the count is unknown, not zero. */
+  tokenCount: number | null;
   tokens: Array<{ clientId: string; displayText: string }>;
+  tokensError?: string | null;
 }
 
 type StepId =
@@ -279,7 +281,10 @@ export default function Offboarding() {
       } else if (id === "drive") {
         detail = `Transfer ALL Drive items to ${successor}`;
       } else if (id === "revokeTokens") {
-        detail = `Revoke ${preflight?.tokenCount ?? 0} OAuth token${preflight?.tokenCount === 1 ? "" : "s"}`;
+        detail =
+          preflight?.tokenCount == null
+            ? "Revoke all OAuth tokens (count unknown — listing failed during lookup)"
+            : `Revoke ${preflight.tokenCount} OAuth token${preflight.tokenCount === 1 ? "" : "s"}`;
       } else if (id === "signOut") {
         detail = `Sign out all active sessions`;
       } else if (id === "suspend") {
@@ -467,8 +472,11 @@ export default function Offboarding() {
                       variant="outline"
                       className="bg-zinc-100 text-zinc-700 border-zinc-200 text-xs"
                     >
-                      {preflight.tokenCount} OAuth token
-                      {preflight.tokenCount === 1 ? "" : "s"}
+                      {preflight.tokenCount == null
+                        ? "OAuth tokens: count unavailable"
+                        : `${preflight.tokenCount} OAuth token${
+                            preflight.tokenCount === 1 ? "" : "s"
+                          }`}
                     </Badge>
                   </div>
                 </div>

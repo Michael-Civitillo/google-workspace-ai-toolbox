@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -43,16 +43,27 @@ export default function EmailDelegation() {
     text: string;
   } | null>(null);
 
+  // Live tenant id for staleness checks inside async closures.
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
+
   const listDelegates = async () => {
     if (!user) return;
     setLoading(true);
     setMessage(null);
+    // Pin the tenant this list belongs to, and discard the response if the
+    // tenant changed while it was in flight — otherwise a stale tenant-A list
+    // repopulates the UI under tenant B and defeats the listedOwner guard.
+    const pinnedTenantId = tenantId;
 
     try {
       const res = await tfetch(
-        `/api/gws/email-delegation?user=${encodeURIComponent(user)}`
+        `/api/gws/email-delegation?user=${encodeURIComponent(user)}`,
+        {},
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success && result.data?.delegates) {
         setDelegates(result.data.delegates);
@@ -96,13 +107,17 @@ export default function EmailDelegation() {
       const result = await res.json();
 
       if (result.success) {
-        setMessage({
-          type: "success",
-          text: `Successfully added ${delegate} as a delegate for ${user}`,
-        });
+        const added = delegate;
         setDelegate("");
         setConfirmAddOpen(false);
+        // Refresh first, then set the message: listDelegates clears messages in
+        // its synchronous prologue, so setting it earlier batches a set+clear
+        // into one render and the success feedback is never painted.
         await listDelegates();
+        setMessage({
+          type: "success",
+          text: `Successfully added ${added} as a delegate for ${user}`,
+        });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to add delegate" });
       }
@@ -132,12 +147,14 @@ export default function EmailDelegation() {
       const result = await res.json();
 
       if (result.success) {
+        setConfirmRemoveTarget(null);
+        // Refresh before messaging — listDelegates' prologue clears messages,
+        // which would erase this success text in the same batched render.
+        await listDelegates();
         setMessage({
           type: "success",
           text: `Successfully removed ${delegateEmail} as a delegate from ${listedOwner}`,
         });
-        setConfirmRemoveTarget(null);
-        await listDelegates();
       } else {
         setMessage({ type: "error", text: result.error || "Failed to remove delegate" });
       }

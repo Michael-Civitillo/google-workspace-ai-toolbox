@@ -61,6 +61,9 @@ export async function POST(request: NextRequest) {
     const { object } = await generateObject({
       model: getModel(tenant),
       schema: ParsedCommandSchema,
+      // Bound the Gemini call: without a signal a stalled upstream connection
+      // would hang this route (and the operator's parse spinner) indefinitely.
+      abortSignal: AbortSignal.timeout(30_000),
       // Disable Gemini's native structured output. `params` is a
       // `z.record(string, string)`, which compiles to a JSON-schema OBJECT with
       // no fixed `properties` — Gemini rejects that ("properties should be
@@ -132,6 +135,12 @@ User command: ${JSON.stringify(command)}`,
       },
     });
   } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      return NextResponse.json(
+        { success: false, error: "The AI request timed out — try again." },
+        { status: 504 }
+      );
+    }
     const message =
       error instanceof Error ? error.message : "Failed to parse command";
     return NextResponse.json(
