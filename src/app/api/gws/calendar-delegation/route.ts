@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildCalendarClient } from "@/lib/admin-sdk";
+import { buildCalendarClient, isExternalTarget } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { constantTimeStringEqual } from "@/lib/auth";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const ALLOWED_ROLES = new Set(["freeBusyReader", "reader", "writer", "owner"]);
@@ -27,8 +28,23 @@ export async function GET(request: NextRequest) {
     );
 
     const cal = buildCalendarClient(tenant, calendarId);
-    const res = await cal.acl.list({ calendarId });
-    return NextResponse.json({ success: true, data: res.data });
+    // Page through the full ACL: one acl.list call returns at most 100 rules,
+    // so a widely-shared calendar would render a silently truncated list (and
+    // hide exactly the grants an admin is auditing for). Bounded so a
+    // pathological calendar can't pin the route.
+    const MAX_ACL_RULES = 1000;
+    let res = await cal.acl.list({ calendarId, maxResults: 250 });
+    const items = [...(res.data.items || [])];
+    let pageToken = res.data.nextPageToken ?? undefined;
+    while (pageToken && items.length < MAX_ACL_RULES) {
+      res = await cal.acl.list({ calendarId, maxResults: 250, pageToken });
+      items.push(...(res.data.items || []));
+      pageToken = res.data.nextPageToken ?? undefined;
+    }
+    return NextResponse.json({
+      success: true,
+      data: { ...res.data, items, nextPageToken: pageToken ?? null },
+    });
   } catch (e) {
     return errorResponse(e);
   }
@@ -47,6 +63,23 @@ export async function POST(request: NextRequest) {
       throw new ValidationError(
         `role must be one of: ${[...ALLOWED_ROLES].join(", ")}`
       );
+    }
+
+    // Granting OWNER hands full calendar control (including re-sharing and
+    // deletion) to the delegate — for an address outside the tenant's verified
+    // domains that's the same exposure as a calendar transfer, so mirror the
+    // sibling flows' typed confirmExternal gate. Lower roles stay ungated:
+    // sharing free/busy or read access with an external partner is routine.
+    if (role === "owner" && (await isExternalTarget(tenant, delegateEmail))) {
+      const confirm =
+        typeof body.confirmExternal === "string"
+          ? body.confirmExternal.trim().toLowerCase()
+          : "";
+      if (!constantTimeStringEqual(confirm, delegateEmail)) {
+        throw new ValidationError(
+          `Delegate "${delegateEmail}" is outside this tenant's verified domains. Set confirmExternal to the exact delegate email to grant it calendar ownership.`
+        );
+      }
     }
 
     const cal = buildCalendarClient(tenant, calendarId);

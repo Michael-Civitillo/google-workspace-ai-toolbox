@@ -252,15 +252,16 @@ async function fetchPathsForResults(
       out[r.user] = {};
       continue;
     }
-    try {
-      // resolve-paths caps a batch at 1,000 file ids; a single user can exceed
-      // that after chained audit pages. Chunk and merge so users with the most
-      // flagged files still get their paths (previously the whole request 400'd
-      // and their CSV path column came back empty).
-      const ids = r.files.map((f) => f.id);
-      const merged: Record<string, string> = {};
-      for (let i = 0; i < ids.length; i += PATH_RESOLVE_CHUNK) {
-        const chunk = ids.slice(i, i + PATH_RESOLVE_CHUNK);
+    // resolve-paths caps a batch at 1,000 file ids; a single user can exceed
+    // that after chained audit pages. Chunk and merge so users with the most
+    // flagged files still get their paths (previously the whole request 400'd
+    // and their CSV path column came back empty). The catch sits per chunk so
+    // one failed chunk costs only its own paths, not the ones already resolved.
+    const ids = r.files.map((f) => f.id);
+    const merged: Record<string, string> = {};
+    for (let i = 0; i < ids.length; i += PATH_RESOLVE_CHUNK) {
+      const chunk = ids.slice(i, i + PATH_RESOLVE_CHUNK);
+      try {
         const res = await tfetch(
           "/api/admin/sharing-audit/resolve-paths",
           {
@@ -274,11 +275,11 @@ async function fetchPathsForResults(
         if (data?.success) {
           Object.assign(merged, (data.data?.paths as Record<string, string>) ?? {});
         }
+      } catch {
+        // Keep whatever already resolved for this user.
       }
-      out[r.user] = merged;
-    } catch {
-      out[r.user] = {};
     }
+    out[r.user] = merged;
   }
   return out;
 }
@@ -325,20 +326,42 @@ export default function SharingAudit() {
   );
   const cancelRef = useRef(false);
   const singleCancelRef = useRef(false);
-  // Stop in-flight scans and skip post-unmount state updates when the user
-  // navigates away — otherwise the loops keep hitting the API invisibly.
-  const alive = useRef(true);
+  // Abort the in-flight scan request on cancel, tenant switch, or unmount —
+  // the cancel refs stop the loops between pages, but without an abort the
+  // current request keeps running (and hitting the API) invisibly.
+  const scanAbortRef = useRef<AbortController | null>(null);
   useEffect(() => {
-    alive.current = true;
     return () => {
-      alive.current = false;
       cancelRef.current = true;
       singleCancelRef.current = true;
+      scanAbortRef.current?.abort();
     };
   }, []);
   const [includeSuspended, setIncludeSuspended] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+
+  // Results, selections, and resume tokens are tenant-scoped: revoking,
+  // continuing, or exporting a tenant-A snapshot after switching to tenant B
+  // would run against the wrong tenant. Cancel anything in flight and clear
+  // the slate whenever the tenant changes.
+  const prevTenantRef = useRef(tenantId);
+  useEffect(() => {
+    if (prevTenantRef.current === tenantId) return;
+    prevTenantRef.current = tenantId;
+    cancelRef.current = true;
+    singleCancelRef.current = true;
+    scanAbortRef.current?.abort();
+    setSingleResult(null);
+    setSingleSelected(new Set());
+    setPerUser([]);
+    setTenantSelected({});
+    setCollapsedUsers(new Set());
+    setTenantUserCount(null);
+    setRevokeTarget(null);
+    setRevokeNotice(null);
+    setError(null);
+  }, [tenantId]);
 
   // Revoke-flow state
   const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null);
@@ -424,6 +447,8 @@ export default function SharingAudit() {
     // Pin the tenant for the whole scan so a switch mid-walk can't redirect
     // later pages to a different tenant.
     const pinnedTenantId = tenantId;
+    const ac = new AbortController();
+    scanAbortRef.current = ac;
     try {
       let pageToken: string | undefined;
       let totalScanned = 0;
@@ -436,7 +461,7 @@ export default function SharingAudit() {
         const url =
           `/api/admin/sharing-audit?user=${encodeURIComponent(user)}` +
           (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
-        const res = await tfetch(url, {}, pinnedTenantId);
+        const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           setError(data.error || "Audit failed");
@@ -460,7 +485,8 @@ export default function SharingAudit() {
         pageToken = page.nextPageToken;
       }
     } catch {
-      setError("Failed to connect to the API");
+      // An abort is the operator cancelling (or leaving) — not a failure.
+      if (!ac.signal.aborted) setError("Failed to connect to the API");
     } finally {
       setSingleLoading(false);
     }
@@ -468,6 +494,7 @@ export default function SharingAudit() {
 
   const cancelSingle = () => {
     singleCancelRef.current = true;
+    scanAbortRef.current?.abort();
   };
 
   // Resume a single-user audit from where it stopped — either because the
@@ -481,6 +508,8 @@ export default function SharingAudit() {
     // user A's page token against user B would scan the wrong Drive.
     const scanUser = singleResult.user;
     const pinnedTenantId = tenantId;
+    const ac = new AbortController();
+    scanAbortRef.current = ac;
     try {
       let pageToken: string | undefined = singleResult.nextPageToken;
       let totalScanned = singleResult.scannedFiles;
@@ -491,7 +520,7 @@ export default function SharingAudit() {
         const url =
           `/api/admin/sharing-audit?user=${encodeURIComponent(scanUser)}` +
           (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
-        const res = await tfetch(url, {}, pinnedTenantId);
+        const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           setError(data.error || "Audit failed");
@@ -513,7 +542,8 @@ export default function SharingAudit() {
         pageToken = page.nextPageToken;
       }
     } catch {
-      setError("Failed to connect to the API");
+      // An abort is the operator cancelling (or leaving) — not a failure.
+      if (!ac.signal.aborted) setError("Failed to connect to the API");
     } finally {
       setSingleLoading(false);
     }
@@ -537,6 +567,8 @@ export default function SharingAudit() {
     // Pin the tenant for the entire orchestrated scan so a mid-run switch
     // can't send later per-user audits to a different tenant.
     const pinnedTenantId = tenantId;
+    const ac = new AbortController();
+    scanAbortRef.current = ac;
 
     try {
       const allUsers: UserListItem[] = [];
@@ -544,7 +576,7 @@ export default function SharingAudit() {
       while (true) {
         const url =
           "/api/admin/users" + (pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : "");
-        const res = await tfetch(url, {}, pinnedTenantId);
+        const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           setError(data.error || "Failed to enumerate tenant users");
@@ -588,7 +620,7 @@ export default function SharingAudit() {
         try {
           const res = await tfetch(
             `/api/admin/sharing-audit?user=${encodeURIComponent(target.primaryEmail)}`,
-            {},
+            { signal: ac.signal },
             pinnedTenantId
           );
           const data = await res.json();
@@ -619,10 +651,22 @@ export default function SharingAudit() {
         } catch {
           setPerUser((prev) =>
             prev.map((p, idx) =>
-              idx === i ? { ...p, status: "error", error: "Request failed" } : p
+              idx === i
+                ? cancelRef.current
+                  ? { ...p, status: "skipped" }
+                  : { ...p, status: "error", error: "Request failed" }
+                : p
             )
           );
         }
+      }
+    } catch {
+      // Without this catch a network failure during user enumeration escaped
+      // as an unhandled rejection: no banner, no loading reset — the scan just
+      // silently froze. Aborts (cancel / tenant switch / unmount) are not
+      // failures.
+      if (!ac.signal.aborted) {
+        setError("Failed to enumerate tenant users — network error");
       }
     } finally {
       setTenantLoading(false);
@@ -631,6 +675,7 @@ export default function SharingAudit() {
 
   const cancelTenantWide = () => {
     cancelRef.current = true;
+    scanAbortRef.current?.abort();
   };
 
   // -------------------------------------------------------------------------
@@ -770,24 +815,53 @@ export default function SharingAudit() {
           !r.notFound
       );
 
-      // Optimistically remove fully-cleaned AND already-clean files from
-      // the result lists.
-      const cleanedIds = new Set([
-        ...filesCleaned.map((r) => r.fileId),
-        ...filesAlreadyClean.map((r) => r.fileId),
-      ]);
+      // Optimistically update the result lists. A file that revoked cleanly
+      // only leaves the list when NO external permissions remain: with a
+      // category filter active, its other-category externals are still live
+      // sharing, so dropping the whole file would hide real exposure. Instead
+      // strip the revoked categories from the row and keep it listed.
+      const revokedCategories = new Set(revokeTarget.categories);
+      const cleanOutcomes = new Map(
+        mergedResults
+          .filter((r) => r.errors.length === 0)
+          .map((r) => [r.fileId, r] as const)
+      );
+      const updateFiles = (files: ExternalFile[]): ExternalFile[] =>
+        files.flatMap((f) => {
+          const outcome = cleanOutcomes.get(f.id);
+          if (!outcome) return [f];
+          if (outcome.notFound) return [];
+          const remaining = f.external.filter(
+            (p) => !revokedCategories.has(p.type)
+          );
+          if (remaining.length === 0) return [];
+          return [
+            { ...f, external: remaining, externalCount: remaining.length },
+          ];
+        });
+      // Ids that will disappear from the list — selections must drop them too.
+      const droppedIds = new Set(
+        revokeTarget.files
+          .filter((f) => {
+            const outcome = cleanOutcomes.get(f.id);
+            if (!outcome) return false;
+            if (outcome.notFound) return true;
+            return f.external.every((p) => revokedCategories.has(p.type));
+          })
+          .map((f) => f.id)
+      );
       if (revokeTarget.scope.kind === "single") {
         setSingleResult((prev) =>
           prev
             ? {
                 ...prev,
-                files: prev.files.filter((f) => !cleanedIds.has(f.id)),
+                files: updateFiles(prev.files),
               }
             : prev
         );
         setSingleSelected((prev) => {
           const next = new Set(prev);
-          for (const id of cleanedIds) next.delete(id);
+          for (const id of droppedIds) next.delete(id);
           return next;
         });
       } else {
@@ -797,16 +871,14 @@ export default function SharingAudit() {
             i === idx
               ? {
                   ...p,
-                  files: (p.files ?? []).filter(
-                    (f) => !cleanedIds.has(f.id)
-                  ),
+                  files: updateFiles(p.files ?? []),
                 }
               : p
           )
         );
         setTenantSelected((prev) => {
           const cur = new Set(prev[idx] ?? []);
-          for (const id of cleanedIds) cur.delete(id);
+          for (const id of droppedIds) cur.delete(id);
           return { ...prev, [idx]: cur };
         });
       }
@@ -829,7 +901,7 @@ export default function SharingAudit() {
         filesAlreadyClean.length > 0
           ? ` ${filesAlreadyClean.length} file${
               filesAlreadyClean.length === 1 ? "" : "s"
-            } had nothing to remove — perms were likely already cleaned between the audit and this run, or fell outside your selected categories. Removed from the list.`
+            } had nothing to remove — perms were likely already cleaned between the audit and this run, or fell outside your selected categories. Files with no remaining external permissions were dropped from the list.`
           : "";
 
       // If we removed nothing and only had no-ops (no errors), the operator
@@ -841,7 +913,7 @@ export default function SharingAudit() {
         filesWithErrors.length === 0
           ? `No external permissions needed removal on the ${filesAlreadyClean.length} selected file${
               filesAlreadyClean.length === 1 ? "" : "s"
-            }. They have been cleaned from the list — re-run the audit to refresh.`
+            }. Files with no remaining external permissions were dropped from the list — re-run the audit to refresh.`
           : `Removed ${totalRemoved} external permission${
               totalRemoved === 1 ? "" : "s"
             } across ${filesCleaned.length} file${
@@ -905,6 +977,18 @@ export default function SharingAudit() {
     const truncatedUsers = perUser.filter((p) => p.truncated).length;
     return { done, errored, flaggedFiles, flaggedUsers, truncatedUsers };
   })();
+
+  // Collapse state is keyed by user index and can hold stale entries after a
+  // revoke empties a user's file list — count only indices that still have
+  // flagged files so the "X of Y collapsed" summary and button states stay
+  // truthful.
+  const collapsedFlaggedCount = useMemo(() => {
+    let n = 0;
+    for (const idx of collapsedUsers) {
+      if ((perUser[idx]?.files?.length ?? 0) > 0) n++;
+    }
+    return n;
+  }, [collapsedUsers, perUser]);
 
   const revokeChanges = useMemo(() => {
     if (!revokeTarget) return [];
@@ -1158,7 +1242,7 @@ export default function SharingAudit() {
               {tenantSummary && tenantSummary.flaggedUsers > 0 && (
                 <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-muted-foreground">
                   <span>
-                    {collapsedUsers.size} of {tenantSummary.flaggedUsers}{" "}
+                    {collapsedFlaggedCount} of {tenantSummary.flaggedUsers}{" "}
                     user
                     {tenantSummary.flaggedUsers === 1 ? "" : "s"} collapsed
                   </span>
@@ -1167,7 +1251,7 @@ export default function SharingAudit() {
                     variant="outline"
                     onClick={collapseAllUsers}
                     disabled={
-                      collapsedUsers.size === tenantSummary.flaggedUsers
+                      collapsedFlaggedCount === tenantSummary.flaggedUsers
                     }
                   >
                     <ChevronRight className="h-3 w-3 mr-1" />
@@ -1177,7 +1261,7 @@ export default function SharingAudit() {
                     size="xs"
                     variant="outline"
                     onClick={expandAllUsers}
-                    disabled={collapsedUsers.size === 0}
+                    disabled={collapsedFlaggedCount === 0}
                   >
                     <ChevronDown className="h-3 w-3 mr-1" />
                     Expand all
@@ -1343,7 +1427,7 @@ export default function SharingAudit() {
                           </div>
                           {p.truncated && (
                             <p className="text-xs text-amber-700 dark:text-amber-300">
-                              Audit was capped at 1,000 files — re-run after this completes to pick up the rest.
+                              Audit was capped at 1,000 files for this user — run a single-user audit on them to scan the rest.
                             </p>
                           )}
                           <div className="space-y-1.5">
@@ -1465,7 +1549,7 @@ export default function SharingAudit() {
                       <Button
                         size="sm"
                         variant="destructive"
-                        disabled={singleSelected.size === 0 || revokeBusy || noCategoriesSelected}
+                        disabled={singleSelected.size === 0 || revokeBusy || noCategoriesSelected || singleLoading}
                         onClick={() =>
                           startRevoke({
                             user: singleResult.user,
@@ -1489,7 +1573,7 @@ export default function SharingAudit() {
                             size="sm"
                             variant="destructive"
                             disabled={
-                              matching.length === 0 || revokeBusy || noCategoriesSelected
+                              matching.length === 0 || revokeBusy || noCategoriesSelected || singleLoading
                             }
                             onClick={() =>
                               startRevoke({
@@ -1511,7 +1595,7 @@ export default function SharingAudit() {
                   </div>
                   {singleResult.truncated && (
                     <p className="text-xs text-amber-700 dark:text-amber-300">
-                      Audit was capped at 1,000 files — re-run after this completes to pick up the rest.
+                      The scan stopped at the per-run cap — use Continue scanning above to pick up where it left off.
                     </p>
                   )}
                   <div className="space-y-2">
@@ -1531,7 +1615,7 @@ export default function SharingAudit() {
                             ),
                           })
                         }
-                        revokeDisabled={revokeBusy || noCategoriesSelected}
+                        revokeDisabled={revokeBusy || noCategoriesSelected || singleLoading}
                       />
                     ))}
                   </div>

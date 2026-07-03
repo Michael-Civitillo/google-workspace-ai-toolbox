@@ -182,6 +182,10 @@ export default function DriveTransfer() {
     if (!fromUser.trim() || !rootNextToken) return;
     setError(null);
     setRootLoading(true);
+    // Same staleness pin as loadRoot/loadChildren: if the tree was reset (new
+    // root load / user switch) while this page was in flight, discard it —
+    // otherwise the previous user's folders repopulate the emptied tree.
+    const seq = loadSeq.current;
     try {
       const res = await tfetch(
         `/api/admin/drive-transfer/folders?user=${encodeURIComponent(fromUser)}&pageToken=${encodeURIComponent(rootNextToken)}`,
@@ -189,6 +193,7 @@ export default function DriveTransfer() {
         tenantId
       );
       const data = await res.json();
+      if (seq !== loadSeq.current) return;
       if (!data.success) {
         setError(data.error || "Failed to load Drive folders");
         return;
@@ -221,6 +226,7 @@ export default function DriveTransfer() {
       });
       setRootNextToken(payload.nextPageToken);
     } catch {
+      if (seq !== loadSeq.current) return;
       setError("Failed to connect to the API");
     } finally {
       setRootLoading(false);
@@ -298,17 +304,41 @@ export default function DriveTransfer() {
     if (!node.expanded && !node.childrenLoaded) {
       await loadChildren(folderId);
     }
-    setNodes((prev) => ({
-      ...prev,
-      [folderId]: { ...prev[folderId], expanded: !prev[folderId].expanded },
-    }));
+    // The tree may have been reset while the children were loading (user
+    // switch mid-expand) — the guarded updater keeps this from dereferencing a
+    // node that no longer exists and crashing the render.
+    setNodes((prev) =>
+      prev[folderId]
+        ? {
+            ...prev,
+            [folderId]: { ...prev[folderId], expanded: !prev[folderId].expanded },
+          }
+        : prev
+    );
   }
 
   function toggleSelected(folderId: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(folderId)) next.delete(folderId);
-      else next.add(folderId);
+      if (next.has(folderId)) {
+        next.delete(folderId);
+        return next;
+      }
+      // Selecting a folder covers its whole subtree, so drop any
+      // already-selected descendants: as separate transfer roots the server
+      // would walk their subtrees twice, and their checkboxes would be stuck
+      // checked-but-disabled under the selected ancestor.
+      for (const id of next) {
+        let cur = nodes[id]?.parentId ?? null;
+        while (cur) {
+          if (cur === folderId) {
+            next.delete(id);
+            break;
+          }
+          cur = nodes[cur]?.parentId ?? null;
+        }
+      }
+      next.add(folderId);
       return next;
     });
   }
@@ -344,8 +374,12 @@ export default function DriveTransfer() {
     });
 
     // Snapshot the selection so a click after we kick off can't change what
-    // we're actually transferring mid-flight.
+    // we're actually transferring mid-flight. Trim the addresses once here —
+    // a pasted trailing space would otherwise fail the server's strict email
+    // validation after the operator already confirmed the dialog.
     const initialFolderIds = Array.from(selected);
+    const from = fromUser.trim();
+    const to = toUser.trim();
 
     let cursor: TransferCursor | null = null;
     let chunkIndex = 0;
@@ -361,8 +395,8 @@ export default function DriveTransfer() {
         chunkIndex++;
         const body =
           cursor === null
-            ? { fromUser, toUser, folderIds: initialFolderIds }
-            : { fromUser, toUser, cursor };
+            ? { fromUser: from, toUser: to, folderIds: initialFolderIds }
+            : { fromUser: from, toUser: to, cursor };
         let res: Response;
         try {
           res = await tfetch(
@@ -742,7 +776,7 @@ export default function DriveTransfer() {
         summary={`Transfer ${selected.size} folder${selected.size === 1 ? "" : "s"} (and everything inside) from ${fromUser} to ${toUser}.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="high"
-        confirmPhrase={toUser}
+        confirmPhrase={toUser.trim()}
         confirmLabel="Transfer ownership"
         busy={busy}
         changes={changes}

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { setActiveTenant } from "@/lib/tenants-server";
+import { setActiveTenant, TenantNotFoundError } from "@/lib/tenants-server";
 
 export async function POST(
   _req: NextRequest,
@@ -11,6 +11,10 @@ export async function POST(
     return NextResponse.json({ success: true, activeTenantId: id });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // A stale client activating a just-deleted tenant is a caller error, not a
+    // server fault — answer 404 so the UI can refresh its list instead of
+    // treating it as an outage.
+    const status = error instanceof TenantNotFoundError ? 404 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

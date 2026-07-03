@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -69,16 +69,27 @@ export default function CalendarDelegation() {
     text: string;
   } | null>(null);
 
+  // Live tenant id for staleness checks inside async closures.
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
+
   const listAcl = async () => {
     if (!calendarId) return;
     setLoading(true);
     setMessage(null);
+    // Pin the tenant this list belongs to, and discard the response if the
+    // tenant changed while it was in flight — otherwise a stale tenant-A list
+    // repopulates the UI under tenant B and defeats the listedCalendar guard.
+    const pinnedTenantId = tenantId;
 
     try {
       const res = await tfetch(
-        `/api/gws/calendar-delegation?calendarId=${encodeURIComponent(calendarId)}`
+        `/api/gws/calendar-delegation?calendarId=${encodeURIComponent(calendarId)}`,
+        {},
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success && result.data?.items) {
         setAclRules(result.data.items);
@@ -115,20 +126,33 @@ export default function CalendarDelegation() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ calendarId, delegateEmail, role }),
+          body: JSON.stringify({
+            calendarId,
+            delegateEmail,
+            role,
+            // The dialog already made the operator type the delegate email for
+            // owner grants; relay that confirmation so the server's
+            // external-owner gate accepts intentional external grants.
+            confirmExternal:
+              role === "owner" ? delegateEmail.trim() : undefined,
+          }),
         },
         tenantId
       );
       const result = await res.json();
 
       if (result.success) {
-        setMessage({
-          type: "success",
-          text: `Granted ${role} access to ${delegateEmail}`,
-        });
+        const grantedTo = delegateEmail;
         setDelegateEmail("");
         setConfirmAddOpen(false);
+        // Refresh first, then set the message: listAcl clears messages in its
+        // synchronous prologue, so setting it earlier batches a set+clear into
+        // one render and the success feedback is never painted.
         await listAcl();
+        setMessage({
+          type: "success",
+          text: `Granted ${role} access to ${grantedTo}`,
+        });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to add access" });
       }
@@ -158,9 +182,11 @@ export default function CalendarDelegation() {
       const result = await res.json();
 
       if (result.success) {
-        setMessage({ type: "success", text: "Access removed successfully" });
         setConfirmRemove(null);
+        // Refresh before messaging — listAcl's prologue clears messages, which
+        // would erase this success text in the same batched render.
         await listAcl();
+        setMessage({ type: "success", text: "Access removed successfully" });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to remove access" });
       }

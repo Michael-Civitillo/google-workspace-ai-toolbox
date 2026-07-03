@@ -45,6 +45,14 @@ export async function POST(request: NextRequest) {
     if (!Array.isArray(rawFileIds) || rawFileIds.length === 0) {
       throw new ValidationError("fileIds must be a non-empty array");
     }
+    // Mirror admin-sdk's REVOKE_FILE_CAP here so an oversized batch is a 400
+    // (client error) rather than surfacing as a generic 500 from the throw
+    // inside revokeExternalPermissions.
+    if (rawFileIds.length > 200) {
+      throw new ValidationError(
+        "Too many files in one revoke batch — cap is 200"
+      );
+    }
     const fileIds: string[] = [];
     for (const f of rawFileIds) {
       if (typeof f !== "string") {

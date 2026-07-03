@@ -185,6 +185,9 @@ export default function TenantsPage() {
 
   async function handleDelete(id: string) {
     setSaving(true);
+    // Clear a stale banner (matching handleAdd/handleUpdate) so a message from
+    // an earlier failed attempt can't outlive a retry that succeeds.
+    setError(null);
     try {
       const res = await fetch(`/api/tenants/${id}`, { method: "DELETE" });
       if (res.ok) {
@@ -207,6 +210,9 @@ export default function TenantsPage() {
 
   async function handleActivate(id: string) {
     setSwitching(id);
+    // Clear a stale banner (matching handleAdd/handleUpdate) so a message from
+    // an earlier failed attempt can't outlive a retry that succeeds.
+    setError(null);
     try {
       const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
       if (res.ok) {

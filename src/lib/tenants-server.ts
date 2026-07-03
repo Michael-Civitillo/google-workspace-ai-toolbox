@@ -59,12 +59,18 @@ function readStore(): TenantStore {
   try {
     raw = readFileSync(STORE_PATH, "utf-8");
   } catch (e) {
-    // A read failure is NOT corruption — it can be transient (EBUSY/EMFILE, an
-    // antivirus / Search Indexer lock on Windows, fd exhaustion). Quarantining
-    // here would permanently evict a healthy store on a blip. Surface the error
-    // instead: the file stays intact, the next read succeeds, and a
-    // read-modify-write under withLock aborts rather than persisting an empty
-    // store over the real config.
+    // The existsSync above raced a delete (external cleanup or a concurrent
+    // quarantine rename): a missing file is the same benign "no store yet"
+    // state as the guard at the top, not an error.
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { activeTenantId: null, tenants: [] };
+    }
+    // Any other read failure is NOT corruption — it can be transient
+    // (EBUSY/EMFILE, an antivirus / Search Indexer lock on Windows, fd
+    // exhaustion). Quarantining here would permanently evict a healthy store on
+    // a blip. Surface the error instead: the file stays intact, the next read
+    // succeeds, and a read-modify-write under withLock aborts rather than
+    // persisting an empty store over the real config.
     throw new Error(
       `Failed to read tenant store at ${STORE_PATH}: ${
         e instanceof Error ? e.message : String(e)
@@ -82,6 +88,13 @@ function readStore(): TenantStore {
 
   try {
     const parsed = JSON.parse(raw);
+    // Parseable but not an object (a bare scalar, array, or null) is just as
+    // corrupt as unparseable content — quarantine it too, or the next write
+    // would silently overwrite the evidence with an empty store.
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      quarantineStore();
+      return { activeTenantId: null, tenants: [] };
+    }
     return {
       activeTenantId: parsed.activeTenantId ?? null,
       tenants: Array.isArray(parsed.tenants) ? parsed.tenants : [],
@@ -168,8 +181,30 @@ async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
   }
 }
 
+/** Thrown when a caller names a tenant id that doesn't exist — routes map it to 404. */
+export class TenantNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Tenant "${id}" not found`);
+    this.name = "TenantNotFoundError";
+  }
+}
+
 export function getTenants(): Tenant[] {
   return readStore().tenants;
+}
+
+/**
+ * One consistent view of the store for callers that need both the list and the
+ * active id. Two separate getters would read the file twice, and a concurrent
+ * write between the reads could pair a fresh list with a stale active id (or
+ * vice versa).
+ */
+export function getTenantStoreSnapshot(): {
+  tenants: Tenant[];
+  activeTenantId: string | null;
+} {
+  const store = readStore();
+  return { tenants: store.tenants, activeTenantId: store.activeTenantId };
 }
 
 export function getTenantById(id: string): Tenant | null {
@@ -215,7 +250,7 @@ export async function setActiveTenant(id: string): Promise<void> {
   await withLock(async () => {
     const store = readStore();
     const tenant = store.tenants.find((t) => t.id === id);
-    if (!tenant) throw new Error(`Tenant "${id}" not found`);
+    if (!tenant) throw new TenantNotFoundError(id);
     store.activeTenantId = id;
     await writeStoreAtomic(store);
   });
@@ -243,7 +278,7 @@ export async function updateTenant(
   return withLock(async () => {
     const store = readStore();
     const idx = store.tenants.findIndex((t) => t.id === id);
-    if (idx === -1) throw new Error(`Tenant "${id}" not found`);
+    if (idx === -1) throw new TenantNotFoundError(id);
     store.tenants[idx] = { ...store.tenants[idx], ...updates };
     await writeStoreAtomic(store);
     return store.tenants[idx];
@@ -254,7 +289,7 @@ export async function deleteTenant(id: string): Promise<void> {
   await withLock(async () => {
     const store = readStore();
     const idx = store.tenants.findIndex((t) => t.id === id);
-    if (idx === -1) throw new Error(`Tenant "${id}" not found`);
+    if (idx === -1) throw new TenantNotFoundError(id);
     store.tenants.splice(idx, 1);
     if (store.activeTenantId === id) {
       store.activeTenantId = store.tenants[0]?.id ?? null;

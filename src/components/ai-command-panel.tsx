@@ -93,7 +93,15 @@ export function AICommandPanel() {
     }
   };
 
-  const isDestructive = !!parsed && DESTRUCTIVE_ACTIONS.has(parsed.action);
+  const isDestructive =
+    !!parsed &&
+    (DESTRUCTIVE_ACTIONS.has(parsed.action) ||
+      // Owner-level calendar delegation is the same grant a calendar transfer
+      // performs — full control, re-sharing, deletion. The dedicated page's
+      // high-severity typed confirmation must not be bypassable simply by
+      // phrasing the command as a delegation instead of a transfer.
+      (parsed.action === "calendar_delegation_add" &&
+        parsed.params?.role === "owner"));
   const canRun =
     !!parsed && parsed.validParams && !!parsed.actionDetails && !isDestructive;
 
@@ -207,7 +215,7 @@ export function AICommandPanel() {
               placeholder={`e.g. "Give sarah@company.com access to john@company.com's mailbox"`}
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && parseCommand()}
+              onKeyDown={(e) => e.key === "Enter" && !parsing && parseCommand()}
               className="text-base"
             />
             <Button onClick={parseCommand} disabled={!command.trim() || parsing}>

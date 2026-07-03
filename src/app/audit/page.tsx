@@ -21,6 +21,10 @@ export default function Audit() {
   const [user, setUser] = useState("");
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState("");
+  // The user the displayed report actually belongs to. The header must not
+  // render the live input — typing the NEXT audit's address would relabel the
+  // still-displayed findings as someone else's.
+  const [summaryUser, setSummaryUser] = useState("");
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -42,6 +46,7 @@ export default function Audit() {
 
       if (result.success) {
         setSummary(result.data.summary);
+        setSummaryUser(result.data.user || user.trim());
       } else {
         setMessage({
           type: "error",
@@ -201,7 +206,7 @@ export default function Audit() {
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
                 <FileText className="h-5 w-5" />
-                Audit Report — {user}
+                Audit Report — {summaryUser}
               </CardTitle>
             </CardHeader>
             <CardContent>
