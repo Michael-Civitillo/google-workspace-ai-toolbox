@@ -18,6 +18,10 @@ import {
   FolderTree,
   Download,
   Upload,
+  ScrollText,
+  Users,
+  Activity,
+  Layers,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -55,6 +59,10 @@ const navigation = [
     ],
   },
   {
+    label: "Directory",
+    items: [{ name: "Groups", href: "/groups", icon: Users }],
+  },
+  {
     label: "Lifecycle",
     items: [
       { name: "Domain Change", href: "/domain-change", icon: Globe },
@@ -69,10 +77,16 @@ const navigation = [
     ],
   },
   {
+    label: "Bulk",
+    items: [{ name: "Bulk Operations", href: "/bulk", icon: Layers }],
+  },
+  {
     label: "Audits",
     items: [
       { name: "Sharing Audit", href: "/sharing-audit", icon: Share2 },
       { name: "User Audit", href: "/audit", icon: Shield },
+      { name: "Activity Reports", href: "/activity-reports", icon: Activity },
+      { name: "Audit Log", href: "/audit-log", icon: ScrollText },
     ],
   },
   {
@@ -128,7 +142,7 @@ export function Sidebar() {
               {group.items.map((item) => {
                 const isActive =
                   pathname === item.href ||
-                  (item.href !== "/" && pathname.startsWith(item.href));
+                  (item.href !== "/" && pathname.startsWith(item.href + "/"));
                 return (
                   <Link
                     key={item.name}

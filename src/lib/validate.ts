@@ -6,22 +6,16 @@
  * like a real Google Workspace identifier.
  */
 
-// Practical, conservative email regex. Rejects spaces, control chars, leading
-// dashes, and anything without a plausible domain. Not RFC 5322 — intentional.
-// Apostrophes are included in the local part: Google Workspace allows them in
-// usernames (e.g. o'brien@…), and rejecting one here would lock every flow out
-// of operating on that account.
-const EMAIL_RE =
-  /^(?!-)[A-Za-z0-9._%+'\-]{1,64}@(?!-)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+// Email validation lives in validate-email.ts (client-safe module — this file
+// imports node:path further down, which browser bundles must never see).
+// Re-exported here so server code keeps its single import site.
+import { isValidEmail } from "./validate-email";
+export { isValidEmail };
 
 const DOMAIN_RE =
   /^(?!-)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 
 const USERNAME_RE = /^[A-Za-z0-9._%+'\-]{1,64}$/;
-
-export function isValidEmail(s: unknown): s is string {
-  return typeof s === "string" && s.length <= 254 && EMAIL_RE.test(s);
-}
 
 export function isValidDomain(s: unknown): s is string {
   return typeof s === "string" && s.length <= 253 && DOMAIN_RE.test(s);
