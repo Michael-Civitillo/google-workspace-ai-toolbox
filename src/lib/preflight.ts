@@ -151,6 +151,28 @@ export async function preflightTenantScopes(
     );
   }
 
+  // Bound each token exchange. authorize() has no default timeout, so one
+  // stalled connection to Google's OAuth endpoint would otherwise hang the
+  // whole preflight (and the operator's "Check DWD scopes" spinner) forever.
+  const AUTHORIZE_TIMEOUT_MS = 15_000;
+  const withTimeout = <T>(p: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout>;
+    return Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Token exchange timed out after ${AUTHORIZE_TIMEOUT_MS / 1000}s`
+              )
+            ),
+          AUTHORIZE_TIMEOUT_MS
+        );
+      }),
+    ]).finally(() => clearTimeout(timer)) as Promise<T>;
+  };
+
   // Run scope checks in parallel — Google's OAuth endpoint handles the
   // concurrency fine and the operator gets results in one round-trip's
   // worth of wall time rather than N.
@@ -163,7 +185,7 @@ export async function preflightTenantScopes(
           scopes: [scope],
           subject: tenant.adminEmail,
         });
-        await auth.authorize();
+        await withTimeout(auth.authorize());
         return {
           scope,
           label,

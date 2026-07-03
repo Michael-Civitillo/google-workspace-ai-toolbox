@@ -137,7 +137,15 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     .sort()
     .join(",")}|${stat.mtimeMs}|${stat.size}`;
   const cached = jwtCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // Touch for recency: Map iterates in insertion order, so re-inserting on
+    // every hit makes the size-cap eviction below LRU instead of FIFO. Without
+    // this, a long per-user impersonation sweep (sharing audit) evicts the hot
+    // admin JWT and every Admin SDK call pays a fresh token grant.
+    jwtCache.delete(cacheKey);
+    jwtCache.set(cacheKey, cached);
+    return cached;
+  }
 
   const creds = loadCredentials(credFile);
   const jwt = new google.auth.JWT({
@@ -327,10 +335,31 @@ export async function userExists(
   }
 }
 
+/**
+ * Short-TTL cache for the tenant's domain list. Chunked flows (drive-transfer
+ * continuations, revoke batches, tenant-wide audits) re-derive the verified
+ * set on every request, gating each chunk behind an extra serial round trip to
+ * Google. Domain verification changes on the order of days, so a 60s window is
+ * safe; only successful fetches are cached, and the key includes the
+ * credentials + admin identity so editing a tenant can't serve another
+ * tenant's domains.
+ */
+const DOMAINS_CACHE_TTL_MS = 60_000;
+const DOMAINS_CACHE_MAX = 100;
+const domainsCache = new Map<string, { at: number; domains: DomainInfo[] }>();
+
 /** List all domains in the Google Workspace tenant. */
 export async function listDomains(
   tenant: Tenant | null
 ): Promise<DomainInfo[]> {
+  const cacheKey = `${tenant?.id ?? "env"}|${tenant?.credentialsFile ?? ""}|${
+    tenant?.adminEmail ?? ""
+  }`;
+  const cached = domainsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DOMAINS_CACHE_TTL_MS) {
+    return cached.domains;
+  }
+
   const { client } = getAdminClient(tenant);
   const res = await withGoogleRetry(
     () =>
@@ -341,11 +370,17 @@ export async function listDomains(
     { retryServerErrors: true }
   );
 
-  return (res.data.domains || []).map((d) => ({
+  const domains = (res.data.domains || []).map((d) => ({
     domainName: (d.domainName || "").toLowerCase(),
     isPrimary: d.isPrimary || false,
     verified: d.verified || false,
   }));
+  if (domainsCache.size >= DOMAINS_CACHE_MAX) {
+    const oldest = domainsCache.keys().next().value;
+    if (oldest !== undefined) domainsCache.delete(oldest);
+  }
+  domainsCache.set(cacheKey, { at: Date.now(), domains });
+  return domains;
 }
 
 /**
@@ -507,13 +542,21 @@ export async function changePrimaryDomain(
     { timeout: ADMIN_API_TIMEOUT_MS }
   );
 
-  const after = await client.users.get(
-    {
-      userKey: newEmail,
-      projection: "basic",
-      fields: "primaryEmail",
-    },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  // Retry the read-after-write verification: the rename above has already
+  // committed, so failing here on a transient blip would report a successful
+  // change as failed — and a re-run then dead-ends on a confusing
+  // "already in use" conflict for the new address.
+  const after = await withGoogleRetry(
+    () =>
+      client.users.get(
+        {
+          userKey: newEmail,
+          projection: "basic",
+          fields: "primaryEmail",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
 
   return {
@@ -628,26 +671,41 @@ export async function revokeAllOAuthTokens(
   let revoked = 0;
   let failed = 0;
   const errors: Array<{ clientId: string; message: string }> = [];
-  for (const t of tokens) {
-    try {
-      await withGoogleRetry(
-        () =>
-          client.tokens.delete(
-            { userKey: userEmail, clientId: t.clientId },
-            { timeout: ADMIN_API_TIMEOUT_MS }
-          ),
-        { retryServerErrors: true }
-      );
-      revoked++;
-    } catch (e) {
-      failed++;
-      // Keep the reason: "3 tokens failed to revoke" is undiagnosable without it.
-      errors.push({
-        clientId: t.clientId,
-        message: e instanceof Error ? e.message : String(e),
-      });
+  // Delete with bounded concurrency: each revoke is an independent, idempotent
+  // delete, so a serial walk just multiplies the offboarding step's latency by
+  // the token count. 5 in flight stays far under Admin SDK quotas while the
+  // retry layer absorbs the occasional 429.
+  const REVOKE_TOKEN_CONCURRENCY = 5;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < tokens.length) {
+      const t = tokens[cursor++];
+      try {
+        await withGoogleRetry(
+          () =>
+            client.tokens.delete(
+              { userKey: userEmail, clientId: t.clientId },
+              { timeout: ADMIN_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
+        );
+        revoked++;
+      } catch (e) {
+        failed++;
+        // Keep the reason: "3 tokens failed to revoke" is undiagnosable without it.
+        errors.push({
+          clientId: t.clientId,
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
-  }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(REVOKE_TOKEN_CONCURRENCY, tokens.length) },
+      worker
+    )
+  );
   return { revoked, failed, errors };
 }
 
@@ -670,9 +728,13 @@ async function resolveDriveAppId(
 ): Promise<string> {
   if (cachedDriveAppId) return cachedDriveAppId;
 
-  const res = await transfer.applications.list(
-    { customerId: "my_customer" },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  const res = await withGoogleRetry(
+    () =>
+      transfer.applications.list(
+        { customerId: "my_customer" },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
   );
   const apps = res.data.applications || [];
   // Match by name, preferring an exact "Drive and Docs" but tolerating a minor
@@ -713,13 +775,21 @@ export async function transferDrive(
   // Look up the user IDs Google requires for the transfer call.
   const { client } = getAdminClient(tenant);
   const [fromU, toU] = await Promise.all([
-    client.users.get(
-      { userKey: fromUser, projection: "basic", fields: "id" },
-      { timeout: ADMIN_API_TIMEOUT_MS }
+    withGoogleRetry(
+      () =>
+        client.users.get(
+          { userKey: fromUser, projection: "basic", fields: "id" },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
     ),
-    client.users.get(
-      { userKey: toUser, projection: "basic", fields: "id" },
-      { timeout: ADMIN_API_TIMEOUT_MS }
+    withGoogleRetry(
+      () =>
+        client.users.get(
+          { userKey: toUser, projection: "basic", fields: "id" },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
     ),
   ]);
   const fromId = fromU.data.id;
@@ -730,25 +800,32 @@ export async function transferDrive(
 
   const transfer = getDataTransferClient(tenant);
   const applicationId = await resolveDriveAppId(transfer);
-  const res = await transfer.transfers.insert(
-    {
-      requestBody: {
-        oldOwnerUserId: fromId,
-        newOwnerUserId: toId,
-        applicationDataTransfers: [
-          {
-            applicationId,
-            applicationTransferParams: [
-              // Transfer both private and shared items; do not release source
-              // ownership of items still required (RELEASE_RESOURCES=FALSE
-              // would leave reshare permissions; default behaviour is fine).
-              { key: "PRIVACY_LEVEL", value: ["PRIVATE", "SHARED"] },
+  // 429-only retry: a rate-limited insert never reached Google's store, so
+  // backing off is safe, while a 5xx might have registered the transfer and a
+  // blind retry could duplicate it.
+  const res = await withGoogleRetry(
+    () =>
+      transfer.transfers.insert(
+        {
+          requestBody: {
+            oldOwnerUserId: fromId,
+            newOwnerUserId: toId,
+            applicationDataTransfers: [
+              {
+                applicationId,
+                applicationTransferParams: [
+                  // Transfer both private and shared items; do not release source
+                  // ownership of items still required (RELEASE_RESOURCES=FALSE
+                  // would leave reshare permissions; default behaviour is fine).
+                  { key: "PRIVACY_LEVEL", value: ["PRIVATE", "SHARED"] },
+                ],
+              },
             ],
           },
-        ],
-      },
-    },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: false }
   );
 
   const id = res.data.id;
@@ -828,6 +905,14 @@ export async function listExternallySharedFiles(
       .filter((d) => d.verified)
       .map((d) => d.domainName.toLowerCase())
   );
+  // Fail closed, mirroring the revoke path: with an empty verified set every
+  // internal collaborator classifies as external, so the audit would flag the
+  // entire Drive and invite a mass (refused, but alarming) remediation.
+  if (verifiedDomains.size === 0) {
+    throw new Error(
+      "No verified domains resolved for this tenant — refusing to run the sharing audit, as every collaborator would be misclassified as external. Check the tenant's domain configuration and try again."
+    );
+  }
 
   const drive = getDriveClient(tenant, userEmail);
 
@@ -835,7 +920,16 @@ export async function listExternallySharedFiles(
   let scanned = 0;
   let pageToken: string | undefined = startPageToken || undefined;
 
-  while (scanned < SHARING_AUDIT_FILE_CAP) {
+  // Belt alongside the file cap: Drive can return sparse (even empty) pages
+  // while still supplying a nextPageToken, so a call bounded only by files
+  // scanned could chain an unbounded number of list requests. The page bound
+  // keeps one route invocation's latency predictable; anything left resumes
+  // via the returned nextPageToken as usual.
+  const SHARING_AUDIT_MAX_PAGES = 50;
+  let pagesFetched = 0;
+
+  while (scanned < SHARING_AUDIT_FILE_CAP && pagesFetched < SHARING_AUDIT_MAX_PAGES) {
+    pagesFetched++;
     const remaining = SHARING_AUDIT_FILE_CAP - scanned;
     const res: { data: drive_v3.Schema$FileList } = await withGoogleRetry(
       () =>
@@ -1036,15 +1130,27 @@ export async function resolveFilePaths(
         segments.unshift("(unknown folder)");
         break;
       }
-      segments.unshift(folder.name);
       if (folder.parents.length === 0) {
+        // A parentless node is normally the root container itself — My Drive's
+        // root folder (named "My Drive") or a Shared Drive's root folder (named
+        // after the drive) — so including its own name would duplicate the root
+        // label: "My Drive / My Drive / …". Keep the name only when it differs,
+        // which means we hit an orphaned folder rather than the real root.
         if (folder.driveId) {
-          segments.unshift(await resolveDriveName(folder.driveId));
+          const label = await resolveDriveName(folder.driveId);
+          if (folder.name && label !== `Shared Drive: ${folder.name}`) {
+            segments.unshift(folder.name);
+          }
+          segments.unshift(label);
         } else {
+          if (folder.name && folder.name !== "My Drive") {
+            segments.unshift(folder.name);
+          }
           segments.unshift("My Drive");
         }
         break;
       }
+      segments.unshift(folder.name);
       currentId = folder.parents[0];
       if (i === PATH_RESOLVE_MAX_DEPTH - 1) depthExceeded = true;
     }
@@ -1109,7 +1215,7 @@ function classifyPermission(
   return null;
 }
 
-function isNotFoundError(e: unknown): boolean {
+export function isNotFoundError(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
   const err = e as { code?: number; status?: number; response?: { status?: number } };
   return (
@@ -1553,34 +1659,46 @@ export async function listDriveFolders(
   const escapedParent = effectiveParent.replace(/'/g, "\\'");
   const q = `'${escapedParent}' in parents and mimeType = '${DRIVE_FOLDER_MIME}' and trashed = false and 'me' in owners`;
 
-  const res = await drive.files.list(
-    {
-      q,
-      fields: "nextPageToken, files(id, name, ownedByMe)",
-      pageSize: 200,
-      pageToken,
-      orderBy: "name",
-      // Restrict to the user's corpus — keeps shared-drive items out.
-      corpora: "user",
-    },
-    { timeout: ADMIN_API_TIMEOUT_MS }
-  );
-
-  let parent: { id: string; name: string } | null = null;
-  if (parentId) {
-    try {
-      const meta = await drive.files.get(
-        { fileId: parentId, fields: "id, name" },
-        { timeout: ADMIN_API_TIMEOUT_MS }
-      );
-      parent = {
-        id: meta.data.id || parentId,
-        name: meta.data.name || "(folder)",
-      };
-    } catch {
-      parent = { id: parentId, name: "(folder)" };
-    }
-  }
+  // The children listing and the parent-name lookup are independent — run them
+  // concurrently (and with the standard retry) so every folder-picker
+  // navigation costs one round trip instead of two.
+  const [res, parent] = await Promise.all([
+    withGoogleRetry(
+      () =>
+        drive.files.list(
+          {
+            q,
+            fields: "nextPageToken, files(id, name, ownedByMe)",
+            pageSize: 200,
+            pageToken,
+            orderBy: "name",
+            // Restrict to the user's corpus — keeps shared-drive items out.
+            corpora: "user",
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    ),
+    (async (): Promise<{ id: string; name: string } | null> => {
+      if (!parentId) return null;
+      try {
+        const meta = await withGoogleRetry(
+          () =>
+            drive.files.get(
+              { fileId: parentId, fields: "id, name" },
+              { timeout: ADMIN_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
+        );
+        return {
+          id: meta.data.id || parentId,
+          name: meta.data.name || "(folder)",
+        };
+      } catch {
+        return { id: parentId, name: "(folder)" };
+      }
+    })(),
+  ]);
 
   const folders: DriveFolderEntry[] = (res.data.files || []).map((f) => ({
     id: f.id || "",
@@ -1780,6 +1898,11 @@ export async function transferDriveFoldersOwnership(
     queue: [...cursor.queue],
     current: cursor.current ? { ...cursor.current } : null,
   };
+  // Every folder known to this call — queued, in progress, or dequeued during
+  // the loop below. Discovered subfolders already in here are NOT re-enqueued
+  // (a selection of a parent plus its subfolder would walk the subtree twice).
+  const enqueuedFolders = new Set<string>(local.queue);
+  if (local.current) enqueuedFolders.add(local.current.folderId);
 
   const out: DriveTransferProgress = {
     transferred: 0,
@@ -1832,7 +1955,12 @@ export async function transferDriveFoldersOwnership(
           drive.files.list(
             {
               q,
-              fields: "nextPageToken, files(id, name, mimeType)",
+              // ownedByMe + owners let us classify non-owned children straight
+              // from the listing instead of spending a permissions.list plus a
+              // guaranteed-failing ownership write on every item the source
+              // user doesn't own.
+              fields:
+                "nextPageToken, files(id, name, mimeType, ownedByMe, owners(emailAddress))",
               pageSize,
               pageToken: local.current!.pageToken ?? undefined,
               corpora: "user",
@@ -1870,7 +1998,21 @@ export async function transferDriveFoldersOwnership(
         const child = children[childCursor++];
         const childId = child.id;
         if (!childId) continue;
-        const result = await transferOneItem(drive, childId, toUserLower);
+        let result: TransferOneOutcome;
+        if (child.ownedByMe === false) {
+          // Not the source user's item — no transfer is possible, so classify
+          // from the listing metadata without any per-item API calls. Folders
+          // still get enqueued below: a non-owned subfolder can contain files
+          // the departing user DOES own.
+          const ownerEmails = (child.owners || []).map((o) =>
+            (o.emailAddress || "").toLowerCase()
+          );
+          result = ownerEmails.includes(toUserLower)
+            ? { kind: "alreadyOwned" }
+            : { kind: "notOwned", reason: "Not owned by the source user" };
+        } else {
+          result = await transferOneItem(drive, childId, toUserLower);
+        }
         applyTransferResult(out, childId, child.name ?? null, result);
         if (child.mimeType === DRIVE_FOLDER_MIME) {
           discoveredFolders.push({ id: childId, name: child.name ?? null });
@@ -1884,6 +2026,10 @@ export async function transferDriveFoldersOwnership(
       )
     );
     for (const f of discoveredFolders) {
+      // Skip folders already awaiting (or having had) a walk this call — a
+      // selection containing both a parent and its subfolder would otherwise
+      // walk that subtree twice, doubling the API spend and inflating counters.
+      if (enqueuedFolders.has(f.id)) continue;
       if (local.queue.length >= TRANSFER_QUEUE_HARD_CAP) {
         out.errors.push({
           id: f.id,
@@ -1892,6 +2038,7 @@ export async function transferDriveFoldersOwnership(
             "Skipped: cursor queue hard cap reached — re-run after this chunk completes",
         });
       } else {
+        enqueuedFolders.add(f.id);
         local.queue.push(f.id);
       }
     }
@@ -2031,6 +2178,40 @@ async function transferOneItem(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (isNotOwnerError(msg)) {
+      // "Not the current owner" can also mean the ownership ALREADY moved: a
+      // 5xx-committed first attempt whose retry now fails, or a concurrent
+      // chunk that beat us to the same item. Verify before misreporting a
+      // completed transfer as notOwned — this path is rare (owned items only
+      // reach here through those races), so the extra read is cheap.
+      try {
+        let pageToken: string | undefined;
+        do {
+          const check = await withGoogleRetry(
+            () =>
+              drive.permissions.list(
+                {
+                  fileId,
+                  fields: "nextPageToken, permissions(type, role, emailAddress)",
+                  pageSize: 100,
+                  pageToken,
+                  supportsAllDrives: true,
+                },
+                { timeout: ADMIN_API_TIMEOUT_MS }
+              ),
+            { retryServerErrors: true }
+          );
+          const nowOwner = (check.data.permissions || []).some(
+            (p) =>
+              p.type === "user" &&
+              (p.emailAddress || "").toLowerCase() === toUserLower &&
+              p.role === "owner"
+          );
+          if (nowOwner) return { kind: "transferred" };
+          pageToken = check.data.nextPageToken ?? undefined;
+        } while (pageToken);
+      } catch {
+        // Verification unavailable — fall through to the original outcome.
+      }
       return { kind: "notOwned", reason: msg };
     }
     return { kind: "error", message: msg };
@@ -2499,6 +2680,10 @@ export async function resolveImportLabels(
   await refreshExisting();
 
   const map: Record<string, string> = {};
+  // Labels that need an API round trip (create, or conflict-resolve). Mapped
+  // sequentially below only in the cheap in-memory cases.
+  const pending: Array<{ sourceId: string; name: string; nameLower: string }> =
+    [];
   for (const sl of sourceLabels) {
     const sourceId = sl?.id;
     if (!sourceId || !GMAIL_LABEL_ID_RE.test(sourceId)) continue;
@@ -2522,42 +2707,79 @@ export async function resolveImportLabels(
       map[sourceId] = existing;
       continue;
     }
-
-    try {
-      // Safe to retry server errors: a 5xx that actually created the label
-      // surfaces as a 409 on the retry, which the catch below turns into a
-      // re-list + map rather than a duplicate.
-      const created = await withGoogleRetry(
-        () =>
-          gmail.users.labels.create(
-            {
-              userId: "me",
-              requestBody: {
-                name,
-                labelListVisibility: "labelShow",
-                messageListVisibility: "show",
-              },
-            },
-            { timeout: MAILBOX_API_TIMEOUT_MS }
-          ),
-        { retryServerErrors: true }
-      );
-      if (created.data.id) {
-        map[sourceId] = created.data.id;
-        byNameLower.set(nameLower, created.data.id);
-      }
-    } catch (e) {
-      // A racing create (or a name that already exists under a different case)
-      // surfaces as a conflict — re-list and map to whatever now exists.
-      if (isAlreadyExistsError(e)) {
-        await refreshExisting();
-        const now = byNameLower.get(nameLower);
-        if (now) map[sourceId] = now;
-      }
-      // Any other failure: skip this label. The message still imports, just
-      // without this one tag (import is resilient by design).
-    }
+    pending.push({ sourceId, name, nameLower });
   }
+
+  // Share one in-flight re-list between concurrently conflicting workers.
+  let refreshing: Promise<void> | null = null;
+  const refreshOnce = () => {
+    if (!refreshing) {
+      refreshing = refreshExisting().finally(() => {
+        refreshing = null;
+      });
+    }
+    return refreshing;
+  };
+
+  // Create missing labels with bounded concurrency: creates are independent,
+  // and a serial walk turns a label-heavy mailbox (Gmail allows up to 10,000)
+  // into a minutes-long stall of the labels route. Conflicts from duplicate
+  // names in flight resolve through the shared re-list below, exactly like the
+  // serial version did.
+  const LABEL_CREATE_CONCURRENCY = 5;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < pending.length) {
+      const item = pending[cursor++];
+      // An earlier worker may have created this name (case-variant duplicates
+      // in the export) — map without another round trip.
+      const existing = byNameLower.get(item.nameLower);
+      if (existing) {
+        map[item.sourceId] = existing;
+        continue;
+      }
+      try {
+        // Safe to retry server errors: a 5xx that actually created the label
+        // surfaces as a 409 on the retry, which the catch below turns into a
+        // re-list + map rather than a duplicate.
+        const created = await withGoogleRetry(
+          () =>
+            gmail.users.labels.create(
+              {
+                userId: "me",
+                requestBody: {
+                  name: item.name,
+                  labelListVisibility: "labelShow",
+                  messageListVisibility: "show",
+                },
+              },
+              { timeout: MAILBOX_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
+        );
+        if (created.data.id) {
+          map[item.sourceId] = created.data.id;
+          byNameLower.set(item.nameLower, created.data.id);
+        }
+      } catch (e) {
+        // A racing create (or a name that already exists under a different case)
+        // surfaces as a conflict — re-list and map to whatever now exists.
+        if (isAlreadyExistsError(e)) {
+          await refreshOnce();
+          const now = byNameLower.get(item.nameLower);
+          if (now) map[item.sourceId] = now;
+        }
+        // Any other failure: skip this label. The message still imports, just
+        // without this one tag (import is resilient by design).
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(LABEL_CREATE_CONCURRENCY, pending.length || 1) },
+      worker
+    )
+  );
   return map;
 }
 

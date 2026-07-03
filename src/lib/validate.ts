@@ -8,13 +8,16 @@
 
 // Practical, conservative email regex. Rejects spaces, control chars, leading
 // dashes, and anything without a plausible domain. Not RFC 5322 — intentional.
+// Apostrophes are included in the local part: Google Workspace allows them in
+// usernames (e.g. o'brien@…), and rejecting one here would lock every flow out
+// of operating on that account.
 const EMAIL_RE =
-  /^(?!-)[A-Za-z0-9._%+\-]{1,64}@(?!-)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+  /^(?!-)[A-Za-z0-9._%+'\-]{1,64}@(?!-)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 
 const DOMAIN_RE =
   /^(?!-)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 
-const USERNAME_RE = /^[A-Za-z0-9._%+\-]{1,64}$/;
+const USERNAME_RE = /^[A-Za-z0-9._%+'\-]{1,64}$/;
 
 export function isValidEmail(s: unknown): s is string {
   return typeof s === "string" && s.length <= 254 && EMAIL_RE.test(s);
@@ -52,7 +55,7 @@ export function requireDomain(value: unknown, field: string): string {
 
 export function requireUsername(value: unknown, field: string): string {
   if (!isValidUsername(value)) {
-    throw new ValidationError(`${field} must contain only letters, numbers, dots, dashes, underscores, plus, or percent`);
+    throw new ValidationError(`${field} must contain only letters, numbers, dots, dashes, underscores, apostrophes, plus, or percent`);
   }
   return value as string;
 }

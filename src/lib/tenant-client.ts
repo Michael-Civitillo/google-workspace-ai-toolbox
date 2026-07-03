@@ -98,10 +98,18 @@ export function useCurrentTenant(): { id: string | null; tenant: Tenant | null }
   const [tenant, setTenant] = useState<Tenant | null>(() => _currentTenant);
 
   useEffect(() => {
-    return subscribeTenantId((newId) => {
+    const unsubscribe = subscribeTenantId((newId) => {
       setId(newId);
       setTenant(_currentTenant);
     });
+    // A tenant change can land between the initial render (which read the
+    // module state) and this effect running (which starts listening) — e.g. the
+    // bootstrap fetch resolving during hydration. Re-sync once after
+    // subscribing so that window can't leave the hook stale until the NEXT
+    // change. The setters bail out when nothing actually changed.
+    setId(_currentTenantId);
+    setTenant(_currentTenant);
+    return unsubscribe;
   }, []);
 
   return { id, tenant };
