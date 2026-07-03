@@ -106,8 +106,12 @@ export function ConfirmActionDialog({
   }
 
   const phraseRequired = severity === "high" && !!confirmPhrase;
+  // Trim BOTH sides: several callers pass raw input (e.g. a pasted email with
+  // a trailing space) as the phrase, and comparing a trimmed entry against an
+  // untrimmed phrase makes the confirmation impossible to type — the confirm
+  // button just stays disabled with no explanation.
   const phraseOk =
-    !phraseRequired || typed.trim() === (confirmPhrase ?? "");
+    !phraseRequired || typed.trim() === (confirmPhrase ?? "").trim();
   const canConfirm = phraseOk && !busy;
 
   return (

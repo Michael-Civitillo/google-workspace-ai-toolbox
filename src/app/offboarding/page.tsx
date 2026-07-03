@@ -190,11 +190,24 @@ export default function Offboarding() {
     };
   }, []);
 
+  // Effect-run marker for the lookup staleness guard below.
+  const lookupSeq = useRef(0);
+
   useEffect(() => {
+    // Cancelled flag: a tenant switch must not let the previous tenant's
+    // in-flight domains response land afterwards and misclassify successors.
+    let cancelled = false;
     setVerifiedDomains(null);
-    tfetch("/api/admin/domains")
+    // The looked-up user and step results are tenant-scoped too: keeping them
+    // across a switch pairs tenant B's confirmation dialog with tenant A's
+    // user, burning a fully-confirmed run on guaranteed server-side failures.
+    lookupSeq.current++;
+    setPreflight(null);
+    setResults({} as Record<StepId, { status: StepStatus; message?: string }>);
+    tfetch("/api/admin/domains", {}, tenantId)
       .then((r) => r.json())
       .then((d) => {
+        if (cancelled) return;
         if (d?.success && Array.isArray(d.data)) {
           setVerifiedDomains(
             d.data
@@ -204,6 +217,9 @@ export default function Offboarding() {
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [tenantId]);
 
   const successorDomain = successor.includes("@")
@@ -214,25 +230,34 @@ export default function Offboarding() {
     (verifiedDomains === null || !verifiedDomains.includes(successorDomain));
 
   const lookup = async () => {
-    if (!email.trim()) return;
+    // The Enter-key handler can fire while a lookup is already in flight; two
+    // racing lookups could otherwise resolve out of order and leave the
+    // preflight card (and the typed confirmation it feeds) showing a DIFFERENT
+    // user than the input — the run would then target the wrong real account.
+    if (!email.trim() || lookingUp) return;
+    const seq = ++lookupSeq.current;
     setLookingUp(true);
     setError(null);
     setPreflight(null);
     setResults({} as Record<StepId, { status: StepStatus; message?: string }>);
     try {
       const res = await tfetch(
-        `/api/offboarding/preflight?user=${encodeURIComponent(email)}`
+        `/api/offboarding/preflight?user=${encodeURIComponent(email)}`,
+        {},
+        tenantId
       );
       const data = await res.json();
+      if (seq !== lookupSeq.current) return;
       if (data.success) {
         setPreflight(data.data);
       } else {
         setError(data.error || "Failed to look up user");
       }
     } catch {
+      if (seq !== lookupSeq.current) return;
       setError("Failed to connect to the API");
     } finally {
-      setLookingUp(false);
+      if (seq === lookupSeq.current) setLookingUp(false);
     }
   };
 
@@ -428,7 +453,7 @@ export default function Offboarding() {
                   placeholder="leaver@yourdomain.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && lookup()}
+                  onKeyDown={(e) => e.key === "Enter" && !lookingUp && lookup()}
                 />
                 <Button
                   variant="secondary"

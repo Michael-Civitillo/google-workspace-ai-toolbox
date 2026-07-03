@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import type { Tenant } from "./tenant-types";
 
 /**
@@ -85,32 +85,29 @@ export async function tfetch(
   return fetch(input, { ...init, headers });
 }
 
+function subscribeStore(onStoreChange: () => void): () => void {
+  return subscribeTenantId(() => onStoreChange());
+}
+
 /**
  * React hook returning the currently selected tenant. Updates whenever the
  * tenant switcher changes, so dialogs can show "running against X" live.
  *
- * Lazy initial state avoids the cascading-render pattern of "set in effect" —
- * we read the module-scoped values exactly once on mount, then only update
- * when the subscriber fires.
+ * Built on useSyncExternalStore so a tenant change that lands between the
+ * initial render and subscription (e.g. the bootstrap fetch resolving during
+ * hydration) is picked up when React re-checks the snapshot on subscribe —
+ * the old set-state-in-effect version stayed stale until the NEXT change.
  */
 export function useCurrentTenant(): { id: string | null; tenant: Tenant | null } {
-  const [id, setId] = useState<string | null>(() => _currentTenantId);
-  const [tenant, setTenant] = useState<Tenant | null>(() => _currentTenant);
-
-  useEffect(() => {
-    const unsubscribe = subscribeTenantId((newId) => {
-      setId(newId);
-      setTenant(_currentTenant);
-    });
-    // A tenant change can land between the initial render (which read the
-    // module state) and this effect running (which starts listening) — e.g. the
-    // bootstrap fetch resolving during hydration. Re-sync once after
-    // subscribing so that window can't leave the hook stale until the NEXT
-    // change. The setters bail out when nothing actually changed.
-    setId(_currentTenantId);
-    setTenant(_currentTenant);
-    return unsubscribe;
-  }, []);
-
+  const id = useSyncExternalStore(
+    subscribeStore,
+    () => _currentTenantId,
+    () => null
+  );
+  const tenant = useSyncExternalStore(
+    subscribeStore,
+    () => _currentTenant,
+    () => null
+  );
   return { id, tenant };
 }

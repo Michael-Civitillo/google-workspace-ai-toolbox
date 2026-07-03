@@ -75,6 +75,14 @@ export default function DomainChange() {
   useEffect(() => {
     let cancelled = false;
     setLoadingDomains(true);
+    // The looked-up user and picked domain are tenant-scoped: keeping them
+    // across a sidebar tenant switch pairs the new tenant's confirm dialog
+    // with the old tenant's user (and possibly a domain the new tenant
+    // doesn't even have), wasting a typed irreversible-change confirmation.
+    setUser(null);
+    setSelectedDomain("");
+    setNewUsername("");
+    setMessage(null);
     tfetch("/api/admin/domains", {}, tenantId)
       .then((res) => res.json())
       .then((result) => {

@@ -24,6 +24,7 @@ export function TenantSwitcher() {
   });
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch("/api/tenants")
@@ -62,6 +63,7 @@ export function TenantSwitcher() {
   async function switchTenant(id: string) {
     if (id === state.activeTenantId || switching) return;
     setSwitching(true);
+    setSwitchError(null);
     setOpen(false);
     try {
       const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
@@ -72,7 +74,18 @@ export function TenantSwitcher() {
           state.tenants.find((t) => t.id === id) ?? null
         );
         router.refresh();
+      } else {
+        // A silent failure is dangerous here: the dropdown already closed, so
+        // without feedback the operator assumes the switch happened and fires
+        // the next action against the OLD tenant. A 404 also means our list is
+        // stale (tenant deleted elsewhere) — reload it.
+        setSwitchError("Switch failed — still on the previous tenant");
+        load();
       }
+    } catch {
+      // Without this catch a network failure became an unhandled rejection —
+      // no feedback at all.
+      setSwitchError("Switch failed — still on the previous tenant");
     } finally {
       setSwitching(false);
     }
@@ -136,6 +149,12 @@ export function TenantSwitcher() {
           )}
         />
       </button>
+
+      {switchError && (
+        <p className="mt-1 px-1 text-[10px] leading-snug text-red-600 dark:text-red-400">
+          {switchError}
+        </p>
+      )}
 
       {open && (
         <div role="menu" className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-lg shadow-md overflow-hidden">

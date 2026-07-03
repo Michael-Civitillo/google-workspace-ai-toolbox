@@ -111,6 +111,8 @@ export default function MailboxImport() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const cancelRef = useRef(false);
+  // Bumped on every file pick; stale header reads check it before landing.
+  const pickSeq = useRef(0);
   // Stop the insert loop if the user navigates away mid-import — otherwise it
   // keeps writing messages into the mailbox invisibly after the page is gone.
   const alive = useRef(true);
@@ -131,12 +133,20 @@ export default function MailboxImport() {
     inserted: number;
     failed: number;
     cancelled: boolean;
+    /** True when the run stopped on an error partway through. */
+    aborted?: boolean;
+    /** The mailbox the messages actually went into (pinned at run start). */
+    target: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const validTarget = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(targetUser.trim());
 
   const onPickFile = async (f: File | null) => {
+    // Reading the header can take seconds for a multi-MB header line; if the
+    // operator re-picks a different file meanwhile, the slower read must not
+    // land last and pair file B with file A's header (and label map).
+    const seq = ++pickSeq.current;
     setFile(f);
     setHeader(null);
     setParseError(null);
@@ -146,6 +156,7 @@ export default function MailboxImport() {
     if (!f) return;
     try {
       const line = await readHeaderLine(f);
+      if (seq !== pickSeq.current) return;
       const parsed = JSON.parse(line) as ExportHeader;
       if (parsed.type !== EXPORT_TYPE) {
         setParseError(
@@ -161,6 +172,7 @@ export default function MailboxImport() {
         labels: Array.isArray(parsed.labels) ? parsed.labels : [],
       });
     } catch {
+      if (seq !== pickSeq.current) return;
       setParseError(
         "Couldn't read the export header. Make sure you selected a .ndjson file produced by Mailbox Export."
       );
@@ -286,6 +298,10 @@ export default function MailboxImport() {
           if (!ok) {
             setRunning(false);
             setErrors(collectedErrors);
+            // Keep the counts visible: messages.insert is not idempotent, so
+            // the operator must know how many messages already landed before
+            // deciding whether to re-run (a blind re-run duplicates them all).
+            setSummary({ inserted, failed, cancelled: false, aborted: true, target: user });
             return;
           }
         }
@@ -299,15 +315,17 @@ export default function MailboxImport() {
         if (!ok) {
           setRunning(false);
           setErrors(collectedErrors);
+          setSummary({ inserted, failed, cancelled: false, aborted: true, target: user });
           return;
         }
       }
 
-      setSummary({ inserted, failed, cancelled: cancelRef.current });
+      setSummary({ inserted, failed, cancelled: cancelRef.current, target: user });
       setErrors(collectedErrors);
     } catch {
       setError("Failed to connect to the API. Some messages may have imported.");
       setErrors(collectedErrors);
+      setSummary({ inserted, failed, cancelled: false, aborted: true, target: user });
     } finally {
       setRunning(false);
     }
@@ -334,16 +352,39 @@ export default function MailboxImport() {
       )}
 
       {summary && (
-        <Alert className="mb-6 border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40">
-          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-          <AlertDescription className="text-emerald-800 dark:text-emerald-300 text-sm">
-            {summary.cancelled ? "Import cancelled — " : "Import complete — "}
+        <Alert
+          className={`mb-6 ${
+            summary.aborted
+              ? "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
+              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
+          }`}
+        >
+          <CheckCircle2
+            className={`h-4 w-4 ${
+              summary.aborted ? "text-amber-600" : "text-emerald-600"
+            }`}
+          />
+          <AlertDescription
+            className={`text-sm ${
+              summary.aborted
+                ? "text-amber-800 dark:text-amber-300"
+                : "text-emerald-800 dark:text-emerald-300"
+            }`}
+          >
+            {summary.aborted
+              ? "Import stopped on an error — "
+              : summary.cancelled
+                ? "Import cancelled — "
+                : "Import complete — "}
             inserted {summary.inserted.toLocaleString()} message
             {summary.inserted === 1 ? "" : "s"}
             {summary.failed > 0
               ? `, ${summary.failed.toLocaleString()} failed`
               : ""}{" "}
-            into {targetUser.trim()}.
+            into {summary.target}.
+            {summary.aborted
+              ? " Do NOT blindly re-run the whole file — inserted messages would be duplicated."
+              : ""}
           </AlertDescription>
         </Alert>
       )}

@@ -168,6 +168,9 @@ export default function MailboxExport() {
     setSummary(null);
     setProgress({ exported: 0, bytes: 0, estimate: null });
     cancelRef.current = false;
+    // Set on any hard failure so the finally block doesn't paint a green
+    // "complete" summary under the error banner.
+    let walkFailed = false;
     // Pin the tenant and format for the whole walk so a switch mid-export can't
     // redirect later pages to a different tenant or change the output shape.
     const pinnedTenantId = tenantId;
@@ -200,6 +203,7 @@ export default function MailboxExport() {
         const res = await tfetch(url, {}, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
+          walkFailed = true;
           setError(data.error || "Export failed");
           break;
         }
@@ -264,6 +268,7 @@ export default function MailboxExport() {
         if (!pageToken && !(pendingIds && pendingIds.length)) break;
       }
     } catch {
+      walkFailed = true;
       setError("Failed to connect to the API");
     } finally {
       setRunning(false);
@@ -271,26 +276,29 @@ export default function MailboxExport() {
       // into an unmounted component — just stop.
       if (!alive.current) return;
       // Download whenever we captured at least one message — even on cancel or
-      // a mid-walk error, so partial backups aren't thrown away. Still show a
-      // summary when nothing was captured but messages were skipped, so a fully
-      // failed run isn't silent.
-      if (exported > 0 || skipped > 0) {
-        if (exported > 0) {
-          const date = new Date().toISOString().slice(0, 10);
-          if (exportFormat === "mbox") {
-            downloadBlob(
-              `mailbox-${exportUser}-${date}.mbox`,
-              parts,
-              "application/mbox"
-            );
-          } else {
-            downloadBlob(
-              `mailbox-${exportUser}-${date}.ndjson`,
-              parts,
-              "application/x-ndjson;charset=utf-8"
-            );
-          }
+      // a mid-walk error, so partial backups aren't thrown away.
+      if (exported > 0) {
+        const date = new Date().toISOString().slice(0, 10);
+        if (exportFormat === "mbox") {
+          downloadBlob(
+            `mailbox-${exportUser}-${date}.mbox`,
+            parts,
+            "application/mbox"
+          );
+        } else {
+          downloadBlob(
+            `mailbox-${exportUser}-${date}.ndjson`,
+            parts,
+            "application/x-ndjson;charset=utf-8"
+          );
         }
+      }
+      // ALWAYS summarise a run that ended without a hard error — an empty
+      // mailbox (or an early cancel) used to end completely silently: spinner
+      // gone, no file, no message, leaving the operator unable to tell whether
+      // the export worked, failed, or had nothing to do. After a hard error the
+      // banner explains the stop; add the summary only if data was captured.
+      if (!walkFailed || exported > 0 || skipped > 0) {
         setSummary({
           user: exportUser,
           exported,
