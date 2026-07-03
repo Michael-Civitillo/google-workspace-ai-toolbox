@@ -7,7 +7,7 @@ import path from "path";
  * unexpected if cwd changes (e.g. service restart in /). Falls back to
  * <cwd>/audit.log for local dev.
  */
-const LOG_PATH = path.resolve(
+export const AUDIT_LOG_PATH = path.resolve(
   process.env.AUDIT_LOG_PATH || path.join(process.cwd(), "audit.log")
 );
 
@@ -15,9 +15,9 @@ const LOG_PATH = path.resolve(
 // `mode` on file creation, so a pre-existing log written under a permissive
 // umask would keep its old mode forever. Idempotent for the common case.
 try {
-  const stat = statSync(LOG_PATH);
+  const stat = statSync(AUDIT_LOG_PATH);
   if ((stat.mode & 0o777) !== 0o600) {
-    chmodSync(LOG_PATH, 0o600);
+    chmodSync(AUDIT_LOG_PATH, 0o600);
   }
 } catch {
   // File doesn't exist yet — the next append will create it with 0o600.
@@ -57,7 +57,7 @@ export function audit(entry: AuditEntry): void {
         ...entry,
         params: redactSensitive(entry.params),
       }) + "\n";
-    appendFileSync(LOG_PATH, line, { encoding: "utf-8", mode: 0o600 });
+    appendFileSync(AUDIT_LOG_PATH, line, { encoding: "utf-8", mode: 0o600 });
   } catch (e) {
     // Logging must never throw into the request handler — but a silent failure
     // means mutating actions run unaudited indefinitely and invisibly, which
@@ -66,7 +66,7 @@ export function audit(entry: AuditEntry): void {
     if (now - lastAuditFailureWarn >= AUDIT_FAILURE_WARN_INTERVAL_MS) {
       lastAuditFailureWarn = now;
       console.error(
-        `[audit] failed to write to ${LOG_PATH} — mutating actions are running unaudited:`,
+        `[audit] failed to write to ${AUDIT_LOG_PATH} — mutating actions are running unaudited:`,
         e instanceof Error ? e.message : e
       );
     }

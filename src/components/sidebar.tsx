@@ -18,6 +18,7 @@ import {
   FolderTree,
   Download,
   Upload,
+  ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -73,6 +74,7 @@ const navigation = [
     items: [
       { name: "Sharing Audit", href: "/sharing-audit", icon: Share2 },
       { name: "User Audit", href: "/audit", icon: Shield },
+      { name: "Audit Log", href: "/audit-log", icon: ScrollText },
     ],
   },
   {
@@ -128,7 +130,7 @@ export function Sidebar() {
               {group.items.map((item) => {
                 const isActive =
                   pathname === item.href ||
-                  (item.href !== "/" && pathname.startsWith(item.href));
+                  (item.href !== "/" && pathname.startsWith(item.href + "/"));
                 return (
                   <Link
                     key={item.name}
