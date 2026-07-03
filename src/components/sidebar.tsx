@@ -21,6 +21,7 @@ import {
   ScrollText,
   Users,
   Activity,
+  Layers,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -74,6 +75,10 @@ const navigation = [
       { name: "Mailbox Export", href: "/mailbox-export", icon: Download },
       { name: "Mailbox Import", href: "/mailbox-import", icon: Upload },
     ],
+  },
+  {
+    label: "Bulk",
+    items: [{ name: "Bulk Operations", href: "/bulk", icon: Layers }],
   },
   {
     label: "Audits",
