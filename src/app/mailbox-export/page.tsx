@@ -176,12 +176,15 @@ export default function MailboxExport() {
     const pinnedTenantId = tenantId;
     const exportFormat = format;
 
-    // Accumulate the output as Blob parts so the file is never materialised as
-    // one giant string — past V8's ~512 MB string cap that would throw "Invalid
-    // string length" and destroy a large export. NDJSON pushes each JSON line
-    // plus its newline (line 1 is a header with the source user + labels); mbox
-    // pushes each message's "From "-delimited bytes.
-    const parts: BlobPart[] = [];
+    // Accumulate the output as Blob SEGMENTS, one per fetched page. Two
+    // reasons this must not be a flat array of strings/byte-arrays:
+    //  - a single giant string would hit V8's ~512 MB string cap ("Invalid
+    //    string length") and destroy the export;
+    //  - strings and Uint8Arrays live in the JS heap, so a multi-GB mailbox
+    //    would OOM the tab before the download ever starts. Blobs are managed
+    //    by the browser's blob storage, which can spill to disk — sealing each
+    //    page into a Blob keeps the JS heap bounded to roughly one page.
+    const parts: Blob[] = [];
     let headerWritten = false;
     let exported = 0;
     let bytes = 0;
@@ -210,6 +213,10 @@ export default function MailboxExport() {
         const page: ExportPage = data.data;
         exportUser = page.user;
 
+        // This page's output, sealed into one Blob segment below so the raw
+        // strings/bytes don't accumulate in the JS heap across the whole walk.
+        const pageParts: BlobPart[] = [];
+
         // mbox is a bare message stream — it carries no header or label set.
         if (exportFormat === "ndjson" && !headerWritten) {
           const headerLine = JSON.stringify({
@@ -220,7 +227,7 @@ export default function MailboxExport() {
             includeSpamTrash,
             labels: page.labels ?? [],
           });
-          parts.push(headerLine, "\n");
+          pageParts.push(headerLine, "\n");
           headerWritten = true;
           // +1 for the newline pushed after each line. Tracking emitted bytes
           // (here and below) keeps the reported size consistent with mbox and
@@ -234,7 +241,7 @@ export default function MailboxExport() {
             // mbox; count it as skipped rather than aborting the export.
             try {
               const entry = mboxEntry(m.raw, m.internalDate);
-              parts.push(entry);
+              pageParts.push(entry);
               bytes += entry.length;
               exported++;
             } catch {
@@ -249,11 +256,12 @@ export default function MailboxExport() {
               sizeEstimate: m.sizeEstimate,
               raw: m.raw,
             });
-            parts.push(line, "\n");
+            pageParts.push(line, "\n");
             exported++;
             bytes += line.length + 1;
           }
         }
+        if (pageParts.length > 0) parts.push(new Blob(pageParts));
         skipped += page.skipped?.length ?? 0;
         setProgress({
           exported,

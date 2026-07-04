@@ -386,6 +386,26 @@ export default function SharingAudit() {
   const categoryFilterRef = useRef(categoryFilter);
   categoryFilterRef.current = categoryFilter;
 
+  // Stable ref carrying the latest handlers + filter into the memoized
+  // per-user cards. The ref's identity never changes, so a card can skip
+  // re-rendering while still calling the CURRENT handler when clicked —
+  // without this, every per-user status update during a tenant-wide scan
+  // re-rendered every user card (O(users²) work across the whole scan).
+  const cardHandlersRef = useRef<TenantCardHandlers>({
+    toggleTenant: () => {},
+    setTenantAllForUser: () => {},
+    toggleUserCollapsed: () => {},
+    startRevoke: () => {},
+    categoryFilter,
+  });
+  cardHandlersRef.current = {
+    toggleTenant,
+    setTenantAllForUser,
+    toggleUserCollapsed,
+    startRevoke,
+    categoryFilter,
+  };
+
   // Export-CSV state. Resolution can take many seconds for large audits so
   // we surface a "Resolving paths…" indicator on the export button.
   const [exportBusy, setExportBusy] = useState(false);
@@ -1270,190 +1290,20 @@ export default function SharingAudit() {
               )}
               <div className="space-y-2">
                 {perUser.map((p, idx) => {
-                  const flagged = p.files ?? [];
-                  const sel = tenantSelected[idx] ?? new Set<string>();
-                  const allSelected =
-                    flagged.length > 0 && sel.size === flagged.length;
-                  const matching = flagged.filter((f) =>
-                    fileMatchesFilter(f, activeCategories)
-                  );
                   const isCollapsible =
-                    p.status === "done" && flagged.length > 0;
-                  const isCollapsed = isCollapsible && collapsedUsers.has(idx);
+                    p.status === "done" && (p.files?.length ?? 0) > 0;
                   return (
-                    <div
+                    <TenantUserCard
                       key={p.user}
-                      className="rounded-lg border bg-muted/30 px-3 py-2"
-                    >
-                      <div
-                        className={`flex items-center justify-between gap-3 ${
-                          isCollapsible
-                            ? "cursor-pointer select-none -mx-1 px-1 py-0.5 rounded hover:bg-muted/60"
-                            : ""
-                        }`}
-                        onClick={
-                          isCollapsible
-                            ? () => toggleUserCollapsed(idx)
-                            : undefined
-                        }
-                        role={isCollapsible ? "button" : undefined}
-                        tabIndex={isCollapsible ? 0 : undefined}
-                        aria-expanded={isCollapsible ? !isCollapsed : undefined}
-                        onKeyDown={
-                          isCollapsible
-                            ? (e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  toggleUserCollapsed(idx);
-                                }
-                              }
-                            : undefined
-                        }
-                      >
-                        <div className="min-w-0 flex-1 flex items-center gap-1.5">
-                          {isCollapsible &&
-                            (isCollapsed ? (
-                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                            ) : (
-                              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                            ))}
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium truncate">{p.user}</p>
-                            {p.status === "running" && (
-                              <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                <Loader2 className="h-3 w-3 animate-spin" />{" "}
-                                scanning…
-                              </p>
-                            )}
-                            {p.status === "done" && (
-                              <p className="text-xs text-muted-foreground">
-                                scanned {p.scannedFiles} · {flagged.length}{" "}
-                                flagged
-                                {p.truncated ? " · truncated" : ""}
-                              </p>
-                            )}
-                            {p.status === "error" && (
-                              <p className="text-xs text-red-600">
-                                {p.error}
-                              </p>
-                            )}
-                            {p.status === "skipped" && (
-                              <p className="text-xs text-muted-foreground">
-                                cancelled before scan
-                              </p>
-                            )}
-                            {p.status === "pending" && (
-                              <p className="text-xs text-muted-foreground">
-                                queued
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          {isCollapsed && sel.size > 0 && (
-                            <Badge
-                              variant="outline"
-                              className="bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/50 text-xs"
-                            >
-                              {sel.size} selected
-                            </Badge>
-                          )}
-                          {p.status === "done" && flagged.length > 0 && (
-                            <Badge
-                              variant="outline"
-                              className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs"
-                            >
-                              {flagged.length} flagged
-                            </Badge>
-                          )}
-                        </div>
-                      </div>
-
-                      {p.status === "done" && flagged.length > 0 && !isCollapsed && (
-                        <div className="mt-2 space-y-2 pl-3 border-l-2 border-amber-200 dark:border-amber-900/50">
-                          <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
-                            <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
-                              <input
-                                type="checkbox"
-                                checked={allSelected}
-                                onChange={(e) =>
-                                  setTenantAllForUser(
-                                    idx,
-                                    flagged,
-                                    e.target.checked
-                                  )
-                                }
-                              />
-                              Select all
-                            </label>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Button
-                                size="xs"
-                                variant="destructive"
-                                disabled={sel.size === 0 || revokeBusy || noCategoriesSelected}
-                                onClick={() =>
-                                  startRevoke({
-                                    user: p.user,
-                                    files: flagged.filter((f) => sel.has(f.id)),
-                                    scope: { kind: "tenant", userIndex: idx },
-                                    categories: categoriesFromFilter(categoryFilter),
-                                  })
-                                }
-                              >
-                                <ShieldOff className="h-3 w-3 mr-1" />
-                                Revoke on selected ({sel.size})
-                              </Button>
-                              <Button
-                                size="xs"
-                                variant="destructive"
-                                disabled={
-                                  matching.length === 0 || revokeBusy || noCategoriesSelected
-                                }
-                                onClick={() =>
-                                  startRevoke({
-                                    user: p.user,
-                                    files: matching,
-                                    scope: { kind: "tenant", userIndex: idx },
-                                    categories: categoriesFromFilter(categoryFilter),
-                                  })
-                                }
-                                title={`Strip selected categories from every matching file for ${p.user} (files with other external sharing types may stay listed)`}
-                              >
-                                <ShieldOff className="h-3 w-3 mr-1" />
-                                Revoke selected categories on {matching.length} file
-                                {matching.length === 1 ? "" : "s"}
-                              </Button>
-                            </div>
-                          </div>
-                          {p.truncated && (
-                            <p className="text-xs text-amber-700 dark:text-amber-300">
-                              Audit was capped at 1,000 files for this user — run a single-user audit on them to scan the rest.
-                            </p>
-                          )}
-                          <div className="space-y-1.5">
-                            {flagged.map((f) => (
-                              <FileRow
-                                key={f.id}
-                                file={f}
-                                selected={sel.has(f.id)}
-                                onToggle={() => toggleTenant(idx, f.id)}
-                                onRevoke={() =>
-                                  startRevoke({
-                                    user: p.user,
-                                    files: [f],
-                                    scope: { kind: "tenant", userIndex: idx },
-                                    categories: categoriesFromFilter(
-                                      categoryFilterRef.current
-                                    ),
-                                  })
-                                }
-                                revokeDisabled={revokeBusy || noCategoriesSelected}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                      p={p}
+                      idx={idx}
+                      sel={tenantSelected[idx] ?? EMPTY_SELECTION}
+                      isCollapsed={isCollapsible && collapsedUsers.has(idx)}
+                      revokeBusy={revokeBusy}
+                      noCategoriesSelected={noCategoriesSelected}
+                      activeCategories={activeCategories}
+                      handlers={cardHandlersRef}
+                    />
                   );
                 })}
               </div>
@@ -1661,6 +1511,230 @@ export default function SharingAudit() {
         onConfirm={confirmRevoke}
       />
     </>
+  );
+}
+
+/** Empty selection shared across renders so an unselected user's `sel` prop
+ * stays reference-equal and the memoized card below can skip re-rendering. */
+const EMPTY_SELECTION = new Set<string>();
+
+interface TenantCardHandlers {
+  toggleTenant: (userIndex: number, fileId: string) => void;
+  setTenantAllForUser: (
+    userIndex: number,
+    files: ExternalFile[],
+    on: boolean
+  ) => void;
+  toggleUserCollapsed: (userIndex: number) => void;
+  startRevoke: (target: RevokeTarget) => void;
+  categoryFilter: Record<CategoryKey, boolean>;
+}
+
+const TenantUserCard = memo(_TenantUserCard, (prev, next) =>
+  // Same idea as FileRow below: skip re-render unless something this card
+  // displays changed. `handlers` is a ref whose identity never changes; the
+  // card reads .current at event time so it always calls the live handlers
+  // and the live category filter even when it skipped intervening renders.
+  prev.p === next.p &&
+  prev.sel === next.sel &&
+  prev.isCollapsed === next.isCollapsed &&
+  prev.revokeBusy === next.revokeBusy &&
+  prev.noCategoriesSelected === next.noCategoriesSelected &&
+  prev.activeCategories === next.activeCategories
+);
+
+function _TenantUserCard({
+  p,
+  idx,
+  sel,
+  isCollapsed,
+  revokeBusy,
+  noCategoriesSelected,
+  activeCategories,
+  handlers,
+}: {
+  p: PerUserOutcome;
+  idx: number;
+  sel: Set<string>;
+  isCollapsed: boolean;
+  revokeBusy: boolean;
+  noCategoriesSelected: boolean;
+  activeCategories: Set<PermissionType>;
+  handlers: React.RefObject<TenantCardHandlers>;
+}) {
+  const flagged = p.files ?? [];
+  const allSelected = flagged.length > 0 && sel.size === flagged.length;
+  const matching = flagged.filter((f) => fileMatchesFilter(f, activeCategories));
+  const isCollapsible = p.status === "done" && flagged.length > 0;
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2">
+      <div
+        className={`flex items-center justify-between gap-3 ${
+          isCollapsible
+            ? "cursor-pointer select-none -mx-1 px-1 py-0.5 rounded hover:bg-muted/60"
+            : ""
+        }`}
+        onClick={
+          isCollapsible
+            ? () => handlers.current.toggleUserCollapsed(idx)
+            : undefined
+        }
+        role={isCollapsible ? "button" : undefined}
+        tabIndex={isCollapsible ? 0 : undefined}
+        aria-expanded={isCollapsible ? !isCollapsed : undefined}
+        onKeyDown={
+          isCollapsible
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  handlers.current.toggleUserCollapsed(idx);
+                }
+              }
+            : undefined
+        }
+      >
+        <div className="min-w-0 flex-1 flex items-center gap-1.5">
+          {isCollapsible &&
+            (isCollapsed ? (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            ))}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium truncate">{p.user}</p>
+            {p.status === "running" && (
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" /> scanning…
+              </p>
+            )}
+            {p.status === "done" && (
+              <p className="text-xs text-muted-foreground">
+                scanned {p.scannedFiles} · {flagged.length} flagged
+                {p.truncated ? " · truncated" : ""}
+              </p>
+            )}
+            {p.status === "error" && (
+              <p className="text-xs text-red-600">{p.error}</p>
+            )}
+            {p.status === "skipped" && (
+              <p className="text-xs text-muted-foreground">
+                cancelled before scan
+              </p>
+            )}
+            {p.status === "pending" && (
+              <p className="text-xs text-muted-foreground">queued</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {isCollapsed && sel.size > 0 && (
+            <Badge
+              variant="outline"
+              className="bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/50 text-xs"
+            >
+              {sel.size} selected
+            </Badge>
+          )}
+          {p.status === "done" && flagged.length > 0 && (
+            <Badge
+              variant="outline"
+              className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs"
+            >
+              {flagged.length} flagged
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {p.status === "done" && flagged.length > 0 && !isCollapsed && (
+        <div className="mt-2 space-y-2 pl-3 border-l-2 border-amber-200 dark:border-amber-900/50">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
+            <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={(e) =>
+                  handlers.current.setTenantAllForUser(
+                    idx,
+                    flagged,
+                    e.target.checked
+                  )
+                }
+              />
+              Select all
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="xs"
+                variant="destructive"
+                disabled={sel.size === 0 || revokeBusy || noCategoriesSelected}
+                onClick={() =>
+                  handlers.current.startRevoke({
+                    user: p.user,
+                    files: flagged.filter((f) => sel.has(f.id)),
+                    scope: { kind: "tenant", userIndex: idx },
+                    categories: categoriesFromFilter(
+                      handlers.current.categoryFilter
+                    ),
+                  })
+                }
+              >
+                <ShieldOff className="h-3 w-3 mr-1" />
+                Revoke on selected ({sel.size})
+              </Button>
+              <Button
+                size="xs"
+                variant="destructive"
+                disabled={
+                  matching.length === 0 || revokeBusy || noCategoriesSelected
+                }
+                onClick={() =>
+                  handlers.current.startRevoke({
+                    user: p.user,
+                    files: matching,
+                    scope: { kind: "tenant", userIndex: idx },
+                    categories: categoriesFromFilter(
+                      handlers.current.categoryFilter
+                    ),
+                  })
+                }
+                title={`Strip selected categories from every matching file for ${p.user} (files with other external sharing types may stay listed)`}
+              >
+                <ShieldOff className="h-3 w-3 mr-1" />
+                Revoke selected categories on {matching.length} file
+                {matching.length === 1 ? "" : "s"}
+              </Button>
+            </div>
+          </div>
+          {p.truncated && (
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              Audit was capped at 1,000 files for this user — run a single-user audit on them to scan the rest.
+            </p>
+          )}
+          <div className="space-y-1.5">
+            {flagged.map((f) => (
+              <FileRow
+                key={f.id}
+                file={f}
+                selected={sel.has(f.id)}
+                onToggle={() => handlers.current.toggleTenant(idx, f.id)}
+                onRevoke={() =>
+                  handlers.current.startRevoke({
+                    user: p.user,
+                    files: [f],
+                    scope: { kind: "tenant", userIndex: idx },
+                    categories: categoriesFromFilter(
+                      handlers.current.categoryFilter
+                    ),
+                  })
+                }
+                revokeDisabled={revokeBusy || noCategoriesSelected}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
