@@ -574,19 +574,46 @@ export async function changePrimaryDomain(
     );
   }
 
-  const conflict = await userExists(tenant, newEmail);
-  if (conflict) {
+  // `userKey` resolves aliases, so a plain existence check would also match
+  // the target user's OWN alias on the new domain — a case Google happily
+  // accepts for a primary-email change (the alias is promoted). Only treat
+  // the address as taken when it resolves to a DIFFERENT account.
+  let conflictOwner: string | null = null;
+  try {
+    const res = await withGoogleRetry(
+      () =>
+        client.users.get(
+          { userKey: newEmail, projection: "basic", fields: "primaryEmail" },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    conflictOwner = (res.data.primaryEmail || "").toLowerCase();
+  } catch (e) {
+    if (!isNotFoundError(e)) throw e;
+  }
+  if (
+    conflictOwner !== null &&
+    conflictOwner !== targetInfo.primaryEmail.toLowerCase()
+  ) {
     throw new Error(
       `"${newEmail}" is already in use by another user. Pick a different username or domain.`
     );
   }
 
-  await client.users.update(
-    {
-      userKey: currentEmail,
-      requestBody: { primaryEmail: newEmail },
-    },
-    { timeout: ADMIN_API_TIMEOUT_MS }
+  // 429-only retry: a rate-limited rename never reached Google's store, so
+  // backing off is safe, while a 5xx might have committed the rename and a
+  // blind retry would then fail confusingly on the old userKey.
+  await withGoogleRetry(
+    () =>
+      client.users.update(
+        {
+          userKey: currentEmail,
+          requestBody: { primaryEmail: newEmail },
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: false }
   );
 
   // Retry the read-after-write verification: the rename above has already
@@ -875,13 +902,21 @@ export async function listGroupMembers(
  * via `alreadyMember`. No retryServerErrors: the insert is not idempotent
  * from the API's point of view, and the ambiguity of a timed-out insert is
  * exactly what the alreadyMember tolerance absorbs on re-run.
+ *
+ * When the member already exists, Google rejects the insert and leaves their
+ * CURRENT role untouched — so "add X as MANAGER" would silently no-op on an
+ * existing MEMBER. Pass `enforceRole: true` (callers set it when the role was
+ * explicitly chosen) to converge on the requested role via members.update.
+ * It stays off for defaulted roles so a bare re-add can never silently demote
+ * an existing OWNER to MEMBER.
  */
 export async function addGroupMember(
   tenant: Tenant | null,
   groupKey: string,
   memberEmail: string,
-  role: GroupMemberRole
-): Promise<{ alreadyMember: boolean }> {
+  role: GroupMemberRole,
+  opts: { enforceRole?: boolean } = {}
+): Promise<{ alreadyMember: boolean; previousRole?: string; roleChanged?: boolean }> {
   if (!isValidEmail(groupKey)) {
     throw new Error("groupKey must be a valid email address");
   }
@@ -903,14 +938,43 @@ export async function addGroupMember(
     );
     return { alreadyMember: false };
   } catch (e) {
-    if (isAlreadyExistsError(e)) return { alreadyMember: true };
-    throw e;
+    if (!isAlreadyExistsError(e)) throw e;
+    if (!opts.enforceRole) return { alreadyMember: true };
+    const existing = await withGoogleRetry(
+      () =>
+        client.members.get(
+          { groupKey, memberKey: memberEmail },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    const currentRole = (existing.data.role || "MEMBER").toUpperCase();
+    if (currentRole === role) {
+      return { alreadyMember: true, previousRole: currentRole, roleChanged: false };
+    }
+    // Role update is idempotent, so 5xx retries are safe here.
+    await withGoogleRetry(
+      () =>
+        client.members.update(
+          {
+            groupKey,
+            memberKey: memberEmail,
+            requestBody: { role },
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    return { alreadyMember: true, previousRole: currentRole, roleChanged: true };
   }
 }
 
 /**
  * Remove a member from a group. A missing membership is not an error —
  * `removed: false` tells the caller it was already gone (idempotent re-runs).
+ * A 404 for the GROUP itself (typo'd address) is disambiguated from a missing
+ * membership and surfaced as an error — "already removed" for a group that
+ * never existed would mislead the operator into thinking the removal took.
  */
 export async function removeGroupMember(
   tenant: Tenant | null,
@@ -935,8 +999,27 @@ export async function removeGroupMember(
     );
     return { removed: true };
   } catch (e) {
-    if (isNotFoundError(e)) return { removed: false };
-    throw e;
+    if (!isNotFoundError(e)) throw e;
+    // The delete's 404 doesn't say WHICH resource was missing. Check the
+    // group: if it's gone too, this was a bad group address, not an
+    // already-removed membership. Any error in the check itself degrades to
+    // the historical "already gone" answer rather than failing the call.
+    try {
+      await withGoogleRetry(
+        () =>
+          client.groups.get(
+            { groupKey, fields: "id" },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
+      );
+    } catch (ge) {
+      if (isNotFoundError(ge)) {
+        throw new Error(`Group "${groupKey}" was not found`);
+      }
+      return { removed: false };
+    }
+    return { removed: false };
   }
 }
 
@@ -953,6 +1036,12 @@ export async function removeUserFromAllGroups(
   removed: number;
   failed: number;
   errors: Array<{ group: string; message: string }>;
+  /**
+   * True when the user belonged to more groups than the per-run cap — some
+   * memberships remain and the caller must re-run (or report a partial
+   * result) instead of treating the step as complete.
+   */
+  truncated: boolean;
 }> {
   if (!isValidEmail(userEmail)) {
     throw new Error("userEmail must be a valid email address");
@@ -970,9 +1059,12 @@ export async function removeUserFromAllGroups(
     }
     pageToken = page.nextPageToken ?? undefined;
   } while (pageToken && memberships.length < MAX_GROUPS);
+  const truncated = pageToken !== undefined || memberships.length > MAX_GROUPS;
   if (memberships.length > MAX_GROUPS) memberships.length = MAX_GROUPS;
 
-  if (memberships.length === 0) return { removed: 0, failed: 0, errors: [] };
+  if (memberships.length === 0) {
+    return { removed: 0, failed: 0, errors: [], truncated };
+  }
 
   const { client } = getGroupsClient(tenant);
   let removed = 0;
@@ -1013,7 +1105,7 @@ export async function removeUserFromAllGroups(
       worker
     )
   );
-  return { removed, failed, errors };
+  return { removed, failed, errors, truncated };
 }
 
 export interface ActivityEvent {
@@ -1322,6 +1414,40 @@ export async function listExternallySharedFiles(
   let scanned = 0;
   let pageToken: string | undefined = startPageToken || undefined;
 
+  // Drive truncates the inline `permissions` field on a files.list row at
+  // ~100 entries with no way to paginate it. A file at that cap may hold its
+  // only external grants past the cut — inline classification alone would
+  // pass the file as clean. Any file at the cap gets a full permissions.list
+  // walk instead; that costs extra calls only for pathologically over-shared
+  // files, so the common case stays one list call per 100 files.
+  const INLINE_PERMISSIONS_CAP = 100;
+  const listAllPermissions = async (
+    fileId: string
+  ): Promise<drive_v3.Schema$Permission[]> => {
+    const all: drive_v3.Schema$Permission[] = [];
+    let permPageToken: string | undefined;
+    do {
+      const r = await withGoogleRetry(
+        () =>
+          drive.permissions.list(
+            {
+              fileId,
+              fields:
+                "nextPageToken, permissions(type, role, emailAddress, domain, allowFileDiscovery)",
+              pageSize: 100,
+              pageToken: permPageToken,
+              supportsAllDrives: true,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS }
+          ),
+        { retryServerErrors: true }
+      );
+      all.push(...(r.data.permissions || []));
+      permPageToken = r.data.nextPageToken ?? undefined;
+    } while (permPageToken);
+    return all;
+  };
+
   // Belt alongside the file cap: Drive can return sparse (even empty) pages
   // while still supplying a nextPageToken, so a call bounded only by files
   // scanned could chain an unbounded number of list requests. The page bound
@@ -1340,13 +1466,8 @@ export async function listExternallySharedFiles(
             // Files the user can see — focus on shared items only to keep the
             // audit cheap. `q="visibility != 'limited'"` would miss link-shared
             // items, so we use the broader filter and check permissions client-side.
-            //
-            // NOTE: the inline `permissions` field is capped by Drive at ~100
-            // entries per file with no pagination here, so a file shared with more
-            // than ~100 principals can under-report external permissions in the
-            // audit. The revoke path (revokeForOneFile) re-lists permissions with
-            // full pagination, so remediation is unaffected — only the audit
-            // preview count can be short for pathologically over-shared files.
+            // Files whose inline permissions hit Drive's ~100-entry cap are
+            // re-listed with full pagination below so none are missed.
             q: "trashed = false and 'me' in owners",
             fields:
               "nextPageToken, files(id, name, mimeType, webViewLink, ownedByMe, permissions(type, role, emailAddress, domain, allowFileDiscovery))",
@@ -1365,8 +1486,17 @@ export async function listExternallySharedFiles(
     const files = res.data.files || [];
     for (const f of files) {
       scanned++;
+      let perms = f.permissions || [];
+      if (perms.length >= INLINE_PERMISSIONS_CAP && f.id) {
+        try {
+          perms = await listAllPermissions(f.id);
+        } catch {
+          // Fall back to the (possibly truncated) inline set rather than
+          // failing the whole scan for one over-shared file.
+        }
+      }
       const externals: ExternalSharedFile["external"] = [];
-      for (const p of f.permissions || []) {
+      for (const p of perms) {
         const flag = classifyPermission(p, verifiedDomains);
         if (flag) externals.push(flag);
       }
@@ -2317,7 +2447,15 @@ export async function transferDriveFoldersOwnership(
   let budget = TRANSFER_BATCH_BUDGET;
   const toUserLower = toUser.toLowerCase();
 
-  while (budget > 0) {
+  // The item budget alone can't bound this loop: Drive may return sparse or
+  // empty list pages while still supplying a nextPageToken, and an empty page
+  // consumes no budget — so one route call could chain list requests without
+  // limit. The page bound keeps a single chunk's latency predictable; work
+  // left over resumes via nextCursor exactly like a spent item budget.
+  const TRANSFER_MAX_LIST_PAGES = 50;
+  let listPagesFetched = 0;
+
+  while (budget > 0 && listPagesFetched < TRANSFER_MAX_LIST_PAGES) {
     if (!local.current) {
       const next = local.queue.shift();
       if (!next) break;
@@ -2340,6 +2478,7 @@ export async function transferDriveFoldersOwnership(
     }
 
     const folderId = local.current.folderId;
+    listPagesFetched++;
     const escapedParent = folderId.replace(/'/g, "\\'");
     // List EVERY child, not just those owned by the source. A subfolder owned
     // by someone else can still contain files the departing user owns; if we
@@ -2669,20 +2808,24 @@ const MAILBOX_API_TIMEOUT_MS = 60_000;
 const MAILBOX_EXPORT_DEFAULT_PAGE = 25;
 const MAILBOX_EXPORT_MAX_PAGE = 50;
 // Fetch raw messages in parallel per page. messages.get costs 5 quota units,
-// so 12 in flight peaks at ~60 units/sec — several times faster than a serial
+// so 6 in flight peaks at ~30 units/sec — several times faster than a serial
 // walk while staying well under Gmail's 250 units/user/sec budget, with the
-// retry layer absorbing the occasional 429. Bounded so a page of large
-// messages can't open an unreasonable number of simultaneous downloads.
-const MAILBOX_EXPORT_FETCH_CONCURRENCY = 12;
+// retry layer absorbing the occasional 429. The count also bounds the byte
+// budget's overshoot (see below), so it cannot be raised independently.
+const MAILBOX_EXPORT_FETCH_CONCURRENCY = 6;
 // Cumulative raw-byte budget per returned page. A single Gmail message can be
 // ~67 MB base64url, so a page capped only by message count (up to 50) could
 // hold multiple GB and throw `RangeError: Invalid string length` when
-// NextResponse.json stringifies it (V8 caps strings near 1 GB) — leaving that
-// pageToken permanently unfinishable. Once a page's fetched bytes reach this
-// budget we stop and return the remaining ids as `pendingIds` for the next
-// call. With ~12-way concurrency the worst-case page is budget + (concurrency-1)
-// x max-message, comfortably under the string cap. Always fetch at least one id
-// so a lone oversized message still makes progress.
+// NextResponse.json stringifies it — leaving that pageToken permanently
+// unfinishable. Once a page's fetched bytes reach this budget we stop and
+// return the remaining ids as `pendingIds` for the next call.
+//
+// The budget check happens when a worker CLAIMS the next id, so in-flight
+// fetches can overshoot it by up to (concurrency - 1) × max-message: with
+// 6 workers that's 48 MB + 5 × 67 MB ≈ 383 MB. V8's real string cap is
+// 2^29 - 24 chars (~512 MiB, not 1 GB), so the worst case clears it with
+// margin — raising either the budget or the concurrency erodes that margin.
+// Always fetch at least one id so a lone oversized message still progresses.
 const MAILBOX_EXPORT_PAGE_BYTE_BUDGET = 48 * 1024 * 1024;
 
 /** Hard cap on messages accepted in a single import batch. */

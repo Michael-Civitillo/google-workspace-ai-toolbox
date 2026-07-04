@@ -68,10 +68,16 @@ export async function POST(request: NextRequest) {
     const group = requireEmail(body.group, "group");
     const member = requireEmail(body.member, "member");
     const role = parseRole(body.role);
+    // Only enforce the role on an existing membership when the caller chose
+    // one explicitly — a defaulted MEMBER must never demote an existing
+    // OWNER/MANAGER on re-add.
+    const roleExplicit = body.role !== undefined && body.role !== null && body.role !== "";
 
-    let result: { alreadyMember: boolean };
+    let result: { alreadyMember: boolean; previousRole?: string; roleChanged?: boolean };
     try {
-      result = await addGroupMember(tenant, group, member, role);
+      result = await addGroupMember(tenant, group, member, role, {
+        enforceRole: roleExplicit,
+      });
     } catch (e) {
       audit({
         action: "groups.member_add",
@@ -94,12 +100,28 @@ export async function POST(request: NextRequest) {
       action: "groups.member_add",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: { group, member, role, alreadyMember: result.alreadyMember },
+      params: {
+        group,
+        member,
+        role,
+        alreadyMember: result.alreadyMember,
+        ...(result.roleChanged !== undefined
+          ? { roleChanged: result.roleChanged, previousRole: result.previousRole }
+          : {}),
+      },
       outcome: "success",
     });
     return NextResponse.json({
       success: true,
-      data: { group, member, role, alreadyMember: result.alreadyMember },
+      data: {
+        group,
+        member,
+        role,
+        alreadyMember: result.alreadyMember,
+        ...(result.roleChanged !== undefined
+          ? { roleChanged: result.roleChanged, previousRole: result.previousRole }
+          : {}),
+      },
     });
   } catch (e) {
     audit({
