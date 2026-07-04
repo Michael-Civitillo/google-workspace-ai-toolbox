@@ -212,6 +212,10 @@ export default function Offboarding() {
     // across a switch pairs tenant B's confirmation dialog with tenant A's
     // user, burning a fully-confirmed run on guaranteed server-side failures.
     lookupSeq.current++;
+    // The seq bump above means any in-flight lookup's `finally` will skip its
+    // own setLookingUp(false) (it's guarded to the latest seq) — clear the
+    // spinner here or it stays on forever and blocks all future lookups.
+    setLookingUp(false);
     setPreflight(null);
     setResults({} as Record<StepId, { status: StepStatus; message?: string }>);
     tfetch("/api/admin/domains", {}, tenantId)

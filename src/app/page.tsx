@@ -136,9 +136,15 @@ export default function Dashboard() {
         .then((res) => res.json())
         .catch(() => ({ installed: false, authenticated: false } as GwsStatus)),
       fetch("/api/tenants")
-        .then((res) => res.json() as Promise<TenantsListPayload>)
-        .then((d) => (Array.isArray(d?.tenants) ? d.tenants.length : 0))
-        .catch(() => 0),
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json() as Promise<TenantsListPayload>;
+        })
+        .then((d) => (Array.isArray(d?.tenants) ? d.tenants.length : null))
+        // null = "couldn't determine", which must NOT trigger the first-run
+        // banner — telling an established operator to start onboarding
+        // because one fetch failed is worse than showing no banner.
+        .catch(() => null),
     ])
       .then(([s, count]) => {
         setStatus(s);

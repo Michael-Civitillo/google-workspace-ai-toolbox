@@ -47,8 +47,11 @@ export default function EmailDelegation() {
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
 
-  const listDelegates = async () => {
-    if (!user) return;
+  const listDelegates = async (ownerOverride?: string) => {
+    // ownerOverride lets refresh-after-removal re-list the owner the panel is
+    // showing (listedOwner) — the live input may have been retyped since.
+    const owner = (ownerOverride ?? user).trim();
+    if (!owner) return;
     setLoading(true);
     setMessage(null);
     // Pin the tenant this list belongs to, and discard the response if the
@@ -58,7 +61,7 @@ export default function EmailDelegation() {
 
     try {
       const res = await tfetch(
-        `/api/gws/email-delegation?user=${encodeURIComponent(user)}`,
+        `/api/gws/email-delegation?user=${encodeURIComponent(owner)}`,
         {},
         pinnedTenantId
       );
@@ -67,10 +70,10 @@ export default function EmailDelegation() {
 
       if (result.success && result.data?.delegates) {
         setDelegates(result.data.delegates);
-        setListedOwner(user.trim());
+        setListedOwner(owner);
       } else if (result.success) {
         setDelegates([]);
-        setListedOwner(user.trim());
+        setListedOwner(owner);
         setMessage({ type: "success", text: "No delegates found for this user." });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to list delegates" });
@@ -119,9 +122,13 @@ export default function EmailDelegation() {
           text: `Successfully added ${added} as a delegate for ${user}`,
         });
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay.
+        setConfirmAddOpen(false);
         setMessage({ type: "error", text: result.error || "Failed to add delegate" });
       }
     } catch {
+      setConfirmAddOpen(false);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setAdding(false);
@@ -148,17 +155,23 @@ export default function EmailDelegation() {
 
       if (result.success) {
         setConfirmRemoveTarget(null);
-        // Refresh before messaging — listDelegates' prologue clears messages,
-        // which would erase this success text in the same batched render.
-        await listDelegates();
+        // Refresh the owner the removal actually ran against — the live input
+        // may point at someone else by now. Refresh before messaging —
+        // listDelegates' prologue clears messages, which would erase this
+        // success text in the same batched render.
+        await listDelegates(listedOwner);
         setMessage({
           type: "success",
           text: `Successfully removed ${delegateEmail} as a delegate from ${listedOwner}`,
         });
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay.
+        setConfirmRemoveTarget(null);
         setMessage({ type: "error", text: result.error || "Failed to remove delegate" });
       }
     } catch {
+      setConfirmRemoveTarget(null);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setRemoving(null);
@@ -211,7 +224,7 @@ export default function EmailDelegation() {
                 />
                 <Button
                   variant="secondary"
-                  onClick={listDelegates}
+                  onClick={() => listDelegates()}
                   disabled={!user || loading}
                 >
                   {loading ? (

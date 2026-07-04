@@ -87,7 +87,13 @@ export default function TenantsPage() {
   const load = useCallback(() => {
     setLoading(true);
     return fetch("/api/tenants")
-      .then((r) => r.json())
+      .then(async (r) => {
+        // An error response must not be read as an empty tenant list: that
+        // renders "No tenants configured yet" over a working config AND
+        // nulls the global tenant pin, retargeting subsequent requests.
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
         const tenants: Tenant[] = data.tenants ?? [];
         const activeId: string | null = data.activeTenantId ?? null;

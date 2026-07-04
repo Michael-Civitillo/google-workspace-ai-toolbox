@@ -299,6 +299,10 @@ export default function BulkOperations() {
   };
 
   const changeOperation = (v: OperationId | null) => {
+    // Switching operations rebuilds `rows`, but an active run keeps writing
+    // per-row statuses into it by index — the old run's results would land on
+    // the new operation's rows. Freeze the selector until the run finishes.
+    if (running) return;
     if (!v || !(v in OPERATIONS)) return;
     setOperation(v);
     // Re-validate the existing input against the new operation's rules.
@@ -449,7 +453,11 @@ export default function BulkOperations() {
             <div className="space-y-2 max-w-md">
               <Label>Operation</Label>
               <Select value={operation} onValueChange={changeOperation}>
-                <SelectTrigger className="w-full" aria-label="Bulk operation">
+                <SelectTrigger
+                  className="w-full"
+                  aria-label="Bulk operation"
+                  disabled={running}
+                >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

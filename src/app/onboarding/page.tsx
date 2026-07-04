@@ -185,9 +185,14 @@ export default function OnboardingPage() {
 
   // Step-level "can the user move on?" gate.
   const canContinue = useMemo(() => {
-    if (activeStep === "tenant") return !!createdTenantId;
+    // A tenant added in this session OR one that already exists both satisfy
+    // the step — operators re-visiting onboarding with tenants configured
+    // shouldn't be forced to create a duplicate just to proceed.
+    if (activeStep === "tenant") {
+      return !!createdTenantId || (tenantCount ?? 0) > 0;
+    }
     return true;
-  }, [activeStep, createdTenantId]);
+  }, [activeStep, createdTenantId, tenantCount]);
 
   async function handleAddTenant() {
     setTenantError(null);

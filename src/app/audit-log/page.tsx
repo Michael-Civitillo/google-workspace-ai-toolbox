@@ -147,10 +147,23 @@ export default function AuditLog() {
     if (actionFilter.trim()) params.set("action", actionFilter.trim());
     if (outcomeFilter !== "any") params.set("outcome", outcomeFilter);
     if (tenantScope === "current" && tenantId) params.set("tenantId", tenantId);
-    if (fromDate) params.set("from", fromDate);
+    // Send both bounds as explicit UTC instants for the operator's LOCAL
+    // day. Sending the raw strings instead splits interpretation: a bare
+    // date parses as UTC midnight while a zoneless date-time parses in the
+    // SERVER's timezone — so the two bounds could sit in different frames
+    // and each disagree with the day the operator picked.
+    if (fromDate) {
+      const from = new Date(`${fromDate}T00:00:00`);
+      if (!Number.isNaN(from.getTime())) {
+        params.set("from", from.toISOString());
+      }
+    }
     if (toDate) {
-      // Make the "to" date inclusive of its whole day.
-      params.set("to", `${toDate}T23:59:59.999`);
+      // Inclusive of the whole "to" day.
+      const to = new Date(`${toDate}T23:59:59.999`);
+      if (!Number.isNaN(to.getTime())) {
+        params.set("to", to.toISOString());
+      }
     }
     return params.toString();
   };

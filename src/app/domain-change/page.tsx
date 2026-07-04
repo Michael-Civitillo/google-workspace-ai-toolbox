@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Card,
   CardContent,
@@ -72,6 +72,11 @@ export default function DomainChange() {
     text: string;
   } | null>(null);
 
+  // Live tenant id + lookup sequence for staleness checks in async closures.
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
+  const lookupSeqRef = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
     setLoadingDomains(true);
@@ -79,6 +84,8 @@ export default function DomainChange() {
     // across a sidebar tenant switch pairs the new tenant's confirm dialog
     // with the old tenant's user (and possibly a domain the new tenant
     // doesn't even have), wasting a typed irreversible-change confirmation.
+    lookupSeqRef.current++;
+    setLookingUp(false);
     setUser(null);
     setSelectedDomain("");
     setNewUsername("");
@@ -101,16 +108,26 @@ export default function DomainChange() {
   }, [tenantId]);
 
   const lookupUser = async () => {
-    if (!email) return;
+    if (!email.trim()) return;
+    // Staleness guard: out-of-order lookup responses (or one from before a
+    // tenant switch) must not repopulate the card — the user shown here feeds
+    // a typed confirmation for an irreversible primary-email change.
+    const seq = ++lookupSeqRef.current;
+    const pinnedTenantId = tenantId;
     setLookingUp(true);
     setMessage(null);
     setUser(null);
 
     try {
       const res = await tfetch(
-        `/api/admin/user?email=${encodeURIComponent(email)}`
+        `/api/admin/user?email=${encodeURIComponent(email.trim())}`,
+        {},
+        pinnedTenantId
       );
       const result = await res.json();
+      if (seq !== lookupSeqRef.current || tenantIdRef.current !== pinnedTenantId) {
+        return;
+      }
 
       if (result.success && result.data) {
         setUser(result.data);
@@ -123,9 +140,11 @@ export default function DomainChange() {
         });
       }
     } catch {
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      if (seq === lookupSeqRef.current) {
+        setMessage({ type: "error", text: "Failed to connect to the API" });
+      }
     } finally {
-      setLookingUp(false);
+      if (seq === lookupSeqRef.current) setLookingUp(false);
     }
   };
 

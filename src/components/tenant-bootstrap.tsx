@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect } from "react";
-import { setCurrentTenantState } from "@/lib/tenant-client";
+import {
+  setCurrentTenantState,
+  tenantStateGeneration,
+} from "@/lib/tenant-client";
 import type { Tenant } from "@/lib/tenant-types";
 
 /**
@@ -18,10 +21,15 @@ export function TenantBootstrap() {
     let cancelled = false;
     async function sync() {
       try {
+        // Snapshot the tenant-state generation before the round trip: if the
+        // user switches tenants while this fetch is in flight, the response
+        // reflects the PREVIOUS active tenant and applying it would silently
+        // revert their switch.
+        const genBefore = tenantStateGeneration();
         const r = await fetch("/api/tenants");
         if (!r.ok) return;
         const data = await r.json();
-        if (cancelled) return;
+        if (cancelled || tenantStateGeneration() !== genBefore) return;
         const id: string | null = data.activeTenantId ?? null;
         const tenants: Tenant[] = Array.isArray(data.tenants) ? data.tenants : [];
         setCurrentTenantState(

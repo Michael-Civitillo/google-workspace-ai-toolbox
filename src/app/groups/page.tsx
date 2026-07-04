@@ -95,6 +95,18 @@ export default function Groups() {
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
 
+  // Per-list request sequence numbers. A response only applies if it is still
+  // the LATEST request for that list — otherwise a slow first page can
+  // overwrite a newer one, or a stale "load more" for group A can append A's
+  // members onto group B's freshly-loaded list.
+  const groupsSeqRef = useRef(0);
+  const membersSeqRef = useRef(0);
+  const userGroupsSeqRef = useRef(0);
+  // The query the current groups listing was fetched with. "Load more" must
+  // reuse it — pairing the stored pageToken with a since-edited input would
+  // hand Google a token from a different result set.
+  const [groupsQuery, setGroupsQuery] = useState("");
+
   // Lists fetched for tenant A must never drive actions against tenant B.
   useEffect(() => {
     setGroups([]);
@@ -113,9 +125,11 @@ export default function Groups() {
     setGroupsLoading(true);
     setMessage(null);
     const pinnedTenantId = tenantId;
+    const seq = ++groupsSeqRef.current;
+    const effectiveQuery = append ? groupsQuery : query.trim();
     try {
       const params = new URLSearchParams();
-      if (query.trim()) params.set("query", query.trim());
+      if (effectiveQuery) params.set("query", effectiveQuery);
       params.set("pageSize", "200");
       if (append && groupsPageToken) params.set("pageToken", groupsPageToken);
       const res = await tfetch(
@@ -125,8 +139,10 @@ export default function Groups() {
       );
       const result = await res.json();
       if (tenantIdRef.current !== pinnedTenantId) return;
+      if (groupsSeqRef.current !== seq) return;
 
       if (result.success) {
+        if (!append) setGroupsQuery(effectiveQuery);
         setGroups((prev) =>
           append ? [...prev, ...result.data.groups] : result.data.groups
         );
@@ -154,6 +170,7 @@ export default function Groups() {
     setMembersLoading(true);
     setMessage(null);
     const pinnedTenantId = tenantId;
+    const seq = ++membersSeqRef.current;
     try {
       const params = new URLSearchParams({ group, pageSize: "200" });
       if (append && membersPageToken) params.set("pageToken", membersPageToken);
@@ -164,6 +181,7 @@ export default function Groups() {
       );
       const result = await res.json();
       if (tenantIdRef.current !== pinnedTenantId) return;
+      if (membersSeqRef.current !== seq) return;
 
       if (result.success) {
         setSelectedGroup(group);
@@ -185,7 +203,8 @@ export default function Groups() {
   };
 
   const addMember = async () => {
-    if (!selectedGroup || !newMember) return;
+    const member = newMember.trim();
+    if (!selectedGroup || !member) return;
     setAdding(true);
     setMessage(null);
     try {
@@ -196,7 +215,7 @@ export default function Groups() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             group: selectedGroup,
-            member: newMember,
+            member,
             role: newRole,
           }),
         },
@@ -205,7 +224,7 @@ export default function Groups() {
       const result = await res.json();
 
       if (result.success) {
-        const added = newMember;
+        const added = member;
         setNewMember("");
         setConfirmAddOpen(false);
         // Refresh first, then set the message — loadMembers clears messages in
@@ -214,16 +233,22 @@ export default function Groups() {
         setMessage({
           type: "success",
           text: result.data?.alreadyMember
-            ? `${added} was already a member of ${selectedGroup}`
+            ? result.data?.roleChanged
+              ? `${added} was already a member of ${selectedGroup} — role changed from ${result.data?.previousRole ?? "?"} to ${newRole}`
+              : `${added} was already a member of ${selectedGroup}`
             : `Added ${added} to ${selectedGroup} as ${newRole}`,
         });
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay.
+        setConfirmAddOpen(false);
         setMessage({
           type: "error",
           text: result.error || "Failed to add group member",
         });
       }
     } catch {
+      setConfirmAddOpen(false);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setAdding(false);
@@ -252,7 +277,7 @@ export default function Groups() {
           await loadMembers(group, false);
         }
         if (listedMemberUser && member === listedMemberUser) {
-          await loadUserGroups(false);
+          await loadUserGroups(false, listedMemberUser);
         }
         setMessage({
           type: "success",
@@ -261,24 +286,30 @@ export default function Groups() {
             : `${member} was not a member of ${group}`,
         });
       } else {
+        setConfirmRemoveTarget(null);
         setMessage({
           type: "error",
           text: result.error || "Failed to remove group member",
         });
       }
     } catch {
+      setConfirmRemoveTarget(null);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setRemoving(null);
     }
   };
 
-  const loadUserGroups = async (append: boolean) => {
-    const target = append ? listedMemberUser : memberUser.trim();
+  const loadUserGroups = async (append: boolean, targetOverride?: string) => {
+    // targetOverride lets refresh-after-removal re-list the user whose panel
+    // is showing (listedMemberUser), not whatever is in the live input now.
+    const target =
+      targetOverride ?? (append ? listedMemberUser : memberUser.trim());
     if (!target) return;
     setUserGroupsLoading(true);
     setMessage(null);
     const pinnedTenantId = tenantId;
+    const seq = ++userGroupsSeqRef.current;
     try {
       const params = new URLSearchParams({ userKey: target, pageSize: "200" });
       if (append && userGroupsPageToken) {
@@ -291,6 +322,7 @@ export default function Groups() {
       );
       const result = await res.json();
       if (tenantIdRef.current !== pinnedTenantId) return;
+      if (userGroupsSeqRef.current !== seq) return;
 
       if (result.success) {
         setUserGroups((prev) =>

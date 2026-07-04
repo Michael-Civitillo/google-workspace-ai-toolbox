@@ -100,6 +100,18 @@ export default function ActivityReports() {
 
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  // Monotonic request id: a response only applies while it's the latest
+  // events request, so a slow first page can't clobber a newer one.
+  const eventsSeqRef = useRef(0);
+  // The filters the current listing was fetched with. "Load more" reuses
+  // them — a Reports pageToken belongs to the query it came from, so pairing
+  // it with live (possibly edited) inputs returns the wrong window.
+  const [listedFilters, setListedFilters] = useState<{
+    user: string;
+    days: number | null;
+  } | null>(null);
 
   // Events fetched for tenant A must not survive a switch to tenant B.
   useEffect(() => {
@@ -109,6 +121,7 @@ export default function ActivityReports() {
     setExpanded(new Set());
     setDigest("");
     setDigestMeta("");
+    setListedFilters(null);
   }, [tenantId]);
 
   // Switching between login/admin shows a different data set — clear the list.
@@ -126,11 +139,19 @@ export default function ActivityReports() {
     setMessage(null);
     const pinnedTenantId = tenantId;
     const pinnedTab = tab;
+    const seq = ++eventsSeqRef.current;
+    const d = Number(days);
+    const filters =
+      append && listedFilters
+        ? listedFilters
+        : {
+            user: userFilter.trim(),
+            days: Number.isInteger(d) && d >= 1 ? d : null,
+          };
     try {
       const params = new URLSearchParams({ app: pinnedTab, pageSize: "100" });
-      if (userFilter.trim()) params.set("user", userFilter.trim());
-      const d = Number(days);
-      if (Number.isInteger(d) && d >= 1) params.set("days", String(d));
+      if (filters.user) params.set("user", filters.user);
+      if (filters.days !== null) params.set("days", String(filters.days));
       if (append && pageToken) params.set("pageToken", pageToken);
 
       const res = await tfetch(
@@ -140,8 +161,14 @@ export default function ActivityReports() {
       );
       const result = await res.json();
       if (tenantIdRef.current !== pinnedTenantId) return;
+      // A response for the other tab (or an outdated request) must be
+      // dropped: sign-in events rendering under the Admin Console tab is
+      // exactly the kind of quiet misinformation an audit page can't have.
+      if (tabRef.current !== pinnedTab) return;
+      if (eventsSeqRef.current !== seq) return;
 
       if (result.success) {
+        if (!append) setListedFilters(filters);
         setEvents((prev) =>
           append ? [...prev, ...result.data.events] : result.data.events
         );
