@@ -15,8 +15,19 @@ import type { Tenant } from "./tenant-types";
 
 let _currentTenantId: string | null = null;
 let _currentTenant: Tenant | null = null;
+let _generation = 0;
 const listeners = new Set<(id: string | null) => void>();
 const tenantsChangedListeners = new Set<() => void>();
+
+/**
+ * Monotonic counter bumped on every tenant-state write. Async flows snapshot
+ * it before a fetch and compare after: if it moved, someone (the switcher, a
+ * bootstrap in another effect) changed tenants mid-flight and the fetched
+ * snapshot is stale — applying it would silently revert the newer selection.
+ */
+export function tenantStateGeneration(): number {
+  return _generation;
+}
 
 function notify() {
   for (const fn of listeners) fn(_currentTenantId);
@@ -37,6 +48,7 @@ export function setCurrentTenantState(
 ) {
   _currentTenantId = id;
   _currentTenant = tenant;
+  _generation++;
   notify();
 }
 

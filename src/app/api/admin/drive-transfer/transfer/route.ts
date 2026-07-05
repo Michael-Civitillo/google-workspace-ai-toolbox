@@ -71,10 +71,24 @@ export async function POST(request: NextRequest) {
         }
         ids.push(r.trim());
       }
-      cursor = buildInitialTransferCursor(ids);
+      // Cursor/folder-id shape problems are client errors — surface them as
+      // 400s, not the generic 500 a plain Error would map to.
+      try {
+        cursor = buildInitialTransferCursor(ids);
+      } catch (e) {
+        throw new ValidationError(
+          e instanceof Error ? e.message : "Invalid folderIds"
+        );
+      }
       initialFolderCount = ids.length;
     } else {
-      cursor = sanitizeTransferCursor(body.cursor);
+      try {
+        cursor = sanitizeTransferCursor(body.cursor);
+      } catch (e) {
+        throw new ValidationError(
+          e instanceof Error ? e.message : "Invalid cursor"
+        );
+      }
     }
 
     const progress = await transferDriveFoldersOwnership(

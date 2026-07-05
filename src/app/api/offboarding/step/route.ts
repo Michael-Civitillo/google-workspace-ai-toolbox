@@ -144,16 +144,31 @@ export async function POST(request: NextRequest) {
 
         // Step 1: register the forwarding address on the source mailbox. A
         // same-domain successor is auto-verified when the address is created
-        // via domain-wide delegation, so no confirmation email is needed.
+        // via domain-wide delegation, so no confirmation email is needed. An
+        // EXTERNAL successor starts "pending" until they accept Gmail's
+        // verification email — enabling auto-forwarding before that fails
+        // opaquely, so the pending state is surfaced as the step's outcome.
+        let verificationStatus: string | null = null;
         try {
-          await gmail.users.settings.forwardingAddresses.create({
+          const created = await gmail.users.settings.forwardingAddresses.create({
             userId: "me",
             requestBody: { forwardingEmail: successor },
           });
+          verificationStatus = created.data.verificationStatus ?? null;
         } catch (e) {
           // An "already exists" error means a previous run registered the
           // address — proceed to enabling auto-forwarding so the step is
           // retry-safe rather than wedging on the duplicate.
+          if (isAlreadyExistsError(e)) {
+            try {
+              const existing = await gmail.users.settings.forwardingAddresses.get(
+                { userId: "me", forwardingEmail: successor }
+              );
+              verificationStatus = existing.data.verificationStatus ?? null;
+            } catch {
+              verificationStatus = null;
+            }
+          }
           if (!isAlreadyExistsError(e)) {
             const msg = e instanceof Error ? e.message : String(e);
             audit({
@@ -171,6 +186,23 @@ export async function POST(request: NextRequest) {
               { status: 502 }
             );
           }
+        }
+
+        if (verificationStatus === "pending") {
+          audit({
+            action: "offboarding.forward.pending_verification",
+            ...auditBase,
+            params: { user, successor },
+            outcome: "success",
+          });
+          return NextResponse.json({
+            success: false,
+            data: { successor, pendingVerification: true },
+            error:
+              `Gmail sent a verification email to ${successor}. ` +
+              "Forwarding can't be enabled until they accept it — " +
+              "re-run this step once they have.",
+          });
         }
 
         // Step 2: enable auto-forwarding and archive the originals.
@@ -285,25 +317,36 @@ export async function POST(request: NextRequest) {
 
       case "groups": {
         const result = await removeUserFromAllGroups(tenant, user);
+        // A truncated run is NOT complete: memberships past the per-run cap
+        // remain, so reporting success would let the operator move on with
+        // the user still on mailing lists and access groups.
+        const complete = result.failed === 0 && !result.truncated;
+        const errorParts: string[] = [];
+        if (result.failed > 0) {
+          errorParts.push(
+            `${result.failed} of ${result.removed + result.failed} group removals failed`
+          );
+        }
+        if (result.truncated) {
+          errorParts.push(
+            "the user belongs to more groups than one run can process — run this step again to remove the remainder"
+          );
+        }
         audit({
           action: "offboarding.groups",
           ...auditBase,
           params: { user, ...result },
-          outcome: result.failed === 0 ? "success" : "error",
-          error: result.failed > 0
-            ? `${result.failed} group removal(s) failed`
-            : undefined,
+          outcome: complete ? "success" : "error",
+          error: errorParts.length > 0 ? errorParts.join("; ") : undefined,
         });
         return NextResponse.json(
           {
-            success: result.failed === 0,
+            success: complete,
             data: {
               ...result,
-              message: `Removed from ${result.removed} group${result.removed === 1 ? "" : "s"}`,
+              message: `Removed from ${result.removed} group${result.removed === 1 ? "" : "s"}${result.truncated ? " (more remain)" : ""}`,
             },
-            error: result.failed > 0
-              ? `${result.failed} of ${result.removed + result.failed} group removals failed`
-              : undefined,
+            error: errorParts.length > 0 ? errorParts.join("; ") : undefined,
           },
           { status: result.failed > 0 ? 502 : 200 }
         );

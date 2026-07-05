@@ -361,6 +361,11 @@ export default function DriveTransfer() {
   async function runTransfer() {
     if (selected.size === 0) return;
     setBusy(true);
+    // Close the modal immediately: the transfer runs in chunks that can take
+    // minutes, and while the dialog is up it covers the live progress card
+    // and the Cancel button — the operator would be locked out of both for
+    // the whole run.
+    setConfirmOpen(false);
     cancelRef.current = false;
     setError(null);
     setCompletion(null);

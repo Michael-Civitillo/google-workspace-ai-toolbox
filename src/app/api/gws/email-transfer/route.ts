@@ -76,17 +76,32 @@ export async function POST(request: NextRequest) {
 
     // Step 1: Create forwarding address.
     let forwardData: unknown;
+    let verificationStatus: string | null = null;
     try {
       const res = await gmail.users.settings.forwardingAddresses.create({
         userId: "me",
         requestBody: { forwardingEmail: targetUser },
       });
       forwardData = res.data;
+      verificationStatus = res.data.verificationStatus ?? null;
     } catch (e) {
       // A duplicate means a previous attempt already registered the address —
       // continue to enabling auto-forwarding so a retry isn't blocked here.
       if (isAlreadyExistsError(e)) {
         forwardData = { forwardingEmail: targetUser, alreadyExisted: true };
+        // The duplicate error doesn't say whether the recipient has verified
+        // yet, and enabling with a pending address fails opaquely — look the
+        // status up. Best-effort: an unreadable status falls through to the
+        // enable attempt, which reports its own error.
+        try {
+          const existing = await gmail.users.settings.forwardingAddresses.get({
+            userId: "me",
+            forwardingEmail: targetUser,
+          });
+          verificationStatus = existing.data.verificationStatus ?? null;
+        } catch {
+          verificationStatus = null;
+        }
       } else {
         const msg = e instanceof Error ? e.message : String(e);
         audit({
@@ -109,6 +124,29 @@ export async function POST(request: NextRequest) {
           { status: 502 }
         );
       }
+    }
+
+    // An out-of-org forwarding address starts life "pending": Gmail emails
+    // the recipient a confirmation link, and auto-forwarding cannot be
+    // enabled until they accept. Attempting the enable anyway fails with an
+    // opaque Google error — return the real state and next step instead.
+    if (verificationStatus === "pending") {
+      audit({
+        action: "email_transfer.pending_verification",
+        tenantId: tenant?.id ?? null,
+        tenantName: tenant?.name ?? null,
+        params: { sourceUser, targetUser, action, isExternal },
+        outcome: "success",
+      });
+      return NextResponse.json({
+        success: false,
+        data: { forwardingAddress: forwardData, isExternal, pendingVerification: true },
+        error:
+          `Gmail sent a verification email to ${targetUser}. ` +
+          "Auto-forwarding can't be enabled until the recipient accepts it — " +
+          "re-run this transfer once they have.",
+        step: "verify_forwarding",
+      });
     }
 
     // Step 2: Enable auto-forwarding.

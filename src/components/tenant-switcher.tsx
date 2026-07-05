@@ -28,7 +28,13 @@ export function TenantSwitcher() {
 
   const load = useCallback(() => {
     fetch("/api/tenants")
-      .then((r) => r.json())
+      .then(async (r) => {
+        // An error response has no tenant list — treating its body as one
+        // would blank the switcher AND null the global tenant pin, silently
+        // retargeting every later request at the server-side default.
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
         const tenants: Tenant[] = data.tenants ?? [];
         const activeId: string | null = data.activeTenantId ?? null;
@@ -38,7 +44,9 @@ export function TenantSwitcher() {
           activeId ? tenants.find((t) => t.id === activeId) ?? null : null
         );
       })
-      .catch(() => {});
+      .catch(() => {
+        // Keep the current list/pin — stale beats wrong-tenant.
+      });
   }, []);
 
   useEffect(() => {

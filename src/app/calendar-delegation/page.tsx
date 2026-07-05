@@ -73,8 +73,12 @@ export default function CalendarDelegation() {
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
 
-  const listAcl = async () => {
-    if (!calendarId) return;
+  const listAcl = async (calendarOverride?: string) => {
+    // calendarOverride lets refresh-after-removal re-list the calendar the
+    // panel is showing (listedCalendar) — the live input may have been
+    // retyped since.
+    const calendar = (calendarOverride ?? calendarId).trim();
+    if (!calendar) return;
     setLoading(true);
     setMessage(null);
     // Pin the tenant this list belongs to, and discard the response if the
@@ -84,7 +88,7 @@ export default function CalendarDelegation() {
 
     try {
       const res = await tfetch(
-        `/api/gws/calendar-delegation?calendarId=${encodeURIComponent(calendarId)}`,
+        `/api/gws/calendar-delegation?calendarId=${encodeURIComponent(calendar)}`,
         {},
         pinnedTenantId
       );
@@ -93,10 +97,18 @@ export default function CalendarDelegation() {
 
       if (result.success && result.data?.items) {
         setAclRules(result.data.items);
-        setListedCalendar(calendarId.trim());
+        setListedCalendar(calendar);
+        if (result.data.nextPageToken) {
+          // The server caps the walk at 1,000 rules and tells us more exist —
+          // dropping that signal would present a partial ACL as the whole one.
+          setMessage({
+            type: "success",
+            text: `Showing the first ${result.data.items.length} access rules — this calendar has more that are not listed here.`,
+          });
+        }
       } else if (result.success) {
         setAclRules([]);
-        setListedCalendar(calendarId.trim());
+        setListedCalendar(calendar);
         setMessage({ type: "success", text: "No ACL rules found." });
       } else {
         setMessage({ type: "error", text: result.error || "Failed to list ACL rules" });
@@ -154,9 +166,13 @@ export default function CalendarDelegation() {
           text: `Granted ${role} access to ${grantedTo}`,
         });
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay.
+        setConfirmAddOpen(false);
         setMessage({ type: "error", text: result.error || "Failed to add access" });
       }
     } catch {
+      setConfirmAddOpen(false);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setAdding(false);
@@ -183,14 +199,20 @@ export default function CalendarDelegation() {
 
       if (result.success) {
         setConfirmRemove(null);
-        // Refresh before messaging — listAcl's prologue clears messages, which
-        // would erase this success text in the same batched render.
-        await listAcl();
+        // Refresh the calendar the removal actually ran against — the live
+        // input may point somewhere else by now. Refresh before messaging —
+        // listAcl's prologue clears messages, which would erase this success
+        // text in the same batched render.
+        await listAcl(listedCalendar);
         setMessage({ type: "success", text: "Access removed successfully" });
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay.
+        setConfirmRemove(null);
         setMessage({ type: "error", text: result.error || "Failed to remove access" });
       }
     } catch {
+      setConfirmRemove(null);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setRemoving(null);
@@ -243,7 +265,7 @@ export default function CalendarDelegation() {
                 />
                 <Button
                   variant="secondary"
-                  onClick={listAcl}
+                  onClick={() => listAcl()}
                   disabled={!calendarId || loading}
                 >
                   {loading ? (

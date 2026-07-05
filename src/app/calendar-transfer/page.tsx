@@ -118,12 +118,16 @@ export default function CalendarTransfer() {
         });
         setConfirmOpen(false);
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay.
+        setConfirmOpen(false);
         setMessage({
           type: "error",
           text: result.error || "Transfer failed",
         });
       }
     } catch {
+      setConfirmOpen(false);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setLoading(false);

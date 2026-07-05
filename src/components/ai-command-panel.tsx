@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -67,6 +67,16 @@ export function AICommandPanel() {
     type: "success" | "error";
     text: string;
   } | null>(null);
+
+  // A parsed action is tenant-scoped context: it was parsed and reviewed
+  // while one tenant was selected, and executing it after a sidebar switch
+  // would silently fire against a different tenant (the read-only path runs
+  // with no dialog and shows no tenant at all). Invalidate it on switch.
+  useEffect(() => {
+    setParsed(null);
+    setConfirmOpen(false);
+    setReadResult(null);
+  }, [tenantId]);
 
   const parseCommand = async () => {
     if (!command.trim()) return;
@@ -146,12 +156,16 @@ export function AICommandPanel() {
         setCommand("");
         setConfirmOpen(false);
       } else {
+        // Close the dialog so the error banner isn't hidden behind the
+        // modal overlay.
+        setConfirmOpen(false);
         setMessage({
           type: "error",
           text: result.error || "Action failed",
         });
       }
     } catch {
+      setConfirmOpen(false);
       setMessage({ type: "error", text: "Failed to execute action" });
     } finally {
       setExecuting(false);

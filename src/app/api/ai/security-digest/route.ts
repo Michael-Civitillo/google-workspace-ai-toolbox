@@ -37,9 +37,12 @@ async function gatherOrError(
       events.push(...page.events);
       pageToken = page.nextPageToken ?? undefined;
     } while (pageToken && events.length < MAX_EVENTS);
+    // One activity item can flatten into several events, so the final page can
+    // push past MAX_EVENTS even with no nextPageToken — the slice below drops
+    // those, and the flag must say so or the digest reads as complete.
     return {
       events: events.slice(0, MAX_EVENTS),
-      truncated: Boolean(pageToken),
+      truncated: Boolean(pageToken) || events.length > MAX_EVENTS,
     };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };

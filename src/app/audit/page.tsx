@@ -41,7 +41,7 @@ export default function Audit() {
       const res = await tfetch("/api/ai/audit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user }),
+        body: JSON.stringify({ user: user.trim() }),
       });
       const result = await res.json();
 
