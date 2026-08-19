@@ -3,15 +3,23 @@
  *
  * Uses Web Crypto (globalThis.crypto.subtle) so the same module works in
  * both Edge Middleware and Node API routes — `node:crypto` would crash the
- * edge runtime build.
+ * edge runtime build. For the same reason this module must never read
+ * app-config.json: config-aware decisions (e.g. whether password login is
+ * currently allowed) live in app-config.ts and run only in Node routes.
  */
 
 const COOKIE_NAME = "gws_toolbox_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 const TEXT_ENCODER = new TextEncoder();
 
+/**
+ * The app refuses to serve anything without a signing secret configured.
+ * APP_PASSWORD covers the classic password-gate deployment;
+ * APP_SESSION_SECRET alone supports SSO-only deployments with no shared
+ * password at all.
+ */
 export function authConfigured(): boolean {
-  return Boolean(process.env.APP_PASSWORD && process.env.APP_PASSWORD.length > 0);
+  return Boolean(process.env.APP_PASSWORD || process.env.APP_SESSION_SECRET);
 }
 
 /**
@@ -27,7 +35,7 @@ function sessionSecret(): string {
   const explicit = process.env.APP_SESSION_SECRET;
   if (explicit && explicit.length > 0) return explicit;
   const s = process.env.APP_PASSWORD;
-  if (!s) throw new Error("APP_PASSWORD is not set");
+  if (!s) throw new Error("Neither APP_SESSION_SECRET nor APP_PASSWORD is set");
   // Falling back to APP_PASSWORD as the HMAC key means a captured session
   // cookie can be used to brute-force the login password offline. Warn once so
   // operators know to set a dedicated high-entropy APP_SESSION_SECRET, without
@@ -74,6 +82,27 @@ function hexToBytes(hex: string): Uint8Array | null {
   return out;
 }
 
+// Base64url without Buffer so the module stays Edge-safe. Payloads are tiny
+// (a few hundred bytes), so the char-by-char paths are fine.
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlToBytes(s: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]*$/.test(s)) return null;
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   let r = 0;
@@ -98,40 +127,103 @@ function randomHex(byteCount: number): string {
   return bytesToHex(buf.buffer);
 }
 
-export async function createSessionToken(): Promise<string> {
-  const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-  const nonce = randomHex(16);
-  const payload = `${expiresAt}.${nonce}`;
+/**
+ * Sign an arbitrary small JSON payload into a compact
+ * `base64url(json).hexSig` token. Used for session cookies and the transient
+ * OIDC login-state cookie — both need tamper-proofing with the same key.
+ */
+export async function signPayload(
+  payload: Record<string, unknown>
+): Promise<string> {
+  const body = bytesToBase64Url(TEXT_ENCODER.encode(JSON.stringify(payload)));
   const key = await importHmacKey(sessionSecret());
-  const sig = await crypto.subtle.sign("HMAC", key, TEXT_ENCODER.encode(payload));
-  return `${payload}.${bytesToHex(sig)}`;
+  const sig = await crypto.subtle.sign("HMAC", key, TEXT_ENCODER.encode(body));
+  return `${body}.${bytesToHex(sig)}`;
 }
 
-export async function verifySessionToken(token: string | undefined | null): Promise<boolean> {
-  if (!token) return false;
+/**
+ * Verify a `signPayload` token's signature and parse its payload. Returns
+ * null for anything malformed or tampered. Expiry is the caller's concern —
+ * different payload kinds carry different lifetime fields.
+ */
+export async function verifySignedPayload(
+  token: string | undefined | null
+): Promise<Record<string, unknown> | null> {
+  if (!token) return null;
   const parts = token.split(".");
-  if (parts.length !== 3) return false;
-  const [expiresAt, nonce, sigHex] = parts;
-  const payload = `${expiresAt}.${nonce}`;
+  if (parts.length !== 2) return null;
+  const [body, sigHex] = parts;
   let key: CryptoKey;
   try {
     key = await importHmacKey(sessionSecret());
   } catch {
-    return false;
+    return null;
   }
   const expectedBuf = await crypto.subtle.sign(
     "HMAC",
     key,
-    TEXT_ENCODER.encode(payload)
+    TEXT_ENCODER.encode(body)
   );
-  const expected = new Uint8Array(expectedBuf);
   const actual = hexToBytes(sigHex);
-  if (!actual) return false;
-  if (!constantTimeEqual(expected, actual)) return false;
-  const exp = Number(expiresAt);
-  if (!Number.isFinite(exp)) return false;
-  if (Math.floor(Date.now() / 1000) > exp) return false;
-  return true;
+  if (!actual) return null;
+  if (!constantTimeEqual(new Uint8Array(expectedBuf), actual)) return null;
+  const bytes = base64UrlToBytes(body);
+  if (!bytes) return null;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export type LoginMethod = "password" | "sso";
+
+export interface SessionIdentity {
+  /** Who logged in — the SSO email, or null for the shared password gate. */
+  sub: string | null;
+  method: LoginMethod;
+}
+
+export interface SessionPayload extends SessionIdentity {
+  exp: number;
+  nonce: string;
+}
+
+export async function createSessionToken(
+  identity: SessionIdentity
+): Promise<string> {
+  const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+  return signPayload({
+    exp,
+    nonce: randomHex(16),
+    sub: identity.sub,
+    method: identity.method,
+  });
+}
+
+/**
+ * Verify a session cookie. Returns the session's payload (identity included)
+ * when valid, null otherwise — callers that only care about validity can use
+ * it as a boolean. Tokens from before the identity-carrying format simply
+ * fail verification, forcing one re-login.
+ */
+export async function verifySessionToken(
+  token: string | undefined | null
+): Promise<SessionPayload | null> {
+  const payload = await verifySignedPayload(token);
+  if (!payload) return null;
+  const exp = Number(payload.exp);
+  if (!Number.isFinite(exp)) return null;
+  if (Math.floor(Date.now() / 1000) > exp) return null;
+  if (typeof payload.nonce !== "string") return null;
+  const method: LoginMethod =
+    payload.method === "sso" ? "sso" : "password";
+  const sub = typeof payload.sub === "string" ? payload.sub : null;
+  return { exp, nonce: payload.nonce, sub, method };
 }
 
 export async function passwordMatches(input: string): Promise<boolean> {

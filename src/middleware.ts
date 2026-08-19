@@ -5,14 +5,20 @@ const PUBLIC_PATHS = new Set([
   "/login",
   "/api/auth/login",
   "/api/auth/logout",
+  // Pre-auth surface for SSO: which methods exist, plus the OIDC redirect
+  // legs. All three are low-disclosure and validated in their own routes.
+  "/api/auth/methods",
+  "/api/auth/sso/login",
+  "/api/auth/sso/callback",
 ]);
 
 /**
  * Edge middleware that enforces:
  *
- *   1. APP_PASSWORD must be set. If it isn't, the entire app refuses to serve
- *      anything except /login (which itself will tell the operator to set it).
- *      This means the toolbox can never be accidentally deployed wide-open.
+ *   1. A signing secret (APP_PASSWORD or APP_SESSION_SECRET) must be set. If
+ *      it isn't, the entire app refuses to serve anything except /login
+ *      (which itself will tell the operator to set it). This means the
+ *      toolbox can never be accidentally deployed wide-open.
  *
  *   2. Authenticated session for every page and API route.
  *
@@ -43,7 +49,7 @@ export async function middleware(req: NextRequest) {
     method === "PATCH" ||
     method === "DELETE";
 
-  // Refuse to serve anything if no APP_PASSWORD has been configured.
+  // Refuse to serve anything if no auth secret has been configured.
   // The login page itself remains accessible so the operator can see why.
   if (!authConfigured()) {
     if (PUBLIC_PATHS.has(pathname)) {
@@ -54,7 +60,7 @@ export async function middleware(req: NextRequest) {
         NextResponse.json(
           {
             error:
-              "Server not configured: APP_PASSWORD is not set. The toolbox refuses to run mutating actions without it.",
+              "Server not configured: neither APP_PASSWORD nor APP_SESSION_SECRET is set. The toolbox refuses to run mutating actions without one.",
           },
           { status: 503 }
         )

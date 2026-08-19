@@ -38,6 +38,10 @@ yarn-error.log*
 tenants.json
 tenants.json.tmp
 
+# App-level configuration (contains the OIDC client secret — keep local)
+app-config.json
+app-config.json.tmp
+
 # Append-only audit log of all mutating actions
 audit.log
 

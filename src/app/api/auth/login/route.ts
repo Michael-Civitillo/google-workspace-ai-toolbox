@@ -6,6 +6,7 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_TTL,
 } from "@/lib/auth";
+import { passwordLoginAllowed } from "@/lib/app-config";
 import { rateLimit, clearRateLimit, clientKey } from "@/lib/rate-limit";
 import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
@@ -17,10 +18,20 @@ const MAX_FAILED_ATTEMPTS = 5;
 const FAIL_WINDOW_MS = 15 * 60 * 1000;
 
 export async function POST(req: NextRequest) {
-  if (!authConfigured()) {
+  if (!authConfigured() || !process.env.APP_PASSWORD) {
     return NextResponse.json(
       { error: "APP_PASSWORD is not set on the server" },
       { status: 503 }
+    );
+  }
+
+  // The operator can turn the password form off once SSO is proven out
+  // (App Settings → Single sign-on). SSO_RESCUE=true overrides this so a
+  // broken IdP can never cause a permanent lockout.
+  if (!passwordLoginAllowed()) {
+    return NextResponse.json(
+      { error: "Password login is disabled on this server — sign in with SSO." },
+      { status: 403 }
     );
   }
 
@@ -67,7 +78,7 @@ export async function POST(req: NextRequest) {
   // the next login.
   clearRateLimit(key);
 
-  const token = await createSessionToken();
+  const token = await createSessionToken({ sub: null, method: "password" });
   const res = NextResponse.json({ success: true });
   // `strict` blocks the cookie on any cross-site navigation, top-level or
   // otherwise. The toolbox has no flow that depends on inbound cross-site
