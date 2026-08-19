@@ -1,15 +1,10 @@
-import {
-  readFileSync,
-  renameSync,
-  existsSync,
-  unlinkSync,
-  openSync,
-  writeSync,
-  fsyncSync,
-  closeSync,
-} from "fs";
 import path from "path";
 import type { Tenant, PublicTenant } from "./tenant-types";
+import {
+  readJsonObjectFile,
+  writeJsonFileAtomic,
+  withFileLock,
+} from "./json-store";
 
 /**
  * Strip the server-only Gemini API key before a tenant crosses to the browser,
@@ -28,157 +23,28 @@ interface TenantStore {
 }
 
 const STORE_PATH = path.join(process.cwd(), "tenants.json");
-const STORE_TMP_PATH = path.join(process.cwd(), "tenants.json.tmp");
-
-/**
- * Single-process write mutex. All read-modify-write sequences serialise
- * through this so concurrent API requests can't lose each other's changes.
- */
-let writeLock: Promise<unknown> = Promise.resolve();
-
-/**
- * Move the on-disk store aside under a timestamped name so a subsequent write
- * can't silently overwrite it. Used only when the file is genuinely unusable
- * (empty or unparseable) — never for a transient read error.
- */
-function quarantineStore(): void {
-  try {
-    renameSync(STORE_PATH, `${STORE_PATH}.corrupt-${Date.now()}`);
-  } catch {
-    // If we can't even move it, fall through — we still avoid throwing into the
-    // request handler for the corruption case.
-  }
-}
 
 function readStore(): TenantStore {
-  if (!existsSync(STORE_PATH)) {
+  // Corruption-safe read: missing/empty/corrupt files come back as null (the
+  // unusable ones quarantined first), transient read errors throw so a
+  // read-modify-write under the lock aborts instead of persisting an empty
+  // store over the real config. See json-store.ts.
+  const parsed = readJsonObjectFile(STORE_PATH);
+  if (parsed === null) {
     return { activeTenantId: null, tenants: [] };
   }
-
-  let raw: string;
-  try {
-    raw = readFileSync(STORE_PATH, "utf-8");
-  } catch (e) {
-    // The existsSync above raced a delete (external cleanup or a concurrent
-    // quarantine rename): a missing file is the same benign "no store yet"
-    // state as the guard at the top, not an error.
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
-      return { activeTenantId: null, tenants: [] };
-    }
-    // Any other read failure is NOT corruption — it can be transient
-    // (EBUSY/EMFILE, an antivirus / Search Indexer lock on Windows, fd
-    // exhaustion). Quarantining here would permanently evict a healthy store on
-    // a blip. Surface the error instead: the file stays intact, the next read
-    // succeeds, and a read-modify-write under withLock aborts rather than
-    // persisting an empty store over the real config.
-    throw new Error(
-      `Failed to read tenant store at ${STORE_PATH}: ${
-        e instanceof Error ? e.message : String(e)
-      }`
-    );
-  }
-
-  if (!raw.trim()) {
-    // Existing-but-empty file: preserve it before returning an empty store so a
-    // subsequent write can't overwrite a (possibly externally truncated) config
-    // with no trace. After the rename the path is gone, so this happens once.
-    quarantineStore();
-    return { activeTenantId: null, tenants: [] };
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-    // Parseable but not an object (a bare scalar, array, or null) is just as
-    // corrupt as unparseable content — quarantine it too, or the next write
-    // would silently overwrite the evidence with an empty store.
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      quarantineStore();
-      return { activeTenantId: null, tenants: [] };
-    }
-    return {
-      activeTenantId: parsed.activeTenantId ?? null,
-      tenants: Array.isArray(parsed.tenants) ? parsed.tenants : [],
-    };
-  } catch {
-    // Unparseable content is real corruption — quarantine it so the next write
-    // doesn't clobber the evidence, then start from an empty store.
-    quarantineStore();
-    return { activeTenantId: null, tenants: [] };
-  }
+  return {
+    activeTenantId: (parsed.activeTenantId as string | null) ?? null,
+    tenants: Array.isArray(parsed.tenants) ? (parsed.tenants as Tenant[]) : [],
+  };
 }
 
 async function writeStoreAtomic(store: TenantStore): Promise<void> {
-  // Write to a temp file, fsync it, then rename — guarantees we never leave a
-  // half-written OR zero-length tenants.json on disk if the process is killed
-  // mid-write. The explicit fsync before rename matters: on ext4/xfs a rename
-  // can become durable before the file's data blocks, so a crash could
-  // otherwise leave an empty tenants.json that readStore treats as "no tenants"
-  // and the next write makes permanent.
-  const fd = openSync(STORE_TMP_PATH, "w", 0o600);
-  try {
-    writeSync(fd, JSON.stringify(store, null, 2));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-
-  // On Windows the rename can transiently fail with EPERM/EBUSY if
-  // antivirus / Windows Search Indexer briefly holds the destination
-  // file open. Retry a couple of times with tiny backoffs before giving up.
-  const MAX_ATTEMPTS = 5;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      renameSync(STORE_TMP_PATH, STORE_PATH);
-      // Best-effort: fsync the containing directory so the rename itself is
-      // durable. Directory fsync isn't supported on Windows (EPERM/EISDIR) — a
-      // no-op there, so swallow failures rather than fail an otherwise-good write.
-      try {
-        const dirFd = openSync(path.dirname(STORE_PATH), "r");
-        try {
-          fsyncSync(dirFd);
-        } finally {
-          closeSync(dirFd);
-        }
-      } catch {
-        // Directory fsync unsupported on this platform — ignore.
-      }
-      return;
-    } catch (e) {
-      lastError = e;
-      const code = (e as NodeJS.ErrnoException)?.code;
-      const transient =
-        code === "EPERM" || code === "EBUSY" || code === "EACCES";
-      if (!transient || attempt === MAX_ATTEMPTS) break;
-      // Yield with a real timer instead of spinning — the withLock() mutex
-      // already serialises writers, so awaiting here never interleaves a
-      // concurrent read-modify-write, and it keeps the event loop free.
-      await new Promise((r) => setTimeout(r, 25 * attempt));
-    }
-  }
-  try {
-    if (existsSync(STORE_TMP_PATH)) unlinkSync(STORE_TMP_PATH);
-  } catch {}
-  throw lastError;
+  await writeJsonFileAtomic(STORE_PATH, store);
 }
 
-async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
-  const previous = writeLock;
-  let release: () => void = () => {};
-  writeLock = new Promise<void>((res) => {
-    release = res;
-  });
-  try {
-    await previous;
-    // `await` (not a bare `return fn()`) so the lock is held until the async
-    // critical section fully settles. Without it the `finally` below would run
-    // release() the moment fn() returns its pending promise — freeing the lock
-    // mid-write and letting a concurrent writer read stale state and clobber
-    // the shared temp file.
-    return await fn();
-  } finally {
-    release();
-  }
+function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  return withFileLock(STORE_PATH, fn);
 }
 
 /** Thrown when a caller names a tenant id that doesn't exist — routes map it to 404. */
@@ -295,5 +161,24 @@ export async function deleteTenant(id: string): Promise<void> {
       store.activeTenantId = store.tenants[0]?.id ?? null;
     }
     await writeStoreAtomic(store);
+  });
+}
+
+/**
+ * Replace the entire tenant store in one atomic write. Used by configuration
+ * import, where the bundle is the source of truth. Callers are responsible
+ * for validating every tenant first; this only guarantees the active id
+ * actually refers to a tenant in the new list.
+ */
+export async function replaceTenantStore(
+  tenants: Tenant[],
+  activeTenantId: string | null
+): Promise<void> {
+  await withLock(async () => {
+    const active =
+      activeTenantId && tenants.some((t) => t.id === activeTenantId)
+        ? activeTenantId
+        : tenants[0]?.id ?? null;
+    await writeStoreAtomic({ activeTenantId: active, tenants });
   });
 }
