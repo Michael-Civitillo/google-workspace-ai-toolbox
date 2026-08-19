@@ -7,6 +7,7 @@ import {
   writeSync,
   fsyncSync,
   closeSync,
+  mkdirSync,
 } from "fs";
 import path from "path";
 
@@ -89,21 +90,23 @@ export function readJsonObjectFile(
 }
 
 /**
- * Write a JSON store atomically: serialise to a sibling tmp file (0600),
- * fsync it, then rename over the real path. Guarantees a crash mid-write never
- * leaves a half-written OR zero-length store on disk. The explicit fsync
- * before rename matters: on ext4/xfs a rename can become durable before the
- * file's data blocks, so a crash could otherwise leave an empty file that a
- * later read treats as "no store" and the next write makes permanent.
+ * Write a text file atomically: write to a sibling tmp file (0600), fsync it,
+ * then rename over the real path. Guarantees a crash mid-write never leaves a
+ * half-written OR zero-length file on disk. The explicit fsync before rename
+ * matters: on ext4/xfs a rename can become durable before the file's data
+ * blocks, so a crash could otherwise leave an empty file that a later read
+ * treats as "no store" and the next write makes permanent. Missing parent
+ * directories are created (0700).
  */
-export async function writeJsonFileAtomic(
+export async function writeTextFileAtomic(
   storePath: string,
-  data: unknown
+  text: string
 ): Promise<void> {
+  mkdirSync(path.dirname(storePath), { recursive: true, mode: 0o700 });
   const tmpPath = `${storePath}.tmp`;
   const fd = openSync(tmpPath, "w", 0o600);
   try {
-    writeSync(fd, JSON.stringify(data, null, 2));
+    writeSync(fd, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -147,6 +150,14 @@ export async function writeJsonFileAtomic(
     if (existsSync(tmpPath)) unlinkSync(tmpPath);
   } catch {}
   throw lastError;
+}
+
+/** JSON convenience wrapper over {@link writeTextFileAtomic}. */
+export async function writeJsonFileAtomic(
+  storePath: string,
+  data: unknown
+): Promise<void> {
+  await writeTextFileAtomic(storePath, JSON.stringify(data, null, 2));
 }
 
 /**

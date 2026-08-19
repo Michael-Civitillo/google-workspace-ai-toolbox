@@ -1280,11 +1280,12 @@ function VerifyStep({
             Save a configuration backup
           </p>
           <p className="text-xs text-muted-foreground">
-            Download everything you just configured (tenants + SSO) as a JSON
-            bundle. Import it on another server from{" "}
-            <strong>App Settings → Configuration backup</strong> to clone this
-            setup. The file contains secrets — store it safely. Service-account
-            JSON keys are not included; copy those separately.
+            Download everything you just configured — tenants, SSO, and the
+            service-account key files themselves — as one JSON bundle. Import
+            it on another server from{" "}
+            <strong>App Settings → Configuration backup</strong> and the whole
+            setup comes back, keys included. It contains live secrets, so
+            store it like a password.
           </p>
           <a
             href="/api/config/export"

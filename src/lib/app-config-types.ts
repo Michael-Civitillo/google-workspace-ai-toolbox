@@ -73,10 +73,9 @@ export const CONFIG_BUNDLE_VERSION = 1;
 
 /**
  * Everything needed to stand the toolbox up on another server: app-level
- * settings plus the tenant list. Secrets (OIDC client secret, per-tenant
- * Gemini keys) are included unless the exporter opts out; service-account
- * JSON files themselves are NOT bundled — only their paths — and must exist
- * on the target machine.
+ * settings, the tenant list, and — unless the exporter opts out of secrets —
+ * the service-account JSON key files themselves, so a restore needs no
+ * side-channel file copying.
  */
 export interface ConfigBundle {
   kind: typeof CONFIG_BUNDLE_KIND;
@@ -91,4 +90,12 @@ export interface ConfigBundle {
     activeTenantId: string | null;
     tenants: Tenant[];
   };
+  /**
+   * Raw content of each tenant's service-account key file, keyed by the path
+   * stored in the tenant (as it was on the source server). Import writes
+   * these back to disk — at the same path when possible, relocated under the
+   * app otherwise. Present only when includesSecrets; absent in bundles from
+   * older versions.
+   */
+  credentialFiles?: Record<string, string>;
 }

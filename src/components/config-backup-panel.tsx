@@ -27,6 +27,7 @@ interface BundlePreview {
   exportedAt: string | null;
   includesSecrets: boolean;
   tenantCount: number;
+  credentialFileCount: number;
   ssoIssuer: string | null;
   ssoEnabled: boolean;
   raw: unknown;
@@ -35,6 +36,8 @@ interface BundlePreview {
 interface ImportOutcome {
   tenants: number;
   sso: boolean;
+  credentialFiles: number;
+  notes: string[];
   warnings: string[];
 }
 
@@ -49,6 +52,11 @@ export function ConfigBackupPanel() {
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // With nothing configured yet (the restore-onto-new-server case) the import
+  // is one click; only overwriting real config demands the typed phrase.
+  // While current state is still loading (null), err on the guarded side.
+  const freshServer = currentTenants === 0 && !currentSsoIssuer;
 
   useEffect(() => {
     let cancelled = false;
@@ -73,8 +81,8 @@ export function ConfigBackupPanel() {
     setOutcome(null);
     setImportError(null);
     if (!file) return;
-    if (file.size > 1024 * 1024) {
-      setParseError("File is larger than 1 MB — that is not a toolbox config bundle.");
+    if (file.size > 8 * 1024 * 1024) {
+      setParseError("File is larger than 8 MB — that is not a toolbox config bundle.");
       return;
     }
     const reader = new FileReader();
@@ -95,6 +103,10 @@ export function ConfigBackupPanel() {
             typeof parsed.exportedAt === "string" ? parsed.exportedAt : null,
           includesSecrets: parsed.includesSecrets === true,
           tenantCount: tenants,
+          credentialFileCount:
+            parsed.credentialFiles && typeof parsed.credentialFiles === "object"
+              ? Object.keys(parsed.credentialFiles).length
+              : 0,
           ssoIssuer:
             typeof parsed?.app?.sso?.issuer === "string"
               ? parsed.app.sso.issuer
@@ -128,6 +140,8 @@ export function ConfigBackupPanel() {
       setOutcome({
         tenants: data?.imported?.tenants ?? 0,
         sso: Boolean(data?.imported?.sso),
+        credentialFiles: data?.imported?.credentialFiles ?? 0,
+        notes: Array.isArray(data?.notes) ? data.notes : [],
         warnings: Array.isArray(data?.warnings) ? data.warnings : [],
       });
       setPreview(null);
@@ -152,10 +166,20 @@ export function ConfigBackupPanel() {
           <p className="text-sm font-semibold">Export configuration</p>
         </div>
         <p className="text-xs text-muted-foreground">
-          Downloads a JSON bundle with your SSO settings and every tenant
-          (names, admin emails, credential paths{includeSecrets ? ", secrets" : ""}).
-          Import it on another server to clone this setup. Service-account JSON
-          key files are <strong>not</strong> included — copy those separately.
+          {includeSecrets ? (
+            <>
+              Downloads one JSON file with everything: SSO settings, every
+              tenant, and the service-account key files themselves. Import it
+              on another server and the whole setup comes back — no separate
+              key copying.
+            </>
+          ) : (
+            <>
+              Downloads a sanitised bundle: SSO settings and tenants, with
+              secrets and key files stripped. Good for sharing a config
+              layout, but a restore from it needs the keys re-entered.
+            </>
+          )}
         </p>
         <label className="flex items-center gap-2 text-sm cursor-pointer">
           <input
@@ -164,12 +188,12 @@ export function ConfigBackupPanel() {
             onChange={(e) => setIncludeSecrets(e.target.checked)}
             className="h-4 w-4 accent-primary"
           />
-          Include secrets (OIDC client secret, Gemini API keys)
+          Include secrets (OIDC client secret, Gemini API keys, service-account key files)
         </label>
         {includeSecrets && (
           <p className="text-xs text-amber-700 dark:text-amber-400">
-            The file will contain live secrets — treat it like a password and
-            store it somewhere access-controlled.
+            The file will contain live secrets, including private keys — treat
+            it like a password and store it somewhere access-controlled.
           </p>
         )}
         <a
@@ -189,10 +213,11 @@ export function ConfigBackupPanel() {
           <p className="text-sm font-semibold">Import configuration</p>
         </div>
         <p className="text-xs text-muted-foreground">
-          Restores a bundle exported from another server. It{" "}
+          Pick a bundle exported from another server and the whole setup is
+          restored — including the service-account key files, written back to
+          disk automatically. It{" "}
           <strong>replaces</strong>{" "}
-          this server&apos;s SSO settings and entire tenant list — it is not a
-          merge.
+          the SSO settings and entire tenant list here; it is not a merge.
         </p>
         <input
           ref={fileRef}
@@ -235,6 +260,12 @@ export function ConfigBackupPanel() {
                   ? `${preview.ssoEnabled ? "enabled" : "configured but disabled"} — ${preview.ssoIssuer}`
                   : "not configured"}
               </li>
+              <li>
+                Service-account key files:{" "}
+                {preview.credentialFileCount > 0
+                  ? `${preview.credentialFileCount} embedded (restored to disk on import)`
+                  : "none embedded"}
+              </li>
               <li>Secrets included: {preview.includesSecrets ? "yes" : "no"}</li>
             </ul>
             <Button
@@ -269,8 +300,21 @@ export function ConfigBackupPanel() {
               <p>
                 Imported {outcome.tenants} tenant
                 {outcome.tenants === 1 ? "" : "s"}
-                {outcome.sso ? " and SSO settings" : ""}.
+                {outcome.sso ? " and SSO settings" : ""}
+                {outcome.credentialFiles > 0
+                  ? `, restored ${outcome.credentialFiles} key file${
+                      outcome.credentialFiles === 1 ? "" : "s"
+                    } to disk`
+                  : ""}
+                .
               </p>
+              {outcome.notes.length > 0 && (
+                <ul className="mt-2 list-disc list-inside space-y-1 text-xs">
+                  {outcome.notes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              )}
               {outcome.warnings.length > 0 && (
                 <ul className="mt-2 list-disc list-inside space-y-1 text-xs text-amber-800 dark:text-amber-300">
                   {outcome.warnings.map((w, i) => (
@@ -286,8 +330,16 @@ export function ConfigBackupPanel() {
       <ConfirmActionDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title="Replace this server's configuration"
-        summary="The bundle becomes the new configuration — current SSO settings and all existing tenants are overwritten."
+        title={
+          freshServer
+            ? "Restore configuration from bundle"
+            : "Replace this server's configuration"
+        }
+        summary={
+          freshServer
+            ? "Nothing is configured here yet — the bundle just fills everything in."
+            : "The bundle becomes the new configuration — current SSO settings and all existing tenants are overwritten."
+        }
         tenant={null}
         changes={[
           {
@@ -295,23 +347,34 @@ export function ConfigBackupPanel() {
             before:
               currentTenants !== null ? `${currentTenants} configured` : null,
             after: `${preview?.tenantCount ?? 0} from bundle`,
-            emphasis: true,
+            emphasis: !freshServer,
           },
           {
             label: "SSO settings",
             before: currentSsoIssuer ?? "not configured",
             after: preview?.ssoIssuer ?? "not configured",
           },
+          {
+            label: "Service-account key files",
+            after:
+              (preview?.credentialFileCount ?? 0) > 0
+                ? `${preview?.credentialFileCount} written to disk`
+                : "none embedded in bundle",
+          },
         ]}
         warnings={
-          <p>
-            This cannot be undone from the UI. Consider exporting the current
-            configuration first as a fallback.
-          </p>
+          freshServer ? undefined : (
+            <p>
+              This cannot be undone from the UI. Consider exporting the current
+              configuration first as a fallback.
+            </p>
+          )
         }
-        severity="high"
-        confirmPhrase="REPLACE"
-        confirmLabel="Import bundle"
+        // A fresh server has nothing to lose — restoring there is one click.
+        // Overwriting a configured server keeps the typed guard.
+        severity={freshServer ? "medium" : "high"}
+        confirmPhrase={freshServer ? undefined : "REPLACE"}
+        confirmLabel={freshServer ? "Restore" : "Import bundle"}
         busy={importing}
         onConfirm={runImport}
       />

@@ -3,6 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAppConfig, updateAppConfig } from "@/lib/app-config";
 import { replaceTenantStore } from "@/lib/tenants-server";
 import { parseOidcSettingsInput } from "@/lib/sso-validate";
+import {
+  placeCredentialFile,
+  MAX_CREDENTIAL_FILE_BYTES,
+  type CredentialPlacement,
+} from "@/lib/credential-files";
 import { audit } from "@/lib/audit";
 import {
   isValidEmail,
@@ -16,8 +21,9 @@ import {
 } from "@/lib/app-config-types";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
-// A bundle is settings + tenant metadata, no key material — 1 MB is generous.
-const MAX_BODY_BYTES = 1024 * 1024;
+// Bundles now carry embedded key files (~2.5 KB each) — still small, but give
+// large tenant fleets headroom.
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_TENANTS = 500;
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -30,12 +36,18 @@ function freshId(): string {
  * Import a configuration bundle produced by GET /api/config/export.
  *
  * Replace semantics: the bundle becomes the new tenant list and SSO config —
- * this is a restore, not a merge. Two deliberate softenings:
- *   - If the bundle was exported without secrets, the current OIDC client
- *     secret is preserved when the bundle points at the same issuer+client.
- *   - Credential file paths are validated for shape but NOT required to exist
- *     (that's normal when moving servers); missing files come back as
- *     warnings so the operator knows what to copy over.
+ * this is a restore, not a merge. Key files embedded in the bundle are
+ * written back to disk: at their original path when it works on this machine,
+ * otherwise relocated (GWS_CREDENTIALS_DIR if set, else ./credentials) with
+ * the tenant re-pointed automatically — so restoring onto a different OS or
+ * directory layout still comes up working. An existing different file at a
+ * target path is kept as a .bak, never destroyed.
+ *
+ * Two deliberate softenings for bundles without embedded keys:
+ *   - The current OIDC client secret is preserved when a secretless bundle
+ *     points at the same issuer+client.
+ *   - Credential paths are validated for shape but NOT required to exist;
+ *     missing files come back as warnings so the operator knows what to copy.
  */
 export async function POST(req: NextRequest) {
   const body = await readCappedJson(req, MAX_BODY_BYTES);
@@ -71,6 +83,46 @@ export async function POST(req: NextRequest) {
       ? (body.tenants as Record<string, unknown>)
       : {};
 
+  // ---- Validate embedded key files --------------------------------------
+  const credFiles = new Map<string, string>();
+  if (body.credentialFiles !== undefined) {
+    if (
+      !body.credentialFiles ||
+      typeof body.credentialFiles !== "object" ||
+      Array.isArray(body.credentialFiles)
+    ) {
+      return NextResponse.json(
+        { error: "credentialFiles must be an object of path → content" },
+        { status: 400 }
+      );
+    }
+    for (const [p, content] of Object.entries(
+      body.credentialFiles as Record<string, unknown>
+    )) {
+      if (typeof content !== "string") {
+        return NextResponse.json(
+          { error: `credentialFiles["${p}"] must be a string` },
+          { status: 400 }
+        );
+      }
+      if (Buffer.byteLength(content, "utf-8") > MAX_CREDENTIAL_FILE_BYTES) {
+        return NextResponse.json(
+          { error: `credentialFiles["${p}"] exceeds ${MAX_CREDENTIAL_FILE_BYTES} bytes` },
+          { status: 400 }
+        );
+      }
+      try {
+        JSON.parse(content);
+      } catch {
+        return NextResponse.json(
+          { error: `credentialFiles["${p}"] is not valid JSON` },
+          { status: 400 }
+        );
+      }
+      credFiles.set(p, content);
+    }
+  }
+
   try {
     // ---- Validate tenants ----------------------------------------------
     const rawTenants = Array.isArray(tenantsPart.tenants)
@@ -83,8 +135,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    interface PendingTenant extends Omit<Tenant, "credentialsFile"> {
+      /** Path exactly as it appears in the bundle (keys credFiles). */
+      rawPath: string;
+      /** Validated form, or null when only usable via relocation. */
+      credPath: string | null;
+    }
+
     const warnings: string[] = [];
-    const tenants: Tenant[] = [];
+    const notes: string[] = [];
+    const pending: PendingTenant[] = [];
     const seenIds = new Set<string>();
     for (let i = 0; i < rawTenants.length; i++) {
       const raw = rawTenants[i];
@@ -103,16 +163,23 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      let credPath: string;
+      const rawPath =
+        typeof t.credentialsFile === "string" ? t.credentialsFile.trim() : "";
+      let credPath: string | null = null;
       try {
-        credPath = validateCredentialsFilePath(t.credentialsFile);
+        credPath = validateCredentialsFilePath(rawPath);
       } catch (e) {
-        const detail =
-          e instanceof ValidationError ? e.message : "invalid credentialsFile";
-        return NextResponse.json(
-          { error: `Tenant "${name}": ${detail}` },
-          { status: 400 }
-        );
+        // A path that's invalid HERE (Windows path on Linux, outside
+        // GWS_CREDENTIALS_DIR, ...) is fine as long as the bundle carries the
+        // file's content — the key gets relocated somewhere valid below.
+        if (!rawPath || !credFiles.has(rawPath)) {
+          const detail =
+            e instanceof ValidationError ? e.message : "invalid credentialsFile";
+          return NextResponse.json(
+            { error: `Tenant "${name}": ${detail}` },
+            { status: 400 }
+          );
+        }
       }
       if (!isValidEmail(t.adminEmail)) {
         return NextResponse.json(
@@ -141,17 +208,12 @@ export async function POST(req: NextRequest) {
       while (seenIds.has(id)) id = freshId();
       seenIds.add(id);
 
-      if (!existsSync(credPath)) {
-        warnings.push(
-          `Tenant "${name}": credentials file ${credPath} does not exist on this server yet — copy the service-account JSON there before running operations.`
-        );
-      }
-
-      tenants.push({
+      pending.push({
         id,
         name,
         color,
-        credentialsFile: credPath,
+        rawPath,
+        credPath,
         adminEmail: (t.adminEmail as string).toLowerCase(),
         geminiApiKey:
           typeof t.geminiApiKey === "string" && t.geminiApiKey
@@ -196,6 +258,37 @@ export async function POST(req: NextRequest) {
         ? appPart.onboardingCompletedAt
         : null;
 
+    // ---- Restore embedded key files (validation is done — safe to write) --
+    const placements = new Map<string, CredentialPlacement>();
+    for (const p of pending) {
+      const content = credFiles.get(p.rawPath);
+      if (content === undefined || placements.has(p.rawPath)) continue;
+      const placement = await placeCredentialFile(p.rawPath, p.credPath, content);
+      placements.set(p.rawPath, placement);
+      if (placement.note) notes.push(placement.note);
+      if (placement.warning) warnings.push(placement.warning);
+    }
+    const filesRestored = [...placements.values()].filter(
+      (p) => p.restored
+    ).length;
+
+    // ---- Build final tenants --------------------------------------------
+    const tenants: Tenant[] = pending.map((p) => {
+      const placement = placements.get(p.rawPath);
+      // credPath is always set when there's no placement — a tenant with an
+      // invalid path and no embedded content was rejected above.
+      const finalPath = placement ? placement.path : p.credPath!;
+      if (!placement && !existsSync(finalPath)) {
+        warnings.push(
+          `Tenant "${p.name}": credentials file ${finalPath} does not exist on this server yet — copy the service-account JSON there before running operations.`
+        );
+      }
+      const { rawPath: _raw, credPath: _cred, ...tenant } = p;
+      void _raw;
+      void _cred;
+      return { ...tenant, credentialsFile: finalPath };
+    });
+
     // ---- Persist --------------------------------------------------------
     await replaceTenantStore(tenants, activeTenantId);
     await updateAppConfig((config) => {
@@ -213,6 +306,7 @@ export async function POST(req: NextRequest) {
       params: {
         tenantCount: tenants.length,
         ssoConfigured: Boolean(parsedSso.settings),
+        credentialFilesRestored: filesRestored,
         warnings: warnings.length,
       },
       outcome: "success",
@@ -227,7 +321,9 @@ export async function POST(req: NextRequest) {
             : tenants[0]?.id ?? null,
         sso: Boolean(parsedSso.settings),
         ssoEnabled: Boolean(parsedSso.settings?.enabled),
+        credentialFiles: filesRestored,
       },
+      notes,
       warnings,
     });
   } catch (error) {

@@ -40,7 +40,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` (or `APP_SESSION_SECRET`) set. HMAC-signed session cookies, 12h TTL, rate-limited login.
 - 🪪 **Single sign-on (OIDC)** — Plug in any OpenID Connect provider (Google, Microsoft Entra ID, Okta, Keycloak, Authentik...) and sign in through your IdP instead of a shared password. Authorization-code flow with PKCE, issuer discovery, email/domain allowlists, per-user attribution in the audit log, and an `SSO_RESCUE` escape hatch so a broken IdP can never lock you out.
 - 🧭 **First-launch onboarding wizard** — A fresh install walks you through the whole setup on first login: CLI install, service account, first tenant, and SSO. Re-run it any time from **Get Started** in the sidebar.
-- 💼 **Portable configuration** — Export everything (SSO settings + tenants) to a single JSON bundle from **App Settings**, and import it on another server to clone the deployment. Secrets optional, dry-run preview, typed confirmation before anything is replaced.
+- 💼 **Portable configuration** — Export everything — SSO settings, tenants, and the service-account key files themselves — to a single JSON bundle from **App Settings**, and restore it on another server in one click. Keys are written back to disk automatically (relocated if the original path doesn't exist there), with a preview first and a typed confirmation only when overwriting an already-configured server.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
 - ⚠️ **Confirmation dialogs** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension) shows a before→after diff and requires you to type the target email/identifier to confirm.
 - 📜 **Audit log** — Append-only JSON-lines log of every mutation, with secrets redacted (`AUDIT_LOG_PATH` env var to control location).
@@ -223,11 +223,12 @@ Details worth knowing:
 
 ## 💼 Moving servers: configuration export / import
 
-**App Settings → Configuration backup** exports the whole setup — SSO settings and every tenant — as one JSON bundle, and imports it back on any other instance:
+**App Settings → Configuration backup** exports the whole setup as one JSON bundle, and restores it on any other instance. Back up: click **Download config bundle**. Restore: install the app, log in, pick the file, click **Restore**. That's it.
 
-- Export includes secrets (OIDC client secret, per-tenant Gemini keys) by default so the bundle is restorable; untick to produce a sanitised copy. Either way, treat the file like a password.
-- Service-account **JSON key files are not bundled** — only their paths. Copy them to the same paths on the new server (the import reports any that are missing).
-- Import **replaces** the target server's SSO settings and tenant list (it's a restore, not a merge), previews what's inside first, and requires a typed confirmation.
+- The bundle contains everything: SSO settings (client secret included), every tenant with its Gemini key, and the **service-account JSON key files themselves** — so the restore needs no side-channel key copying. Treat the file like a password.
+- On import, key files are written back to their original paths. If a path doesn't work on the new machine (different OS or layout, e.g. a Windows export restored onto Linux, or outside `GWS_CREDENTIALS_DIR`), the key is relocated — into `GWS_CREDENTIALS_DIR` if set, else `./credentials/` — and the tenant re-pointed automatically. An existing different file at a target path is kept as a `.bak`, never destroyed.
+- Import **replaces** the target server's SSO settings and tenant list (it's a restore, not a merge) and previews what's inside first. On a fresh server it's a single click; overwriting an already-configured server asks you to type `REPLACE`.
+- Untick **Include secrets** to export a sanitised copy (no secrets, no key files) for sharing a config layout.
 - The onboarding wizard's final step offers the same export, so a fresh setup ends with a backup in hand.
 
 ## 🔒 Production deployment

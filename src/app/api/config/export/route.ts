@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAppConfig } from "@/lib/app-config";
 import { getTenantStoreSnapshot } from "@/lib/tenants-server";
+import { collectCredentialFiles } from "@/lib/credential-files";
 import { audit } from "@/lib/audit";
 import {
   CONFIG_BUNDLE_KIND,
@@ -11,20 +12,22 @@ import type { Tenant } from "@/lib/tenant-types";
 
 /**
  * Download the toolbox configuration as a portable JSON bundle: SSO settings,
- * onboarding state, and the full tenant list. Import it on another server via
- * POST /api/config/import.
+ * onboarding state, the full tenant list, and the service-account key files
+ * themselves. Import it on another server via POST /api/config/import — a
+ * complete restore from one file, no side-channel key copying.
  *
  * By default the bundle INCLUDES secrets (OIDC client secret, per-tenant
- * Gemini keys) — that's what makes it restorable elsewhere. `?secrets=0`
- * strips them for sharing a sanitised copy. Service-account JSON keys are
- * never bundled either way; only their paths are, and the files must exist on
- * the target machine.
+ * Gemini keys, and the embedded key files) — that's what makes it restorable
+ * elsewhere. `?secrets=0` strips all of them for sharing a sanitised copy.
  */
 export async function GET(req: NextRequest) {
   const includeSecrets = req.nextUrl.searchParams.get("secrets") !== "0";
   try {
     const config = getAppConfig();
     const { tenants, activeTenantId } = getTenantStoreSnapshot();
+    const credentialFiles = includeSecrets
+      ? collectCredentialFiles(tenants)
+      : undefined;
 
     // hasGeminiApiKey is a response-only decoration — never export it.
     const exportTenants: Tenant[] = tenants.map((t) => {
@@ -53,13 +56,20 @@ export async function GET(req: NextRequest) {
         activeTenantId,
         tenants: exportTenants,
       },
+      credentialFiles,
     };
 
     audit({
       action: "config.export",
       tenantId: null,
       tenantName: null,
-      params: { includeSecrets, tenantCount: exportTenants.length },
+      params: {
+        includeSecrets,
+        tenantCount: exportTenants.length,
+        credentialFileCount: credentialFiles
+          ? Object.keys(credentialFiles).length
+          : 0,
+      },
       outcome: "success",
     });
 
