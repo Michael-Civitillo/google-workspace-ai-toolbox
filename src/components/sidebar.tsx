@@ -22,6 +22,7 @@ import {
   Users,
   Activity,
   Layers,
+  KeyRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -94,6 +95,7 @@ const navigation = [
     items: [
       { name: "Setup", href: "/setup", icon: Settings },
       { name: "Tenants", href: "/tenants", icon: Building2 },
+      { name: "App Settings", href: "/settings", icon: KeyRound },
     ],
   },
 ];

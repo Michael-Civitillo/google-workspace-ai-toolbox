@@ -27,7 +27,9 @@ import {
   Check,
   CheckCircle2,
   Cloud,
+  Download,
   ExternalLink,
+  KeyRound,
   Loader2,
   PartyPopper,
   Rocket,
@@ -35,6 +37,8 @@ import {
   Terminal,
   XCircle,
 } from "lucide-react";
+import { SsoSettingsForm } from "@/components/sso-settings-form";
+import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   TENANT_COLORS,
@@ -52,6 +56,7 @@ type StepId =
   | "install"
   | "service-account"
   | "tenant"
+  | "sso"
   | "verify";
 
 interface StepDef {
@@ -71,6 +76,7 @@ const STEPS: StepDef[] = [
     icon: Cloud,
   },
   { id: "tenant", title: "Add your first tenant", short: "Tenant", icon: Building2 },
+  { id: "sso", title: "Sign-in & SSO", short: "SSO", icon: KeyRound },
   { id: "verify", title: "Verify & finish", short: "Verify", icon: PartyPopper },
 ];
 
@@ -140,6 +146,8 @@ export default function OnboardingPage() {
   const [scopePreflight, setScopePreflight] = useState<PreflightState | null>(
     null
   );
+  const [ssoConfigured, setSsoConfigured] = useState(false);
+  const [finishing, setFinishing] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -162,7 +170,31 @@ export default function OnboardingPage() {
 
   useEffect(() => {
     void refreshStatus();
+    // Seed the SSO step's "done" tick for operators re-visiting the wizard.
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((d) => setSsoConfigured(Boolean(d?.sso?.enabled)))
+      .catch(() => {});
   }, [refreshStatus]);
+
+  /**
+   * Leaving the wizard through any "done" affordance records completion, so
+   * the first-launch prompt stops offering itself. Best-effort: a failed
+   * write just means the wizard is offered again next launch.
+   */
+  const finishOnboarding = useCallback(async () => {
+    setFinishing(true);
+    try {
+      await fetch("/api/config/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completed: true }),
+      });
+    } catch {
+    } finally {
+      router.push("/");
+    }
+  }, [router]);
 
   const stepIndex = STEPS.findIndex((s) => s.id === activeStep);
   const isFirst = stepIndex === 0;
@@ -313,12 +345,13 @@ export default function OnboardingPage() {
             install: !!status?.installed,
             "service-account": !!createdTenantId || tenantCount > 0,
             tenant: !!createdTenantId || tenantCount > 0,
+            sso: ssoConfigured,
             verify: !!verifyResult && verifyResult.ok,
           }}
         />
 
         {activeStep === "welcome" && (
-          <WelcomeStep tenantCount={tenantCount} />
+          <WelcomeStep tenantCount={tenantCount} onSkip={finishOnboarding} />
         )}
 
         {activeStep === "install" && (
@@ -342,6 +375,10 @@ export default function OnboardingPage() {
           />
         )}
 
+        {activeStep === "sso" && (
+          <SsoStep onSaved={(enabled) => setSsoConfigured(enabled)} />
+        )}
+
         {activeStep === "verify" && (
           <VerifyStep
             status={status}
@@ -349,7 +386,8 @@ export default function OnboardingPage() {
             verifying={verifying}
             result={verifyResult}
             onVerify={handleVerify}
-            onFinish={() => router.push("/")}
+            onFinish={finishOnboarding}
+            finishing={finishing}
             tenantName={tenantForm.name || "your tenant"}
             tenantId={createdTenantId}
             scopePreflight={scopePreflight}
@@ -371,7 +409,10 @@ export default function OnboardingPage() {
             Step {stepIndex + 1} of {STEPS.length}
           </p>
           {isLast ? (
-            <Button size="sm" onClick={() => router.push("/")}>
+            <Button size="sm" onClick={finishOnboarding} disabled={finishing}>
+              {finishing ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : null}
               Go to dashboard
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </Button>
@@ -464,7 +505,13 @@ function Stepper({
   );
 }
 
-function WelcomeStep({ tenantCount }: { tenantCount: number }) {
+function WelcomeStep({
+  tenantCount,
+  onSkip,
+}: {
+  tenantCount: number;
+  onSkip: () => void;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -550,6 +597,56 @@ function WelcomeStep({ tenantCount }: { tenantCount: number }) {
             <li>A super-admin Workspace account (for impersonation)</li>
           </ul>
         </div>
+
+        <p className="text-xs text-muted-foreground">
+          Already set up, or prefer doing it by hand?{" "}
+          <button
+            type="button"
+            onClick={onSkip}
+            className="underline font-medium hover:text-foreground"
+          >
+            Skip the wizard
+          </button>{" "}
+          — it stays available under <em>Get Started</em> in the sidebar.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SsoStep({ onSaved }: { onSaved: (enabled: boolean) => void }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg flex items-center gap-2">
+          <KeyRound className="h-5 w-5" />
+          Sign-in &amp; SSO
+        </CardTitle>
+        <CardDescription>
+          Optional: let admins sign in through your identity provider (OIDC)
+          instead of sharing the toolbox password. Skip this step and set it up
+          later under <strong>App Settings</strong> if you prefer.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <div className="rounded-lg border bg-muted/40 p-4 text-sm text-muted-foreground space-y-1.5">
+          <p className="font-medium text-foreground">Before you fill this in</p>
+          <ul className="list-disc list-inside space-y-1 text-xs">
+            <li>
+              Create an <em>OIDC web application</em> in your identity provider
+              (Google, Microsoft Entra ID, Okta, Keycloak, ...).
+            </li>
+            <li>
+              Register the redirect URI shown below, then paste the issuer URL,
+              client ID, and client secret here.
+            </li>
+            <li>
+              Restrict who may sign in with the domain / email allowlists —
+              with both empty, anyone the IdP authenticates gets admin access.
+            </li>
+          </ul>
+        </div>
+        <SsoSettingsForm onSaved={(sso) => onSaved(Boolean(sso?.enabled))} />
       </CardContent>
     </Card>
   );
@@ -1071,6 +1168,7 @@ function VerifyStep({
   result,
   onVerify,
   onFinish,
+  finishing,
   tenantName,
   tenantId,
   scopePreflight,
@@ -1085,6 +1183,7 @@ function VerifyStep({
     | null;
   onVerify: () => void;
   onFinish: () => void;
+  finishing: boolean;
   tenantName: string;
   tenantId: string | null;
   scopePreflight: PreflightState | null;
@@ -1175,13 +1274,38 @@ function VerifyStep({
           </div>
         )}
 
+        <div className="rounded-lg border p-4 space-y-2">
+          <p className="text-sm font-medium flex items-center gap-2">
+            <Download className="h-4 w-4" />
+            Save a configuration backup
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Download everything you just configured (tenants + SSO) as a JSON
+            bundle. Import it on another server from{" "}
+            <strong>App Settings → Configuration backup</strong> to clone this
+            setup. The file contains secrets — store it safely. Service-account
+            JSON keys are not included; copy those separately.
+          </p>
+          <a
+            href="/api/config/export"
+            download
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-1")}
+          >
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download config bundle
+          </a>
+        </div>
+
         <div className="rounded-lg border bg-muted/40 p-4 text-sm space-y-2">
           <p className="font-medium">You&apos;re all set</p>
           <p className="text-muted-foreground">
             Head to the dashboard to delegate mailboxes, transfer calendars, run
             audits, or just type what you need into the AI Command box.
           </p>
-          <Button size="sm" onClick={onFinish} className="mt-1">
+          <Button size="sm" onClick={onFinish} disabled={finishing} className="mt-1">
+            {finishing ? (
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            ) : null}
             Open the dashboard
             <ArrowRight className="h-4 w-4 ml-1.5" />
           </Button>

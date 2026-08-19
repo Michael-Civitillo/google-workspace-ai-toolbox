@@ -37,7 +37,10 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### Safety & ops
 
-- 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` set. HMAC-signed session cookies, 12h TTL, rate-limited login.
+- 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` (or `APP_SESSION_SECRET`) set. HMAC-signed session cookies, 12h TTL, rate-limited login.
+- 🪪 **Single sign-on (OIDC)** — Plug in any OpenID Connect provider (Google, Microsoft Entra ID, Okta, Keycloak, Authentik...) and sign in through your IdP instead of a shared password. Authorization-code flow with PKCE, issuer discovery, email/domain allowlists, per-user attribution in the audit log, and an `SSO_RESCUE` escape hatch so a broken IdP can never lock you out.
+- 🧭 **First-launch onboarding wizard** — A fresh install walks you through the whole setup on first login: CLI install, service account, first tenant, and SSO. Re-run it any time from **Get Started** in the sidebar.
+- 💼 **Portable configuration** — Export everything (SSO settings + tenants) to a single JSON bundle from **App Settings**, and import it on another server to clone the deployment. Secrets optional, dry-run preview, typed confirmation before anything is replaced.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
 - ⚠️ **Confirmation dialogs** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension) shows a before→after diff and requires you to type the target email/identifier to confirm.
 - 📜 **Audit log** — Append-only JSON-lines log of every mutation, with secrets redacted (`AUDIT_LOG_PATH` env var to control location).
@@ -189,18 +192,60 @@ export GOOGLE_GENERATIVE_AI_API_KEY=your-key-here
 
 > **Tip:** If you're using multi-tenant support, set credentials per tenant directly in the UI instead of relying on env vars.
 
+## 🪪 Single sign-on (SSO via OIDC)
+
+Out of the box the toolbox is gated by a shared `APP_PASSWORD`. For teams, wire it to your identity provider instead — any OpenID Connect provider works:
+
+1. In your IdP, create an **OIDC web application** and register this redirect URI (shown with a copy button in the app too):
+   ```
+   https://<your-toolbox-host>/api/auth/sso/callback
+   ```
+2. Log in to the toolbox and open **App Settings → Single sign-on** (or the SSO step of the onboarding wizard). Paste the **issuer URL**, **client ID**, and **client secret**, hit **Test connection** to confirm discovery works, and save.
+3. Lock down who gets in with the **allowed domains / allowed emails** lists. With both empty, anyone your IdP authenticates gets admin access — only do that if the IdP app itself is restricted.
+4. Once SSO is proven working you can untick **Keep password login available** to retire the shared password form.
+
+Issuer examples:
+
+| Provider | Issuer URL |
+|---|---|
+| Google | `https://accounts.google.com` |
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| Okta | `https://<org>.okta.com` |
+| Keycloak | `https://<host>/realms/<realm>` |
+
+Details worth knowing:
+
+- The flow is **authorization code + PKCE** with full state/nonce/ID-token validation (via the certified [openid-client](https://github.com/panva/openid-client) library). Plain-`http` issuers are only accepted on localhost.
+- Behind a reverse proxy, set the **Public base URL** field so the redirect URI is derived from your canonical hostname instead of whatever the proxy forwards.
+- SSO logins put the user's email into sessions and the audit log, so actions become attributable per admin instead of "whoever had the password".
+- **Locked out because SSO broke?** Set `SSO_RESCUE=true` in the server environment and restart — the password form comes back regardless of settings. Fix the IdP config, then unset it.
+- Want to drop the shared password entirely? Set a high-entropy `APP_SESSION_SECRET`, confirm SSO works, then unset `APP_PASSWORD`. (You need `APP_PASSWORD` for the very first login, before SSO exists.)
+
+## 💼 Moving servers: configuration export / import
+
+**App Settings → Configuration backup** exports the whole setup — SSO settings and every tenant — as one JSON bundle, and imports it back on any other instance:
+
+- Export includes secrets (OIDC client secret, per-tenant Gemini keys) by default so the bundle is restorable; untick to produce a sanitised copy. Either way, treat the file like a password.
+- Service-account **JSON key files are not bundled** — only their paths. Copy them to the same paths on the new server (the import reports any that are missing).
+- Import **replaces** the target server's SSO settings and tenant list (it's a restore, not a merge), previews what's inside first, and requires a typed confirmation.
+- The onboarding wizard's final step offers the same export, so a fresh setup ends with a backup in hand.
+
 ## 🔒 Production deployment
 
 The toolbox is designed to be safe to run against a real tenant, but a few env vars matter:
 
 | Variable | Required | What it does |
 |---|---|---|
-| `APP_PASSWORD` | ✅ | Password gate. App refuses to serve any route without it. |
+| `APP_PASSWORD` | ✅ (unless SSO-only, see below) | Password gate. App refuses to serve any route without it (or `APP_SESSION_SECRET`). |
+| `APP_SESSION_SECRET` | recommended | Dedicated high-entropy session-signing secret. Required if you drop `APP_PASSWORD` for an SSO-only deployment. |
+| `SSO_RESCUE` | optional | `true` forces password login back on if a broken SSO config locked you out. |
 | `GOOGLE_WORKSPACE_ADMIN_EMAIL` | ✅ for Admin SDK ops | Subject for service account impersonation. |
 | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | ⚠️ if not using per-tenant config | Path to service account JSON. |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | ⚠️ for AI features | Gemini API key. |
 | `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
+
+App-level settings configured in the UI (SSO, onboarding state) are stored in `app-config.json` next to `tenants.json` — both gitignored, both written atomically, both covered by the configuration export.
 
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
 

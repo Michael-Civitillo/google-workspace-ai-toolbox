@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/sidebar";
 import { AppShell } from "@/components/app-shell";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TenantBootstrap } from "@/components/tenant-bootstrap";
+import { OnboardingRedirect } from "@/components/onboarding-redirect";
 import "./globals.css";
 
 const dmSans = DM_Sans({
@@ -46,6 +47,7 @@ export default function RootLayout({
         <ThemeProvider>
           <TooltipProvider>
             <TenantBootstrap />
+            <OnboardingRedirect />
             <Sidebar />
             <AppShell>{children}</AppShell>
           </TooltipProvider>
