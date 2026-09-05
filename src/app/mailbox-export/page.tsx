@@ -135,6 +135,9 @@ export default function MailboxExport() {
   const [includeSpamTrash, setIncludeSpamTrash] = useState(true);
   const [running, setRunning] = useState(false);
   const cancelRef = useRef(false);
+  // Aborts the page request in flight: cancelRef only stops the loop between
+  // pages, and one page of large messages can take a while to fetch.
+  const abortRef = useRef<AbortController | null>(null);
   // Tracks whether the component is still mounted. Navigating away mid-export
   // must stop the loop and skip the final download — otherwise the loop keeps
   // fetching invisibly and drops a surprise multi-GB file minutes later.
@@ -144,6 +147,7 @@ export default function MailboxExport() {
     return () => {
       alive.current = false;
       cancelRef.current = true;
+      abortRef.current?.abort();
     };
   }, []);
 
@@ -168,6 +172,8 @@ export default function MailboxExport() {
     setSummary(null);
     setProgress({ exported: 0, bytes: 0, estimate: null });
     cancelRef.current = false;
+    const ac = new AbortController();
+    abortRef.current = ac;
     // Set on any hard failure so the finally block doesn't paint a green
     // "complete" summary under the error banner.
     let walkFailed = false;
@@ -203,7 +209,7 @@ export default function MailboxExport() {
           (pendingIds && pendingIds.length
             ? `&pendingIds=${encodeURIComponent(pendingIds.join(","))}`
             : "");
-        const res = await tfetch(url, {}, pinnedTenantId);
+        const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
         const data = await res.json();
         if (!data.success) {
           walkFailed = true;
@@ -276,8 +282,12 @@ export default function MailboxExport() {
         if (!pageToken && !(pendingIds && pendingIds.length)) break;
       }
     } catch {
-      walkFailed = true;
-      setError("Failed to connect to the API");
+      // An abort is the operator cancelling (or leaving the page): the pages
+      // already captured still download below, as for a cancel between pages.
+      if (!ac.signal.aborted) {
+        walkFailed = true;
+        setError("Failed to connect to the API");
+      }
     } finally {
       setRunning(false);
       // If the user navigated away, don't drop a surprise download or push state
@@ -320,6 +330,7 @@ export default function MailboxExport() {
 
   const cancel = () => {
     cancelRef.current = true;
+    abortRef.current?.abort();
   };
 
   return (

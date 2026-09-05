@@ -252,7 +252,9 @@ export default function DomainChange() {
                   placeholder="jane@currentdomain.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && lookupUser()}
+                  onKeyDown={(e) =>
+                    e.key === "Enter" && !lookingUp && lookupUser()
+                  }
                 />
                 <Button
                   variant="secondary"

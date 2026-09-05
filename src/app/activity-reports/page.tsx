@@ -182,9 +182,13 @@ export default function ActivityReports() {
         });
       }
     } catch {
+      if (eventsSeqRef.current !== seq) return;
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
-      setLoading(false);
+      // Only the latest request owns the spinner: a superseded response (tab
+      // switched, newer load issued) must not re-enable the button while the
+      // newer request is still in flight.
+      if (eventsSeqRef.current === seq) setLoading(false);
     }
   };
 

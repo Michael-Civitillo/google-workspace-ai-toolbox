@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -16,9 +16,10 @@ import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
 import { AiSummary } from "@/components/ai-summary";
 import { Search, Loader2, Shield, FileText } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 
 export default function Audit() {
+  const { id: tenantId } = useCurrentTenant();
   const [user, setUser] = useState("");
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState("");
@@ -31,19 +32,37 @@ export default function Audit() {
     text: string;
   } | null>(null);
 
+  // Live tenant id for staleness checks inside async closures.
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
+
+  // A report belongs to the tenant it was run against: clear it on a switch so
+  // tenant A's findings never sit under tenant B's sidebar pill.
+  useEffect(() => {
+    setSummary("");
+    setSummaryUser("");
+    setMessage(null);
+  }, [tenantId]);
+
   const runAudit = async () => {
     if (!user.trim()) return;
     setLoading(true);
     setSummary("");
     setMessage(null);
+    const pinnedTenantId = tenantId;
 
     try {
-      const res = await tfetch("/api/ai/audit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: user.trim() }),
-      });
+      const res = await tfetch(
+        "/api/ai/audit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user: user.trim() }),
+        },
+        pinnedTenantId
+      );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success) {
         setSummary(result.data.summary);

@@ -111,6 +111,9 @@ export default function MailboxImport() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const cancelRef = useRef(false);
+  // Aborts the batch request in flight: cancelRef only stops the loop between
+  // batches, and one batch upload can take a long time.
+  const abortRef = useRef<AbortController | null>(null);
   // Bumped on every file pick; stale header reads check it before landing.
   const pickSeq = useRef(0);
   // Stop the insert loop if the user navigates away mid-import — otherwise it
@@ -121,6 +124,7 @@ export default function MailboxImport() {
     return () => {
       alive.current = false;
       cancelRef.current = true;
+      abortRef.current?.abort();
     };
   }, []);
 
@@ -135,6 +139,11 @@ export default function MailboxImport() {
     cancelled: boolean;
     /** True when the run stopped on an error partway through. */
     aborted?: boolean;
+    /**
+     * Size of the batch that was in flight when the run was cancelled. The
+     * server may have inserted part of it, so the counts above are a floor.
+     */
+    interruptedBatch?: number;
     /** The mailbox the messages actually went into (pinned at run start). */
     target: string;
   } | null>(null);
@@ -188,11 +197,16 @@ export default function MailboxImport() {
     setSummary(null);
     setProgress({ inserted: 0, failed: 0 });
     cancelRef.current = false;
+    const ac = new AbortController();
+    abortRef.current = ac;
     const pinnedTenantId = tenantId;
     const user = targetUser.trim();
 
     let inserted = 0;
     let failed = 0;
+    // Messages in the request currently in flight — see the summary's
+    // interruptedBatch.
+    let inFlight = 0;
     const collectedErrors: string[] = [];
 
     try {
@@ -203,6 +217,7 @@ export default function MailboxImport() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user, labels: header.labels }),
+          signal: ac.signal,
         },
         pinnedTenantId
       );
@@ -222,16 +237,19 @@ export default function MailboxImport() {
       const flush = async () => {
         if (batch.length === 0) return true;
         if (!alive.current) return false;
+        inFlight = batch.length;
         const res = await tfetch(
           "/api/admin/mailbox-import",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ user, messages: batch }),
+            signal: ac.signal,
           },
           pinnedTenantId
         );
         const data = await res.json();
+        inFlight = 0;
         if (!data.success) {
           setError(data.error || "Import batch failed");
           return false;
@@ -323,9 +341,22 @@ export default function MailboxImport() {
       setSummary({ inserted, failed, cancelled: cancelRef.current, target: user });
       setErrors(collectedErrors);
     } catch {
-      setError("Failed to connect to the API. Some messages may have imported.");
       setErrors(collectedErrors);
-      setSummary({ inserted, failed, cancelled: false, aborted: true, target: user });
+      if (ac.signal.aborted) {
+        // Cancel (or leaving the page) interrupted a batch in flight. The
+        // server finishes what it received, so the counts are a floor — say
+        // so instead of reporting a clean stop.
+        setSummary({
+          inserted,
+          failed,
+          cancelled: true,
+          interruptedBatch: inFlight,
+          target: user,
+        });
+      } else {
+        setError("Failed to connect to the API. Some messages may have imported.");
+        setSummary({ inserted, failed, cancelled: false, aborted: true, target: user });
+      }
     } finally {
       setRunning(false);
     }
@@ -333,6 +364,7 @@ export default function MailboxImport() {
 
   const cancel = () => {
     cancelRef.current = true;
+    abortRef.current?.abort();
   };
 
   return (
@@ -384,6 +416,11 @@ export default function MailboxImport() {
             into {summary.target}.
             {summary.aborted
               ? " Do NOT blindly re-run the whole file — inserted messages would be duplicated."
+              : ""}
+            {summary.cancelled && summary.interruptedBatch
+              ? ` A batch of ${summary.interruptedBatch.toLocaleString()} message${
+                  summary.interruptedBatch === 1 ? "" : "s"
+                } was in flight when you cancelled and may have been partly imported — check the mailbox before re-running.`
               : ""}
           </AlertDescription>
         </Alert>

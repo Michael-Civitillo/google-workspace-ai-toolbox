@@ -122,12 +122,17 @@ export default function EmailTransfer() {
         });
         setConfirmOpen(false);
       } else {
+        // Close the dialog so the page-level error banner isn't hidden
+        // behind the modal overlay — otherwise the dialog looks like it did
+        // nothing and invites a second click.
+        setConfirmOpen(false);
         setMessage({
           type: "error",
           text: result.error || "Failed to set up email transfer",
         });
       }
     } catch {
+      setConfirmOpen(false);
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
       setLoading(false);

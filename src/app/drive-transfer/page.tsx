@@ -104,14 +104,15 @@ export default function DriveTransfer() {
   // if it changed meanwhile, so a slow load for the previous user can't
   // repopulate the tree after the user switched.
   const loadSeq = useRef(0);
-  // Stop the chunked transfer loop and skip post-unmount state updates when the
-  // user navigates away.
-  const alive = useRef(true);
+  // Abort the in-flight transfer chunk on cancel or unmount: cancelRef only
+  // stops the loop BETWEEN chunks, and one chunk (500 items, 6-way
+  // concurrency) can run for tens of seconds — long after the operator has
+  // clicked Cancel or navigated away.
+  const transferAbortRef = useRef<AbortController | null>(null);
   useEffect(() => {
-    alive.current = true;
     return () => {
-      alive.current = false;
       cancelRef.current = true;
+      transferAbortRef.current?.abort();
     };
   }, []);
   const [progress, setProgress] = useState<ProgressTotals | null>(null);
@@ -123,6 +124,9 @@ export default function DriveTransfer() {
   function resetTree() {
     // Invalidate any in-flight folder loads so their results are discarded.
     loadSeq.current++;
+    // Those superseded loads no longer touch the spinner either (see loadRoot),
+    // so clear it here — a new load sets it again right after.
+    setRootLoading(false);
     setNodes({});
     setRootIds(null);
     setRootNextToken(null);
@@ -133,12 +137,13 @@ export default function DriveTransfer() {
 
   async function loadRoot() {
     if (!fromUser.trim()) return;
+    // resetTree() bumps the sequence (and clears any stale spinner); capture
+    // the new value and bail if it changes (a new load / user switch) before
+    // our results come back.
+    resetTree();
+    const seq = loadSeq.current;
     setError(null);
     setRootLoading(true);
-    resetTree();
-    // resetTree() just bumped the sequence; capture it and bail if it changes
-    // (a new load / user switch) before our results come back.
-    const seq = loadSeq.current;
     try {
       const res = await tfetch(
         `/api/admin/drive-transfer/folders?user=${encodeURIComponent(fromUser)}`,
@@ -172,9 +177,12 @@ export default function DriveTransfer() {
       setRootIds(ids);
       setRootNextToken(payload.nextPageToken);
     } catch {
+      if (seq !== loadSeq.current) return;
       setError("Failed to connect to the API");
     } finally {
-      setRootLoading(false);
+      // Only the latest load owns the spinner: a superseded load must not
+      // clear it (or post an error) while the newer one is still in flight.
+      if (seq === loadSeq.current) setRootLoading(false);
     }
   }
 
@@ -229,7 +237,7 @@ export default function DriveTransfer() {
       if (seq !== loadSeq.current) return;
       setError("Failed to connect to the API");
     } finally {
-      setRootLoading(false);
+      if (seq === loadSeq.current) setRootLoading(false);
     }
   }
 
@@ -367,6 +375,8 @@ export default function DriveTransfer() {
     // the whole run.
     setConfirmOpen(false);
     cancelRef.current = false;
+    const ac = new AbortController();
+    transferAbortRef.current = ac;
     setError(null);
     setCompletion(null);
     setProgress({
@@ -410,11 +420,15 @@ export default function DriveTransfer() {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(body),
+              signal: ac.signal,
             },
             tenantId
           );
         } catch {
-          aborted = "Network error";
+          // An abort is the operator cancelling (or leaving the page), not a
+          // network failure. The server finishes the chunk it was given, which
+          // the "some items may already have been transferred" note covers.
+          aborted = ac.signal.aborted ? "Cancelled" : "Network error";
           break;
         }
         let data;
@@ -723,7 +737,10 @@ export default function DriveTransfer() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => (cancelRef.current = true)}
+                    onClick={() => {
+                      cancelRef.current = true;
+                      transferAbortRef.current?.abort();
+                    }}
                     className="ml-auto"
                   >
                     <StopCircle className="h-3.5 w-3.5 mr-1.5" />
