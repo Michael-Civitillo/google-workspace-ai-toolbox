@@ -7,7 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "test:launcher": "node --test \"packaging/launcher/test/*.test.ts\"",
+    "package": "npm run build && npm run package:payload && npm run package:launcher",
+    "package:payload": "node packaging/build-payload.mjs",
+    "package:launcher": "node packaging/build-launcher.mjs",
+    "package:exe": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-exe.ps1",
+    "package:bin": "bash packaging/build-bin.sh",
+    "package:smoke": "node packaging/smoke.mjs",
+    "package:icon": "node packaging/make-icon.mjs"
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.53",
@@ -30,9 +38,13 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.25.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
+    "fflate": "^0.8.2",
+    "postject": "^1.0.0-alpha.6",
     "puppeteer": "^24.40.0",
+    "resedit": "^2.0.3",
     "shadcn": "^4.1.1",
     "tailwindcss": "^4",
     "typescript": "^5"

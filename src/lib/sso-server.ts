@@ -5,6 +5,7 @@ import {
   writeJsonFileAtomic,
   withFileLock,
 } from "./json-store";
+import { dataPath } from "./data-dir";
 import { isValidDomain, isValidEmail, ValidationError } from "./validate";
 import {
   SSO_PROVIDERS,
@@ -32,7 +33,7 @@ import {
  * concurrent requests can't lose each other's changes.
  */
 export const SSO_CONFIG_PATH = path.resolve(
-  process.env.SSO_CONFIG_PATH || path.join(process.cwd(), "sso.json")
+  process.env.SSO_CONFIG_PATH || dataPath("sso.json")
 );
 
 // Re-tighten permissions at module load: a file created by hand (or under a

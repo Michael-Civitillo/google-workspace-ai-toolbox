@@ -1,5 +1,12 @@
 # Windows single-executable release: architecture
 
+> **Status: built.** This document is the design and the reasoning behind it;
+> it was written as a plan and is kept for the rationale, the options weighed,
+> and the measurements. The implementation lives in [`packaging/`](../packaging)
+> — start at [`packaging/README.md`](../packaging/README.md). **Section 14
+> records where the built thing differs from this plan**; where they disagree,
+> the code and `packaging/README.md` are right.
+
 **Decision: yes, Google Workspace Open Admin can ship as one `.exe`.** Build the Next.js app in `standalone` mode, zip the output, embed the zip as an asset in a Node.js *single executable application* (SEA), and let a small launcher script inside that executable extract the app to the user's profile on first run, start the Next.js server in-process, and open the browser. The user downloads one file (about 100 MB), double-clicks it, and lands on `http://localhost:3000`.
 
 This document is the build spec. It records what was measured in a spike against the current `main`, the constraints in the codebase that the packaging must respect, the design, the exact code and pipeline changes, and the acceptance tests. It is written so an implementer can execute it without re-deriving anything.
@@ -479,7 +486,7 @@ Opening your browser. Press Ctrl+C to stop.
 
 ### 8.6 Runtime-agnostic rule
 
-Use only Node core APIs and `fflate` in the launcher, isolate SEA specifics in `payload.ts`, and read args as `process.argv.slice(isSea ? 1 : 2)` (verified: in a SEA there is no script path in `argv`). Then plan B is `bun build --compile --target=bun-windows-x64 packaging/launcher/src/main.ts` with `import payload from "../dist/payload.zip" with { type: "file" }` in `payload.ts`, no other changes.
+Use only Node core APIs and `fflate` in the launcher, isolate SEA specifics in `payload.ts`, and read args as `process.argv.slice(2)` (measured against a real single-executable build: a SEA has the same two leading slots as `node script.js` — `[resolved executable, invoked path, ...user args]`). Then plan B is `bun build --compile --target=bun-windows-x64 packaging/launcher/src/main.ts` with `import payload from "../dist/payload.zip" with { type: "file" }` in `payload.ts`, no other changes.
 
 ---
 
@@ -644,7 +651,10 @@ let sea = null;
 try { sea = require("node:sea"); } catch { /* not available */ }
 const isSea = Boolean(sea && sea.isSea && sea.isSea());
 
-// In a SEA there is no script path in argv; user args start at index 1.
+// WRONG, and not what the shipped launcher does: a SEA has the same two
+// leading argv slots as `node script.js`, so this leaves the executable path
+// in the argument list. It is harmless only because this loop skips any token
+// that doesn't start with "--". The real launcher uses slice(2). See §14.
 const rawArgs = process.argv.slice(isSea ? 1 : 2);
 const args = {};
 for (let i = 0; i < rawArgs.length; i++) {
@@ -772,3 +782,71 @@ APP_PASSWORD=x PORT=3912 HOSTNAME=127.0.0.1 bun server.js    # identical results
 bun build --compile --target=bun-windows-x64 hello.ts  # 115,417,088-byte PE32+ exe in 1.7 s (cross-compile works from Linux)
 curl -I https://nodejs.org/dist/v22.22.2/win-x64/node.exe   # content-length 87,074,816
 ```
+
+---
+
+## 14. As built: where the implementation differs from this plan
+
+The design above survived contact with the code. These are the deltas, each one
+found by building the thing and running it.
+
+**Corrections to facts asserted above.**
+
+| Claim in the plan | What is true |
+|---|---|
+| A SEA's user arguments start at `argv[1]` (§8.6, Appendix A) | They start at `argv[2]`, exactly as under `node script.js`: `argv` is `[resolved executable, invoked path, ...user args]`. The spike's parser only *looked* correct because it skipped tokens that don't start with `--`. Measured with a purpose-built SEA. |
+| Payload ≈ 9.95 MB compressed (§2.1) | **6.3 MB** — 2,092 files, 34.3 MB raw. Excluding the project's own `src/`, `docs/` and tooling from the traced output (not planned; see below) removed more than the sharp prune did. |
+| Linux binary ≈ 134.8 MB | 125 MB, same arithmetic against a slightly different runtime. The Windows executable should land near 93 MB. |
+| `rcedit` for icon and version (§5, §7.3) | `rcedit` is deprecated. Uses [`resedit`](https://github.com/jet2jet/resedit-js) instead, driven by `packaging/stamp-exe.mjs` — pure JS, so it needs no native tool and runs on any build host. |
+| `outputFileTracingExcludes` "was not tested" (§6.2) | Tested, and load-bearing: it is what keeps `src/`, `docs/` and `scripts/` out of the payload. |
+| Repository layout (§5) | Matches, with `rcedit.mjs` → `stamp-exe.mjs`, plus `packaging/package.json` and `packaging/tsconfig.json` (see below). |
+
+**Additions the plan did not call for.**
+
+- **The whole-project trace had to be excluded, not fixed.** The build warning
+  traces to `src/lib/credential-files.ts`, which writes operator-supplied key
+  paths — inherently un-analysable. `/*turbopackIgnore*/` comments did not
+  silence it (they appear to apply to dynamic `import()`, not `path.resolve`).
+  The warning is cosmetic and remains; `outputFileTracingExcludes` fixes the
+  actual problem, which was `src/`, `docs/` and `README.md` being copied into
+  `.next/standalone`.
+- **`packaging/` is its own module scope** — `packaging/package.json`
+  (`"type": "module"`), `packaging/tsconfig.json`, and exclusion from the app's
+  tsconfig and ESLint config. Without that, the launcher's Node-only source gets
+  typechecked against the app's DOM/React settings during `next build`.
+- **The port check runs before the password prompt.** Found by running it: a
+  second instance asked the user to choose a password and only then reported
+  that the port was busy.
+- **`--no-browser` is not persisted.** It is a choice about one run; storing it
+  in `launcher.json` disabled browser-opening for every later start.
+- **`readConfigFile` reads `version` back.** A unit test caught that it did not,
+  which made the launcher rewrite `launcher.json` on every single start.
+- **Reproducible archiving.** The zip uses a fixed timestamp, so identical
+  staged files produce a byte-identical archive. Measured caveat: `next build`
+  is *not* reproducible — chunk names differ between runs — so a full rebuild of
+  the same commit still changes the payload hash and hence the extracted
+  directory name. That costs one re-extraction and the old copy is pruned; the
+  fixed timestamp simply removes archiving as a second source of churn.
+  (`mtime: 0` is rejected by the format; the zip epoch is 1980.)
+- **A 40 MB guard rail** on the payload, so anything large creeping back into
+  the traced output fails the build instead of the download.
+
+**Verified on Linux against the real built binary** — `npm run package:smoke`,
+25 checks: the auth gate and redirect, the CSRF rule from all three Origin
+spellings, `public/` and `.next/static` both serving, state landing in the data
+folder and *not* in the disposable app folder, the "already running" second
+launch, clean shutdown, and a warm restart that skips extraction. Cold start
+1.8 s including unpacking 2,092 files; warm start 1.3 s. Separately checked by
+hand: password generation without a TTY, the port-busy exit, `launcher.env`,
+portable mode, `--reset-app-cache`, and the rotating log.
+
+**Still unverified — the Windows-only steps**, unchanged from §10.3 and §10.4:
+`signtool remove`, `postject` on `node.exe`, `resedit` stamping, SmartScreen
+behaviour, Defender scan latency during extraction, and `Secure` cookie handling
+on plain-HTTP localhost in Edge and Firefox. The CI workflow asserts what it can
+— size, absence of an invalid signature, product version — and then runs the
+full smoke test on the executable.
+
+**Not built, still open.** §12 stands unchanged: LAN/team serving, a hashed
+admin password, `HTTPS_PROXY` for `fetch`, a tray or windowless mode,
+auto-update, and macOS/Linux releases.

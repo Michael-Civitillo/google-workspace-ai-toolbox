@@ -1,9 +1,9 @@
-import path from "path";
 import {
   readJsonObjectFile,
   writeJsonFileAtomic,
   withFileLock,
 } from "./json-store";
+import { dataPath } from "./data-dir";
 import type { AppConfig } from "./app-config-types";
 
 /**
@@ -12,7 +12,7 @@ import type { AppConfig } from "./app-config-types";
  * same atomic tmp-file + fsync + rename machinery, and gitignored.
  */
 
-const STORE_PATH = path.join(process.cwd(), "app-config.json");
+const STORE_PATH = dataPath("app-config.json");
 
 function emptyConfig(): AppConfig {
   return { version: 1, onboardingCompletedAt: null };

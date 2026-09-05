@@ -96,7 +96,78 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 </details>
 
+## 🪟 Windows: download and run
+
+Don't want to install Node, clone a repo, or set environment variables? Grab
+the single file.
+
+1. Download **`OpenAdmin-win-x64.exe`** from the [latest release](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest).
+2. Double-click it. Windows may show a "Windows protected your PC" screen for a
+   new download — click **More info → Run anyway**. (Verify the download first
+   if you like: `Get-FileHash .\OpenAdmin-win-x64.exe` should match
+   `SHA256SUMS.txt` on the release page.)
+3. Choose a password when it asks. That's the password for the web interface.
+4. Your browser opens at `http://localhost:3000`. Sign in and you're in. 🎉
+
+Everything is inside that one file — the runtime, the app, the lot. No Node.js,
+no `npm install`, no `gws` CLI. It serves on **this machine only**: the server
+listens on loopback, so nothing is exposed to your network and Windows Firewall
+never prompts.
+
+You still need a **service account with domain-wide delegation** before you can
+run operations against your tenant — the app walks you through it on first
+launch. See [Auth setup](#-auth-setup-the-important-part) below.
+
+**Where things live.** Your configuration — tenants, single sign-on, the audit
+log, and any service-account keys restored from a backup — is in
+`%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data`. The app itself unpacks to
+`...\app\<version>` and is disposable.
+
+**Upgrading.** Download the new exe and run it. Your configuration is untouched
+and the old copy of the app is cleaned up.
+
+**Uninstalling.** Delete the exe and the `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin`
+folder.
+
+**Stopping it.** Press Ctrl+C in the console window, or just close it.
+
+<details>
+<summary>Command-line options</summary>
+
+```
+OpenAdmin-win-x64.exe [options]
+
+  --port <n>           HTTP port (default 3000, remembered after first use)
+  --host <addr>        bind address (default 127.0.0.1 — this machine only)
+  --data-dir <path>    where tenants, sign-on config, audit log and keys live
+  --root <path>        override the whole application folder (app cache + data)
+  --set-password       set a new admin password for the web UI
+  --password <pw>      admin password for this run only
+  --no-browser         don't open a browser window on start
+  --reset-app-cache    re-extract the bundled application files
+  --version, -v        print version information
+  --help, -h           show this help
+```
+
+**Portable mode.** Create an empty file called `portable.txt` next to the exe
+and it keeps everything beside itself instead of in your user profile — handy
+for a USB stick or a locked-down machine.
+
+**Extra settings.** Optional keys like a Gemini API key can go in a
+`launcher.env` file in the data folder (`KEY=value`, one per line), so you never
+have to touch Windows environment variables. Real environment variables win over
+that file.
+
+**Changing the port** changes the sign-in URL, so update the redirect URI in
+your identity provider if you use single sign-on.
+
+</details>
+
+Building the exe yourself, or wondering how it works: [`packaging/README.md`](packaging/README.md).
+
 ## 🚀 Getting started
+
+Running from source — for development, non-Windows machines, or serving a team.
 
 You'll need:
 - Node.js 20+
@@ -205,6 +276,7 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | `GOOGLE_WORKSPACE_ADMIN_EMAIL` | ✅ for Admin SDK ops | Subject for service account impersonation. |
 | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | ⚠️ if not using per-tenant config | Path to service account JSON. |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | ⚠️ for AI features | Gemini API key. |
+| `OPEN_ADMIN_DATA_DIR` | optional | Where `tenants.json`, `app-config.json`, `sso.json`, `audit.log` and imported keys are kept (defaults to the working directory). The packaged Windows build sets this to your user profile. |
 | `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
 | `SSO_CONFIG_PATH` | optional | Override location of the single sign-on config (defaults to `./sso.json`). |
@@ -213,6 +285,14 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600) and `app-config.json` (onboarding state) — all gitignored, all written atomically, all covered by the configuration export below.
 
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
+
+> **Running the standalone build directly?** `next build` emits
+> `.next/standalone`; if you run its `server.js` yourself (in Docker, say), set
+> `HOSTNAME` to the host users will actually type. In standalone mode Next
+> treats the bound address as the canonical host and the CSRF check compares
+> the browser's `Origin` against it — leave `HOSTNAME` at its `0.0.0.0` default
+> and every mutating request is rejected with 403. `npm start` and the packaged
+> exe handle this for you.
 
 ## 🔑 Single sign-on (OIDC)
 
@@ -261,11 +341,20 @@ Tenant config is saved to `tenants.json` locally (gitignored — your credential
 ## 💻 Dev stuff
 
 ```bash
-npm run dev          # fire it up
-npm run build        # production build
-npm run lint         # check your work
-npm run screenshots  # regenerate docs/screenshots/* in light + dark modes (needs dev server + APP_PASSWORD)
+npm run dev            # fire it up
+npm run build          # production build
+npm run lint           # check your work
+npm run screenshots    # regenerate docs/screenshots/* in light + dark modes (needs dev server + APP_PASSWORD)
+
+npm run package        # build the single-file desktop payload (needs Node 22+)
+npm run package:exe    # Windows: assemble OpenAdmin-win-x64.exe
+npm run package:bin    # Linux/macOS: assemble packaging/dist/open-admin
+npm run package:smoke  # start a built binary and check it end to end
+npm run test:launcher  # unit tests for the packaged launcher
 ```
+
+See [`packaging/README.md`](packaging/README.md) for how the single-file build
+is put together.
 
 ## ⚠️ Heads up
 

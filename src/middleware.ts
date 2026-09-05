@@ -112,7 +112,7 @@ export async function middleware(req: NextRequest) {
           NextResponse.json({ error: "Invalid Origin header" }, { status: 400 })
         );
       }
-      if (originHost !== expectedHost) {
+      if (!sameOriginHost(expectedHost, originHost)) {
         return withSecurityHeaders(
           NextResponse.json(
             { error: "Cross-origin request blocked" },
@@ -129,7 +129,7 @@ export async function middleware(req: NextRequest) {
           NextResponse.json({ error: "Invalid Referer header" }, { status: 400 })
         );
       }
-      if (refererHost !== expectedHost) {
+      if (!sameOriginHost(expectedHost, refererHost)) {
         return withSecurityHeaders(
           NextResponse.json(
             { error: "Cross-origin request blocked" },
@@ -163,6 +163,37 @@ export async function middleware(req: NextRequest) {
   }
 
   return withSecurityHeaders(NextResponse.next());
+}
+
+const LOOPBACK_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i;
+
+/** Split "host:port" into its parts, keeping bracketed IPv6 literals intact. */
+function splitHostPort(hostport: string): [string, string] {
+  const i = hostport.lastIndexOf(":");
+  if (i === -1 || hostport.endsWith("]")) return [hostport, ""];
+  return [hostport.slice(0, i), hostport.slice(i + 1)];
+}
+
+/**
+ * Same-origin host comparison for the CSRF check above.
+ *
+ * Exact match is the normal answer. The one deliberate relaxation is
+ * loopback: Next canonicalises every loopback spelling in `req.nextUrl` to
+ * `localhost`, so a user browsing http://127.0.0.1:3000 sends an Origin of
+ * 127.0.0.1 against an expected host of localhost and would be refused even
+ * though it is literally the same server. All loopback names on the SAME port
+ * are that server; a different port is still rejected, so another app on the
+ * machine can't forge requests here.
+ */
+function sameOriginHost(expected: string, actual: string): boolean {
+  if (expected === actual) return true;
+  const [expectedHostname, expectedPort] = splitHostPort(expected);
+  const [actualHostname, actualPort] = splitHostPort(actual);
+  return (
+    expectedPort === actualPort &&
+    LOOPBACK_HOST.test(expectedHostname) &&
+    LOOPBACK_HOST.test(actualHostname)
+  );
 }
 
 function withSecurityHeaders(res: NextResponse): NextResponse {
