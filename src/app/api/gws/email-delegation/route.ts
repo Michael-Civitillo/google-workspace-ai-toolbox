@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildGmailClient } from "@/lib/admin-sdk";
+import { buildGmailClient, withGoogleRetry } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const GMAIL_DELEGATION_SCOPES = [
@@ -26,7 +27,12 @@ export async function GET(request: NextRequest) {
     const tenant = tenantFromRequest(request);
     const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
     const gmail = buildGmailClient(tenant, user, GMAIL_DELEGATION_SCOPES);
-    const res = await gmail.users.settings.delegates.list({ userId: "me" });
+    // Gmail throttles per user; back off on 429 / rate-limit 403s instead of
+    // failing the whole request on the first one. Reads also retry 5xx blips.
+    const res = await withGoogleRetry(
+      () => gmail.users.settings.delegates.list({ userId: "me" }),
+      { retryServerErrors: true }
+    );
     return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
     return errorResponse(e);
@@ -46,10 +52,16 @@ export async function POST(request: NextRequest) {
     }
 
     const gmail = buildGmailClient(tenant, user, GMAIL_DELEGATION_SCOPES);
-    await gmail.users.settings.delegates.create({
-      userId: "me",
-      requestBody: { delegateEmail: delegate },
-    });
+    // Rate-limit retries only: a create is not idempotent, so a 5xx that may
+    // have committed must surface rather than be blindly re-sent.
+    await withGoogleRetry(
+      () =>
+        gmail.users.settings.delegates.create({
+          userId: "me",
+          requestBody: { delegateEmail: delegate },
+        }),
+      { retryServerErrors: false }
+    );
 
     audit({
       action: "email_delegation.add",
@@ -82,10 +94,14 @@ export async function DELETE(request: NextRequest) {
     const delegate = requireEmail(body.delegate, "delegate");
 
     const gmail = buildGmailClient(tenant, user, GMAIL_DELEGATION_SCOPES);
-    await gmail.users.settings.delegates.delete({
-      userId: "me",
-      delegateEmail: delegate,
-    });
+    await withGoogleRetry(
+      () =>
+        gmail.users.settings.delegates.delete({
+          userId: "me",
+          delegateEmail: delegate,
+        }),
+      { retryServerErrors: false }
+    );
 
     audit({
       action: "email_delegation.remove",
@@ -106,10 +122,4 @@ export async function DELETE(request: NextRequest) {
     });
     return errorResponse(e);
   }
-}
-
-function errorResponse(e: unknown) {
-  const message = e instanceof Error ? e.message : "Unexpected error";
-  const status = e instanceof ValidationError ? 400 : 500;
-  return NextResponse.json({ success: false, error: message }, { status });
 }

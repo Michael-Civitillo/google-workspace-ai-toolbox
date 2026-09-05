@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildCalendarClient, isExternalTarget } from "@/lib/admin-sdk";
+import {
+  buildCalendarClient,
+  isExternalTarget,
+  withGoogleRetry,
+} from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
+import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const ALLOWED_ROLES = new Set(["freeBusyReader", "reader", "writer", "owner"]);
@@ -33,11 +38,20 @@ export async function GET(request: NextRequest) {
     // hide exactly the grants an admin is auditing for). Bounded so a
     // pathological calendar can't pin the route.
     const MAX_ACL_RULES = 1000;
-    let res = await cal.acl.list({ calendarId, maxResults: 250 });
+    // Reads retry rate limits and 5xx blips; a multi-page walk would
+    // otherwise fail outright on one throttled page.
+    let res = await withGoogleRetry(
+      () => cal.acl.list({ calendarId, maxResults: 250 }),
+      { retryServerErrors: true }
+    );
     const items = [...(res.data.items || [])];
     let pageToken = res.data.nextPageToken ?? undefined;
     while (pageToken && items.length < MAX_ACL_RULES) {
-      res = await cal.acl.list({ calendarId, maxResults: 250, pageToken });
+      const token = pageToken;
+      res = await withGoogleRetry(
+        () => cal.acl.list({ calendarId, maxResults: 250, pageToken: token }),
+        { retryServerErrors: true }
+      );
       items.push(...(res.data.items || []));
       pageToken = res.data.nextPageToken ?? undefined;
     }
@@ -83,10 +97,16 @@ export async function POST(request: NextRequest) {
     }
 
     const cal = buildCalendarClient(tenant, calendarId);
-    const res = await cal.acl.insert({
-      calendarId,
-      requestBody: { role, scope: { type: "user", value: delegateEmail } },
-    });
+    // Rate-limit retries only: never re-send a write after a 5xx that may have
+    // committed.
+    const res = await withGoogleRetry(
+      () =>
+        cal.acl.insert({
+          calendarId,
+          requestBody: { role, scope: { type: "user", value: delegateEmail } },
+        }),
+      { retryServerErrors: false }
+    );
 
     audit({
       action: "calendar_delegation.add",
@@ -122,7 +142,9 @@ export async function DELETE(request: NextRequest) {
     }
 
     const cal = buildCalendarClient(tenant, calendarId);
-    await cal.acl.delete({ calendarId, ruleId });
+    await withGoogleRetry(() => cal.acl.delete({ calendarId, ruleId }), {
+      retryServerErrors: false,
+    });
 
     audit({
       action: "calendar_delegation.remove",
@@ -143,10 +165,4 @@ export async function DELETE(request: NextRequest) {
     });
     return errorResponse(e);
   }
-}
-
-function errorResponse(e: unknown) {
-  const message = e instanceof Error ? e.message : "Unexpected error";
-  const status = e instanceof ValidationError ? 400 : 500;
-  return NextResponse.json({ success: false, error: message }, { status });
 }

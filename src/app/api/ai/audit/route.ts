@@ -7,6 +7,7 @@ import {
   buildCalendarClient,
   listActivityEvents,
   listGroups,
+  withGoogleRetry,
 } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
@@ -33,7 +34,9 @@ async function readOrError(
   fn: () => Promise<{ data: unknown }>
 ): Promise<unknown> {
   try {
-    const res = await fn();
+    // Every probe is a read: retry rate limits and 5xx blips so one throttled
+    // call doesn't turn a whole section of the report into "data unavailable".
+    const res = await withGoogleRetry(fn, { retryServerErrors: true });
     return res.data;
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
@@ -70,11 +73,16 @@ export async function POST(request: NextRequest) {
       const items: unknown[] = [];
       let pageToken: string | undefined;
       do {
-        const res = await cal.acl.list({
-          calendarId: user,
-          maxResults: 250,
-          pageToken,
-        });
+        const token = pageToken;
+        const res = await withGoogleRetry(
+          () =>
+            cal.acl.list({
+              calendarId: user,
+              maxResults: 250,
+              pageToken: token,
+            }),
+          { retryServerErrors: true }
+        );
         items.push(...(res.data.items || []));
         pageToken = res.data.nextPageToken ?? undefined;
       } while (pageToken && items.length < MAX_ACL_RULES);

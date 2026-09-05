@@ -10,6 +10,7 @@ import {
 } from "fs";
 import path from "path";
 import type { Tenant, PublicTenant } from "./tenant-types";
+import { ValidationError } from "./validate";
 
 /**
  * Strip the server-only Gemini API key before a tenant crosses to the browser,
@@ -181,10 +182,15 @@ async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
   }
 }
 
-/** Thrown when a caller names a tenant id that doesn't exist — routes map it to 404. */
-export class TenantNotFoundError extends Error {
-  constructor(id: string) {
-    super(`Tenant "${id}" not found`);
+/**
+ * Thrown when a caller names a tenant id that doesn't exist. A ValidationError
+ * subclass so every route's generic "ValidationError → 400" mapping already
+ * turns a stale tenant id into a client error instead of a 500; routes that
+ * check for this class first answer 404.
+ */
+export class TenantNotFoundError extends ValidationError {
+  constructor(id: string, hint?: string) {
+    super(hint ? `Tenant "${id}" not found. ${hint}` : `Tenant "${id}" not found`);
     this.name = "TenantNotFoundError";
   }
 }
@@ -237,8 +243,9 @@ export function resolveTenant(tenantId: string | null | undefined): Tenant | nul
   if (tenantId) {
     const t = getTenantById(tenantId);
     if (!t) {
-      throw new Error(
-        `Tenant "${tenantId}" not found. It may have been deleted — refresh the page and pick a tenant.`
+      throw new TenantNotFoundError(
+        tenantId,
+        "It may have been deleted — refresh the page and pick a tenant."
       );
     }
     return t;

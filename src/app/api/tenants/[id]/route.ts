@@ -73,11 +73,13 @@ export async function PUT(
     return NextResponse.json({ tenant: toPublicTenant(tenant) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    // TenantNotFoundError is a ValidationError subclass — check it first so an
+    // unknown id stays a 404.
     const status =
-      error instanceof ValidationError
-        ? 400
-        : error instanceof TenantNotFoundError
+      error instanceof TenantNotFoundError
         ? 404
+        : error instanceof ValidationError
+        ? 400
         : 500;
     return NextResponse.json({ error: message }, { status });
   }

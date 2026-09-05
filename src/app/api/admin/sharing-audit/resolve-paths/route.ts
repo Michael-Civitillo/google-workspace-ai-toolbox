@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { resolveFilePaths } from "@/lib/admin-sdk";
+import { resolveFilePaths, PATH_RESOLVE_FILE_CAP } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
+import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 /**
@@ -34,6 +35,14 @@ export async function POST(request: NextRequest) {
     if (!Array.isArray(rawFileIds) || rawFileIds.length === 0) {
       throw new ValidationError("fileIds must be a non-empty array");
     }
+    // Mirror the library cap here so an oversized batch is a 400 with a clear
+    // message rather than a 500 from the resolver (the revoke route does the
+    // same for its own cap).
+    if (rawFileIds.length > PATH_RESOLVE_FILE_CAP) {
+      throw new ValidationError(
+        `Too many files in one resolve batch — cap is ${PATH_RESOLVE_FILE_CAP}`
+      );
+    }
     const fileIds: string[] = [];
     for (const f of rawFileIds) {
       if (typeof f !== "string") {
@@ -50,8 +59,6 @@ export async function POST(request: NextRequest) {
     const paths = await resolveFilePaths(tenant, user, fileIds);
     return NextResponse.json({ success: true, data: { paths } });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Path resolve failed";
-    const status = e instanceof ValidationError ? 400 : 500;
-    return NextResponse.json({ success: false, error: message }, { status });
+    return errorResponse(e, "Path resolve failed");
   }
 }

@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildCalendarClient, isExternalTarget } from "@/lib/admin-sdk";
+import {
+  buildCalendarClient,
+  isExternalTarget,
+  withGoogleRetry,
+} from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
+import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 export async function GET(request: NextRequest) {
@@ -16,11 +21,20 @@ export async function GET(request: NextRequest) {
     // entries, so a user subscribed to more calendars would get a silently
     // truncated picker. Bounded so a pathological account can't pin the route.
     const MAX_CALENDARS = 1000;
-    let res = await cal.calendarList.list({ maxResults: 250 });
+    // Reads retry rate limits and 5xx blips; a multi-page walk would
+    // otherwise fail outright on one throttled page.
+    let res = await withGoogleRetry(
+      () => cal.calendarList.list({ maxResults: 250 }),
+      { retryServerErrors: true }
+    );
     const items = [...(res.data.items || [])];
     let pageToken = res.data.nextPageToken ?? undefined;
     while (pageToken && items.length < MAX_CALENDARS) {
-      res = await cal.calendarList.list({ maxResults: 250, pageToken });
+      const token = pageToken;
+      res = await withGoogleRetry(
+        () => cal.calendarList.list({ maxResults: 250, pageToken: token }),
+        { retryServerErrors: true }
+      );
       items.push(...(res.data.items || []));
       pageToken = res.data.nextPageToken ?? undefined;
     }
@@ -101,10 +115,19 @@ export async function POST(request: NextRequest) {
     const cal = buildCalendarClient(tenant, sourceUser);
     let grantData: unknown;
     try {
-      const res = await cal.acl.insert({
-        calendarId,
-        requestBody: { role: "owner", scope: { type: "user", value: targetUser } },
-      });
+      // Rate-limit retries only: never re-send a write after a 5xx that may
+      // have committed.
+      const res = await withGoogleRetry(
+        () =>
+          cal.acl.insert({
+            calendarId,
+            requestBody: {
+              role: "owner",
+              scope: { type: "user", value: targetUser },
+            },
+          }),
+        { retryServerErrors: false }
+      );
       grantData = res.data;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -149,7 +172,10 @@ export async function POST(request: NextRequest) {
     // Step 2 (opt-in only): Remove the source user's access.
     let removeError: string | undefined;
     try {
-      await cal.acl.delete({ calendarId, ruleId: `user:${sourceUser}` });
+      await withGoogleRetry(
+        () => cal.acl.delete({ calendarId, ruleId: `user:${sourceUser}` }),
+        { retryServerErrors: false }
+      );
     } catch (e) {
       removeError = e instanceof Error ? e.message : String(e);
     }
@@ -188,10 +214,4 @@ export async function POST(request: NextRequest) {
     });
     return errorResponse(e);
   }
-}
-
-function errorResponse(e: unknown) {
-  const message = e instanceof Error ? e.message : "Unexpected error";
-  const status = e instanceof ValidationError ? 400 : 500;
-  return NextResponse.json({ success: false, error: message }, { status });
 }

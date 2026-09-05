@@ -1531,7 +1531,7 @@ export async function listExternallySharedFiles(
  * `files.get` calls for ancestor folders, but the per-tenant folder cache
  * amortises across the whole batch — most files share parents.
  */
-const PATH_RESOLVE_FILE_CAP = 1000;
+export const PATH_RESOLVE_FILE_CAP = 1000;
 
 /** Defensive limit on how far we'll walk up a parent chain. */
 const PATH_RESOLVE_MAX_DEPTH = 50;
@@ -2938,23 +2938,82 @@ function httpStatusOf(e: unknown): number | null {
   // gaxios sometimes puts a non-numeric string (e.g. "ERR_BAD_REQUEST") in
   // `.code` while the actual HTTP status lives on `.response.status`.
   for (const raw of [err.status, err.response?.status, err.code]) {
+    // `Number(null)` is 0, which would read as a real status and hide a
+    // network error behind "status 0" — skip absent values explicitly.
+    if (raw === null || raw === undefined) continue;
     const n = typeof raw === "number" ? raw : Number(raw);
     if (Number.isFinite(n)) return n;
   }
   return null;
 }
 
+/** The HTTP status a Google API rejection carried, for routes mapping errors. */
+export function googleHttpStatus(e: unknown): number | null {
+  return httpStatusOf(e);
+}
+
+/**
+ * Collect the machine-readable `reason` codes (and any quota-limit names) a
+ * Google API error carries, from every place the client libraries put them:
+ * the legacy `errors[].reason` list (Drive, Gmail, Calendar) and the newer
+ * ErrorInfo `details[]` entries (Admin SDK, Reports). Lower-cased.
+ */
+function googleErrorInfo(e: unknown): { reasons: string[]; quotaLimits: string[] } {
+  const reasons: string[] = [];
+  const quotaLimits: string[] = [];
+  if (typeof e !== "object" || e === null) return { reasons, quotaLimits };
+  const err = e as {
+    errors?: unknown;
+    response?: { data?: { error?: { errors?: unknown; details?: unknown } } };
+  };
+  const collect = (list: unknown) => {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      const entry = item as
+        | { reason?: unknown; metadata?: { quota_limit?: unknown } }
+        | null;
+      if (typeof entry?.reason === "string" && entry.reason) {
+        reasons.push(entry.reason.toLowerCase());
+      }
+      const limit = entry?.metadata?.quota_limit;
+      if (typeof limit === "string" && limit) quotaLimits.push(limit.toLowerCase());
+    }
+  };
+  collect(err.errors);
+  collect(err.response?.data?.error?.errors);
+  collect(err.response?.data?.error?.details);
+  return { reasons, quotaLimits };
+}
+
+// Per-user / per-minute throttles: the request was rejected before any work,
+// so backing off and retrying is safe and usually succeeds.
+const RATE_LIMIT_REASONS = new Set([
+  "ratelimitexceeded",
+  "userratelimitexceeded",
+  "sharingratelimitexceeded",
+  "rate_limit_exceeded",
+  "resource_exhausted",
+]);
+// Budget exhaustion: a retry seconds later can never succeed and only burns
+// the whole backoff schedule (~10 s) before surfacing the same error.
+const EXHAUSTED_QUOTA_REASONS = new Set([
+  "dailylimitexceeded",
+  "storagequotaexceeded",
+]);
+
 /**
  * Decide whether a failed Google API call (Gmail, Drive, or Admin SDK) is worth
  * retrying.
  *
- * 429 (rate limit) is always safe — the request was rejected before any work.
- * Google also signals per-user rate limits as 403 with a rate/quota message
- * (Drive's `userRateLimitExceeded`, Gmail's `rateLimitExceeded`), so we sniff
- * those. 5xx backend blips and bare network errors are retriable only for
- * idempotent operations (`retryServerErrors`), never for non-idempotent writes
- * like message inserts, where a 5xx might have committed and a blind retry would
- * duplicate.
+ * 429 (rate limit) is safe — the request was rejected before any work.
+ * Google also signals per-user rate limits as 403 with a rate/quota reason
+ * (Drive's `userRateLimitExceeded`, Gmail's `rateLimitExceeded`, the Admin
+ * SDK's per-minute quotas), so we honour those. Daily-quota and storage-quota
+ * exhaustion look similar but cannot clear within a backoff window, so they are
+ * never retried. 5xx backend blips and bare network errors are retriable only
+ * for idempotent operations (`retryServerErrors`), never for non-idempotent
+ * writes like message inserts, where a 5xx might have committed and a blind
+ * retry would duplicate.
  */
 function isRetriableGoogleError(
   e: unknown,
@@ -2965,7 +3024,14 @@ function isRetriableGoogleError(
     typeof e === "object" && e && "message" in e
       ? String((e as { message?: unknown }).message ?? "").toLowerCase()
       : "";
+  const { reasons, quotaLimits } = googleErrorInfo(e);
+  const exhausted =
+    reasons.some((r) => EXHAUSTED_QUOTA_REASONS.has(r)) ||
+    quotaLimits.some((q) => q.includes("perday")) ||
+    /per day|daily limit|daily quota|storage quota/.test(msg);
+  if (exhausted) return false;
   const rateLimited =
+    reasons.some((r) => RATE_LIMIT_REASONS.has(r)) ||
     msg.includes("rate limit") ||
     msg.includes("ratelimit") ||
     msg.includes("user rate") ||
@@ -2988,8 +3054,15 @@ function isRetriableGoogleError(
   return false;
 }
 
-/** Retry a Google API call with exponential backoff + jitter on transient errors. */
-async function withGoogleRetry<T>(
+/**
+ * Retry a Google API call with exponential backoff + jitter on transient errors.
+ *
+ * Exported so API routes that talk to Gmail / Calendar directly get the same
+ * rate-limit handling as the Admin SDK helpers here: use
+ * `retryServerErrors: false` for non-idempotent writes (create, insert) and
+ * `true` for reads and idempotent settings updates.
+ */
+export async function withGoogleRetry<T>(
   fn: () => Promise<T>,
   opts: { retries?: number; retryServerErrors: boolean }
 ): Promise<T> {

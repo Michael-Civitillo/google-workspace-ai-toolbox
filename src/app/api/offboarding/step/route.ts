@@ -11,6 +11,7 @@ import {
   transferDrive,
   isAlreadyExistsError,
   isExternalTarget,
+  withGoogleRetry,
 } from "@/lib/admin-sdk";
 import {
   requireEmail,
@@ -95,16 +96,24 @@ export async function POST(request: NextRequest) {
         ).slice(0, 5000);
         try {
           const gmail = buildGmailClient(tenant, user, GMAIL_VACATION_SCOPES);
-          await gmail.users.settings.updateVacation({
-            userId: "me",
-            requestBody: {
-              enableAutoReply: true,
-              responseSubject: subject,
-              responseBodyPlainText: message,
-              restrictToContacts: false,
-              restrictToDomain: false,
-            },
-          });
+          // Gmail throttles per user: back off on rate limits instead of
+          // failing the step (and holding back the rest of the sequence) on
+          // the first 429. Setting the responder is idempotent, so 5xx blips
+          // retry too.
+          await withGoogleRetry(
+            () =>
+              gmail.users.settings.updateVacation({
+                userId: "me",
+                requestBody: {
+                  enableAutoReply: true,
+                  responseSubject: subject,
+                  responseBodyPlainText: message,
+                  restrictToContacts: false,
+                  restrictToDomain: false,
+                },
+              }),
+            { retryServerErrors: true }
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           audit({
@@ -150,10 +159,15 @@ export async function POST(request: NextRequest) {
         // opaquely, so the pending state is surfaced as the step's outcome.
         let verificationStatus: string | null = null;
         try {
-          const created = await gmail.users.settings.forwardingAddresses.create({
-            userId: "me",
-            requestBody: { forwardingEmail: successor },
-          });
+          // Rate-limit retries only: the create is not idempotent.
+          const created = await withGoogleRetry(
+            () =>
+              gmail.users.settings.forwardingAddresses.create({
+                userId: "me",
+                requestBody: { forwardingEmail: successor },
+              }),
+            { retryServerErrors: false }
+          );
           verificationStatus = created.data.verificationStatus ?? null;
         } catch (e) {
           // An "already exists" error means a previous run registered the
@@ -161,8 +175,13 @@ export async function POST(request: NextRequest) {
           // retry-safe rather than wedging on the duplicate.
           if (isAlreadyExistsError(e)) {
             try {
-              const existing = await gmail.users.settings.forwardingAddresses.get(
-                { userId: "me", forwardingEmail: successor }
+              const existing = await withGoogleRetry(
+                () =>
+                  gmail.users.settings.forwardingAddresses.get({
+                    userId: "me",
+                    forwardingEmail: successor,
+                  }),
+                { retryServerErrors: true }
               );
               verificationStatus = existing.data.verificationStatus ?? null;
             } catch {
@@ -207,14 +226,19 @@ export async function POST(request: NextRequest) {
 
         // Step 2: enable auto-forwarding and archive the originals.
         try {
-          await gmail.users.settings.updateAutoForwarding({
-            userId: "me",
-            requestBody: {
-              enabled: true,
-              emailAddress: successor,
-              disposition: "archive",
-            },
-          });
+          // Setting the forwarding state is idempotent: retry 5xx blips too.
+          await withGoogleRetry(
+            () =>
+              gmail.users.settings.updateAutoForwarding({
+                userId: "me",
+                requestBody: {
+                  enabled: true,
+                  emailAddress: successor,
+                  disposition: "archive",
+                },
+              }),
+            { retryServerErrors: true }
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           audit({
@@ -256,13 +280,19 @@ export async function POST(request: NextRequest) {
         // dropping the ACL on a primary calendar would be rejected anyway.
         try {
           const cal = buildCalendarClient(tenant, user);
-          await cal.acl.insert({
-            calendarId: user,
-            requestBody: {
-              role: "owner",
-              scope: { type: "user", value: successor },
-            },
-          });
+          // Rate-limit retries only: never re-send a write after a 5xx that
+          // may have committed.
+          await withGoogleRetry(
+            () =>
+              cal.acl.insert({
+                calendarId: user,
+                requestBody: {
+                  role: "owner",
+                  scope: { type: "user", value: successor },
+                },
+              }),
+            { retryServerErrors: false }
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           audit({

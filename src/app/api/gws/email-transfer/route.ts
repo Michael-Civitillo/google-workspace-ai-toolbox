@@ -4,10 +4,12 @@ import {
   buildGmailClient,
   isAlreadyExistsError,
   isExternalTarget,
+  withGoogleRetry,
 } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
+import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const GMAIL_SETTINGS_SCOPES = [
@@ -78,10 +80,16 @@ export async function POST(request: NextRequest) {
     let forwardData: unknown;
     let verificationStatus: string | null = null;
     try {
-      const res = await gmail.users.settings.forwardingAddresses.create({
-        userId: "me",
-        requestBody: { forwardingEmail: targetUser },
-      });
+      // Rate-limit retries only for the create (not idempotent); the status
+      // lookup and the settings update below are safe to retry on 5xx too.
+      const res = await withGoogleRetry(
+        () =>
+          gmail.users.settings.forwardingAddresses.create({
+            userId: "me",
+            requestBody: { forwardingEmail: targetUser },
+          }),
+        { retryServerErrors: false }
+      );
       forwardData = res.data;
       verificationStatus = res.data.verificationStatus ?? null;
     } catch (e) {
@@ -94,10 +102,14 @@ export async function POST(request: NextRequest) {
         // status up. Best-effort: an unreadable status falls through to the
         // enable attempt, which reports its own error.
         try {
-          const existing = await gmail.users.settings.forwardingAddresses.get({
-            userId: "me",
-            forwardingEmail: targetUser,
-          });
+          const existing = await withGoogleRetry(
+            () =>
+              gmail.users.settings.forwardingAddresses.get({
+                userId: "me",
+                forwardingEmail: targetUser,
+              }),
+            { retryServerErrors: true }
+          );
           verificationStatus = existing.data.verificationStatus ?? null;
         } catch {
           verificationStatus = null;
@@ -153,14 +165,19 @@ export async function POST(request: NextRequest) {
     let autoForwardData: unknown;
     let autoForwardError: string | undefined;
     try {
-      const res = await gmail.users.settings.updateAutoForwarding({
-        userId: "me",
-        requestBody: {
-          enabled: true,
-          emailAddress: targetUser,
-          disposition: DISPOSITION_MAP[action],
-        },
-      });
+      // Setting the forwarding state is idempotent, so 5xx blips retry too.
+      const res = await withGoogleRetry(
+        () =>
+          gmail.users.settings.updateAutoForwarding({
+            userId: "me",
+            requestBody: {
+              enabled: true,
+              emailAddress: targetUser,
+              disposition: DISPOSITION_MAP[action],
+            },
+          }),
+        { retryServerErrors: true }
+      );
       autoForwardData = res.data;
     } catch (e) {
       autoForwardError = e instanceof Error ? e.message : String(e);
@@ -196,10 +213,4 @@ export async function POST(request: NextRequest) {
     });
     return errorResponse(e);
   }
-}
-
-function errorResponse(e: unknown) {
-  const message = e instanceof Error ? e.message : "Unexpected error";
-  const status = e instanceof ValidationError ? 400 : 500;
-  return NextResponse.json({ success: false, error: message }, { status });
 }

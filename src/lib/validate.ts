@@ -33,25 +33,35 @@ export function emailDomain(email: string): string {
  * Throws a user-facing error if any required field is missing or malformed.
  * Use at the top of every mutating route.
  */
+// Surrounding whitespace is never meaningful in an identifier, and every page
+// gates its buttons on the trimmed value — so trim here rather than bounce a
+// pasted address with a trailing space back to the operator.
+function trimmed(value: unknown): unknown {
+  return typeof value === "string" ? value.trim() : value;
+}
+
 export function requireEmail(value: unknown, field: string): string {
-  if (!isValidEmail(value)) {
+  const s = trimmed(value);
+  if (!isValidEmail(s)) {
     throw new ValidationError(`${field} must be a valid email address`);
   }
-  return (value as string).toLowerCase();
+  return s.toLowerCase();
 }
 
 export function requireDomain(value: unknown, field: string): string {
-  if (!isValidDomain(value)) {
+  const s = trimmed(value);
+  if (!isValidDomain(s)) {
     throw new ValidationError(`${field} must be a valid domain`);
   }
-  return (value as string).toLowerCase();
+  return s.toLowerCase();
 }
 
 export function requireUsername(value: unknown, field: string): string {
-  if (!isValidUsername(value)) {
+  const s = trimmed(value);
+  if (!isValidUsername(s)) {
     throw new ValidationError(`${field} must contain only letters, numbers, dots, dashes, underscores, apostrophes, plus, or percent`);
   }
-  return value as string;
+  return s;
 }
 
 export class ValidationError extends Error {
