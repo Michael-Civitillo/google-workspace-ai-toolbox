@@ -236,21 +236,32 @@ function csvCell(c: string): string {
 const PATH_RESOLVE_CHUNK = 1000;
 
 /**
+ * Users worked on concurrently by the tenant-wide scan and by path
+ * resolution. Impersonation — and Drive's quota — is per user, so a few users
+ * in parallel cut wall time roughly this many-fold without competing for one
+ * quota. Kept small so a 2,000-user tenant still reads as a steady walk.
+ */
+const USER_CONCURRENCY = 3;
+
+/**
  * Ask the server to walk Drive's parent chain for every flagged file
- * across these audit results, one user at a time (since impersonation is
+ * across these audit results, a few users at a time (impersonation is
  * per user). Returns `{ [user]: { [fileId]: path } }`. Failures fall
  * back to an empty per-user map — the CSV still exports, just without
- * the path column populated for that user.
+ * the path column populated for that user. An aborted signal stops the
+ * walk early and returns what was resolved so far.
  */
 async function fetchPathsForResults(
   results: AuditResult[],
-  tenantId?: string | null
+  tenantId?: string | null,
+  signal?: AbortSignal
 ): Promise<Record<string, Record<string, string>>> {
   const out: Record<string, Record<string, string>> = {};
-  for (const r of results) {
+
+  const resolveUser = async (r: AuditResult) => {
     if (r.files.length === 0) {
       out[r.user] = {};
-      continue;
+      return;
     }
     // resolve-paths caps a batch at 1,000 file ids; a single user can exceed
     // that after chained audit pages. Chunk and merge so users with the most
@@ -260,6 +271,7 @@ async function fetchPathsForResults(
     const ids = r.files.map((f) => f.id);
     const merged: Record<string, string> = {};
     for (let i = 0; i < ids.length; i += PATH_RESOLVE_CHUNK) {
+      if (signal?.aborted) break;
       const chunk = ids.slice(i, i + PATH_RESOLVE_CHUNK);
       try {
         const res = await tfetch(
@@ -268,6 +280,7 @@ async function fetchPathsForResults(
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ user: r.user, fileIds: chunk }),
+            signal,
           },
           tenantId
         );
@@ -276,11 +289,22 @@ async function fetchPathsForResults(
           Object.assign(merged, (data.data?.paths as Record<string, string>) ?? {});
         }
       } catch {
-        // Keep whatever already resolved for this user.
+        // Keep whatever already resolved for this user (an abort lands here too).
       }
     }
     out[r.user] = merged;
-  }
+  };
+
+  let next = 0;
+  const worker = async () => {
+    while (next < results.length) {
+      if (signal?.aborted) return;
+      await resolveUser(results[next++]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(USER_CONCURRENCY, results.length) }, worker)
+  );
   return out;
 }
 
@@ -330,11 +354,15 @@ export default function SharingAudit() {
   // the cancel refs stop the loops between pages, but without an abort the
   // current request keeps running (and hitting the API) invisibly.
   const scanAbortRef = useRef<AbortController | null>(null);
+  // Same for the CSV export's path resolution, which can run for minutes on a
+  // large tenant result.
+  const exportAbortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     return () => {
       cancelRef.current = true;
       singleCancelRef.current = true;
       scanAbortRef.current?.abort();
+      exportAbortRef.current?.abort();
     };
   }, []);
   const [includeSuspended, setIncludeSuspended] = useState(false);
@@ -352,6 +380,7 @@ export default function SharingAudit() {
     cancelRef.current = true;
     singleCancelRef.current = true;
     scanAbortRef.current?.abort();
+    exportAbortRef.current?.abort();
     setSingleResult(null);
     setSingleSelected(new Set());
     setPerUser([]);
@@ -407,39 +436,42 @@ export default function SharingAudit() {
   };
 
   // Export-CSV state. Resolution can take many seconds for large audits so
-  // we surface a "Resolving paths…" indicator on the export button.
+  // we surface a "Resolving paths…" indicator on the export button, with a
+  // Cancel next to it that aborts the resolution (no file is produced then).
   const [exportBusy, setExportBusy] = useState(false);
 
-  async function exportSingleCsv(result: AuditResult) {
+  async function exportCsvWithPaths(results: AuditResult[], filename: string) {
+    if (results.length === 0) return;
+    exportAbortRef.current?.abort();
+    const ac = new AbortController();
+    exportAbortRef.current = ac;
     setExportBusy(true);
     try {
-      const paths = await fetchPathsForResults([result], tenantId);
-      downloadCsv(
-        `external-sharing-${result.user}-${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`,
-        toCsv([result], paths)
-      );
+      const paths = await fetchPathsForResults(results, tenantId, ac.signal);
+      // Cancelled, tenant switched, or page left: don't drop a half-resolved
+      // file on the operator.
+      if (ac.signal.aborted) return;
+      downloadCsv(filename, toCsv(results, paths));
     } finally {
-      setExportBusy(false);
+      if (exportAbortRef.current === ac) setExportBusy(false);
     }
   }
 
-  async function exportTenantCsv(aggregated: AuditResult[]) {
-    if (aggregated.length === 0) return;
-    setExportBusy(true);
-    try {
-      const paths = await fetchPathsForResults(aggregated, tenantId);
-      downloadCsv(
-        `tenant-external-sharing-${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`,
-        toCsv(aggregated, paths)
-      );
-    } finally {
-      setExportBusy(false);
-    }
+  function exportSingleCsv(result: AuditResult) {
+    return exportCsvWithPaths(
+      [result],
+      `external-sharing-${result.user}-${new Date().toISOString().slice(0, 10)}.csv`
+    );
   }
+
+  function exportTenantCsv(aggregated: AuditResult[]) {
+    return exportCsvWithPaths(
+      aggregated,
+      `tenant-external-sharing-${new Date().toISOString().slice(0, 10)}.csv`
+    );
+  }
+
+  const cancelExport = () => exportAbortRef.current?.abort();
 
   // -------------------------------------------------------------------------
   // Single-user audit
@@ -620,16 +652,9 @@ export default function SharingAudit() {
       setPerUser(seeded);
       setTenantUserCount(targets.length);
 
-      for (let i = 0; i < targets.length; i++) {
-        if (cancelRef.current) {
-          setPerUser((prev) =>
-            prev.map((p) =>
-              p.status === "pending" ? { ...p, status: "skipped" } : p
-            )
-          );
-          break;
-        }
-
+      // Scan one user; every state update is functional, so completions from
+      // the workers below can interleave without clobbering each other.
+      const scanOne = async (i: number) => {
         const target = targets[i];
         setPerUser((prev) =>
           prev.map((p, idx) =>
@@ -679,6 +704,31 @@ export default function SharingAudit() {
             )
           );
         }
+      };
+
+      // A small worker pool instead of one user at a time: each request can
+      // take seconds (up to 1,000 files plus permission walks), so a large
+      // tenant was thousands of serial round trips. Quotas are per
+      // impersonated user, so the workers don't compete with each other.
+      let nextIndex = 0;
+      const worker = async () => {
+        while (nextIndex < targets.length) {
+          if (cancelRef.current) return;
+          await scanOne(nextIndex++);
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(USER_CONCURRENCY, targets.length) },
+          worker
+        )
+      );
+      if (cancelRef.current) {
+        setPerUser((prev) =>
+          prev.map((p) =>
+            p.status === "pending" ? { ...p, status: "skipped" } : p
+          )
+        );
       }
     } catch {
       // Without this catch a network failure during user enumeration escaped
@@ -1223,6 +1273,11 @@ export default function SharingAudit() {
                   {exportBusy ? "Resolving paths…" : "Export CSV"}
                 </Button>
               )}
+              {tenantSummary && exportBusy && (
+                <Button variant="ghost" size="sm" onClick={cancelExport}>
+                  Cancel export
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -1330,19 +1385,26 @@ export default function SharingAudit() {
                   </CardDescription>
                 </div>
                 {singleResult.files.length > 0 && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void exportSingleCsv(singleResult)}
-                    disabled={exportBusy}
-                  >
-                    {exportBusy ? (
-                      <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5 mr-1.5" />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void exportSingleCsv(singleResult)}
+                      disabled={exportBusy}
+                    >
+                      {exportBusy ? (
+                        <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5 mr-1.5" />
+                      )}
+                      {exportBusy ? "Resolving paths…" : "Export CSV"}
+                    </Button>
+                    {exportBusy && (
+                      <Button variant="ghost" size="sm" onClick={cancelExport}>
+                        Cancel export
+                      </Button>
                     )}
-                    {exportBusy ? "Resolving paths…" : "Export CSV"}
-                  </Button>
+                  </div>
                 )}
               </div>
             </CardHeader>
