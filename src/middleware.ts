@@ -5,6 +5,13 @@ const PUBLIC_PATHS = new Set([
   "/login",
   "/api/auth/login",
   "/api/auth/logout",
+  // Single sign-on: the login page needs to know what to offer, and the
+  // provider round-trip happens before a session exists. The start route
+  // gates its test mode on a session itself; the callback trusts only the
+  // signed handshake cookie it issued.
+  "/api/auth/sso/status",
+  "/api/auth/oidc/start",
+  "/api/auth/oidc/callback",
 ]);
 
 /**

@@ -3,10 +3,11 @@ import {
   authConfigured,
   createSessionToken,
   passwordMatches,
+  sessionCookieOptions,
   SESSION_COOKIE_NAME,
-  SESSION_TTL,
 } from "@/lib/auth";
 import { rateLimit, clearRateLimit, clientKey } from "@/lib/rate-limit";
+import { passwordLoginEnabled, readSsoConfig } from "@/lib/sso-server";
 import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const MAX_BODY_BYTES = 4 * 1024; // login bodies are tiny — cap aggressively
@@ -46,6 +47,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Password too long" }, { status: 400 });
   }
 
+  // When single sign-on is live and the admin turned the password fallback
+  // off, refuse before checking the password so nothing about it leaks. A
+  // config read failure degrades to allowing password login: it is still
+  // gated by APP_PASSWORD, and failing closed here could lock everyone out.
+  let passwordAllowed = true;
+  try {
+    passwordAllowed = passwordLoginEnabled(readSsoConfig());
+  } catch (e) {
+    console.error("[auth] could not read SSO config; allowing password login:", e);
+  }
+  if (!passwordAllowed) {
+    return NextResponse.json(
+      {
+        error:
+          "Password sign-in is turned off while single sign-on is enforced. Use the sign-in button for your identity provider.",
+      },
+      { status: 403 }
+    );
+  }
+
   // Check the password BEFORE consulting the rate limiter, and only count
   // FAILED attempts. A correct password is therefore never blocked — critical
   // because, without a trusted proxy, every client shares one "anon" bucket, so
@@ -69,16 +90,8 @@ export async function POST(req: NextRequest) {
 
   const token = await createSessionToken();
   const res = NextResponse.json({ success: true });
-  // `strict` blocks the cookie on any cross-site navigation, top-level or
-  // otherwise. The toolbox has no flow that depends on inbound cross-site
-  // links, so this gives us belt-and-braces CSRF protection on top of the
-  // Origin/Referer check enforced by the middleware.
-  res.cookies.set(SESSION_COOKIE_NAME, token, {
-    httpOnly: true,
-    sameSite: "strict",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: SESSION_TTL,
-  });
+  // Cookie attributes (including SameSite=Strict) are shared with the single
+  // sign-on callback so both login paths issue identical sessions.
+  res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions());
   return res;
 }

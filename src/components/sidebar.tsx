@@ -96,6 +96,7 @@ const navigation = [
     items: [
       { name: "Setup", href: "/setup", icon: Settings },
       { name: "Tenants", href: "/tenants", icon: Building2 },
+      { name: "Single Sign-On", href: "/sso", icon: KeyRound },
     ],
   },
 ];
