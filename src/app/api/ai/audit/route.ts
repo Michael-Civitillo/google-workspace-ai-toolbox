@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
-import { getModel } from "@/lib/ai";
+import { getModel, isTimeoutError } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   buildGmailClient,
@@ -199,7 +199,7 @@ Keep it admin-friendly — brief, scannable, use bullet points. No fluff.`,
       data: { user, summary, raw: rawData },
     });
   } catch (error) {
-    if (error instanceof Error && error.name === "TimeoutError") {
+    if (isTimeoutError(error)) {
       return NextResponse.json(
         { success: false, error: "The AI summary timed out — try again." },
         { status: 504 }

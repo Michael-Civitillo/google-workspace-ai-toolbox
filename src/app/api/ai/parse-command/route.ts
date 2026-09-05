@@ -3,6 +3,7 @@ import { generateObject } from "ai";
 import { z } from "zod";
 import {
   getModel,
+  isTimeoutError,
   ADMIN_ACTIONS,
   ACTION_PARAM_SCHEMAS,
   isKnownAction,
@@ -139,7 +140,7 @@ User command: ${JSON.stringify(command)}`,
       },
     });
   } catch (error) {
-    if (error instanceof Error && error.name === "TimeoutError") {
+    if (isTimeoutError(error)) {
       return NextResponse.json(
         { success: false, error: "The AI request timed out — try again." },
         { status: 504 }

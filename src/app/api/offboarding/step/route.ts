@@ -444,7 +444,13 @@ export async function POST(request: NextRequest) {
       action: `offboarding.${step || "unknown"}`,
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      // Record the identifiers, not the raw body: a 5,000-character vacation
+      // message (or any unexpected field) has no place in the audit log.
+      params: {
+        step,
+        user: typeof body.user === "string" ? body.user : null,
+        successor: typeof body.successor === "string" ? body.successor : null,
+      },
       outcome: "error",
       error: message,
     });

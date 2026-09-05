@@ -157,10 +157,15 @@ export async function readAuditLogPage(opts: {
   const entries: Array<Record<string, unknown>> = [];
   let skippedLines = 0;
   let oldestConsumed = end;
-  // The log is appended in timestamp order, so once a backwards scan meets an
-  // entry older than `fromMs` everything further back is older still. Without
-  // this, a "last 24 hours" query over a years-old log walks every window to
-  // offset 0 finding nothing.
+  // The log is appended in (roughly) timestamp order, so once a backwards
+  // scan meets an entry older than `fromMs` everything further back is older
+  // still. Without this, a "last 24 hours" query over a years-old log walks
+  // every window to offset 0 finding nothing. "Roughly": entries are appended
+  // when their requests finish, which can trail their timestamps by a few
+  // milliseconds under concurrency, so the walk only stops once an entry is
+  // older by a clear margin — a boundary entry written slightly out of order
+  // is skipped, not used to cut the scan short.
+  const FROM_BOUND_SLACK_MS = 5_000;
   let passedFromBound = false;
 
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -184,8 +189,11 @@ export async function readAuditLogPage(opts: {
     if (filters.fromMs !== undefined) {
       const ts = typeof entry.ts === "string" ? Date.parse(entry.ts) : NaN;
       if (!Number.isNaN(ts) && ts < filters.fromMs) {
-        passedFromBound = true;
-        break;
+        if (ts < filters.fromMs - FROM_BOUND_SLACK_MS) {
+          passedFromBound = true;
+          break;
+        }
+        continue;
       }
     }
     if (matchesFilters(entry, filters)) entries.push(entry);

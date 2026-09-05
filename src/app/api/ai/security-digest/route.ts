@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
-import { getModel } from "@/lib/ai";
+import { getModel, isTimeoutError } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
 import { listActivityEvents, type ActivityEvent } from "@/lib/admin-sdk";
 import { ValidationError } from "@/lib/validate";
@@ -115,7 +115,7 @@ Keep it admin-friendly — brief, scannable, use bullet points. No fluff.`,
       data: { days, summary, raw: { loginEvents, adminEvents } },
     });
   } catch (error) {
-    if (error instanceof Error && error.name === "TimeoutError") {
+    if (isTimeoutError(error)) {
       return NextResponse.json(
         { success: false, error: "The AI digest timed out — try again." },
         { status: 504 }

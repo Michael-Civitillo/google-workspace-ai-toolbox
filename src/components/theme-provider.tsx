@@ -62,12 +62,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [theme, mounted]);
 
   function toggle() {
-    setTheme((prev) => {
-      const next = prev === "light" ? "dark" : "light";
-      localStorage.setItem("theme", next);
-      document.documentElement.classList.toggle("dark", next === "dark");
-      return next;
-    });
+    // Keep the side effects out of the state updater: React may invoke
+    // updaters more than once (Strict Mode double-invokes them in
+    // development), and an updater is meant to be pure.
+    const next: Theme = theme === "light" ? "dark" : "light";
+    localStorage.setItem("theme", next);
+    document.documentElement.classList.toggle("dark", next === "dark");
+    setTheme(next);
   }
 
   return (

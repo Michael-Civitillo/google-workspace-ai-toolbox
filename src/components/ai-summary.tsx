@@ -1,59 +1,71 @@
 "use client";
 
+import type { ReactNode } from "react";
+
+/** Inline markdown subset: `**bold**`. */
+function renderInline(line: string): ReactNode[] {
+  return line.split(/(\*\*[^*]+\*\*)/g).map((part, j) =>
+    part.startsWith("**") && part.endsWith("**") ? (
+      <strong key={j}>{part.slice(2, -2)}</strong>
+    ) : (
+      part
+    )
+  );
+}
+
 /**
  * Renders the markdown-ish subset the AI report prompts ask for: headers,
  * bold, and bullets. Shared by the User Audit report and the Security Digest.
+ * Consecutive bullet lines are grouped into one list so the markup nests
+ * `<li>` inside a `<ul>` rather than directly in the container.
  */
 export function AiSummary({ text }: { text: string }) {
-  const rendered = text.split("\n").map((line, i) => {
-    // Headers
+  const blocks: ReactNode[] = [];
+  let bullets: ReactNode[] = [];
+  const flushBullets = (key: string) => {
+    if (bullets.length === 0) return;
+    blocks.push(
+      <ul key={key} className="my-1 ml-4 list-disc space-y-0.5">
+        {bullets}
+      </ul>
+    );
+    bullets = [];
+  };
+
+  text.split("\n").forEach((line, i) => {
+    if (line.startsWith("- ") || line.startsWith("* ")) {
+      bullets.push(
+        <li key={i} className="text-sm">
+          {renderInline(line.slice(2))}
+        </li>
+      );
+      return;
+    }
+    flushBullets(`list-${i}`);
+
     if (line.startsWith("## ")) {
-      return (
+      blocks.push(
         <h3 key={i} className="text-base font-semibold mt-4 mb-2">
           {line.replace("## ", "")}
         </h3>
       );
-    }
-    if (line.startsWith("# ")) {
-      return (
+    } else if (line.startsWith("# ")) {
+      blocks.push(
         <h2 key={i} className="text-lg font-semibold mt-4 mb-2">
           {line.replace("# ", "")}
         </h2>
       );
-    }
-
-    // Bold text with **
-    const parts = line.split(/(\*\*[^*]+\*\*)/g);
-    const withBold = parts.map((part, j) => {
-      if (part.startsWith("**") && part.endsWith("**")) {
-        return <strong key={j}>{part.slice(2, -2)}</strong>;
-      }
-      return part;
-    });
-
-    // Bullet points
-    if (line.startsWith("- ") || line.startsWith("* ")) {
-      return (
-        <li key={i} className="text-sm ml-4 list-disc">
-          {withBold.map((r, idx) =>
-            typeof r === "string" ? (idx === 0 ? r.slice(2) : r) : r
-          )}
-        </li>
+    } else if (line.trim() === "") {
+      blocks.push(<br key={i} />);
+    } else {
+      blocks.push(
+        <p key={i} className="text-sm">
+          {renderInline(line)}
+        </p>
       );
     }
-
-    // Empty line
-    if (line.trim() === "") {
-      return <br key={i} />;
-    }
-
-    // Regular text
-    return (
-      <p key={i} className="text-sm">
-        {withBold}
-      </p>
-    );
   });
+  flushBullets("list-end");
 
-  return <div className="prose prose-sm max-w-none">{rendered}</div>;
+  return <div className="prose prose-sm max-w-none">{blocks}</div>;
 }
