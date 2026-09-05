@@ -1,16 +1,10 @@
-import {
-  readFileSync,
-  renameSync,
-  existsSync,
-  unlinkSync,
-  openSync,
-  writeSync,
-  fsyncSync,
-  closeSync,
-  chmodSync,
-  statSync,
-} from "fs";
+import { chmodSync, existsSync, statSync, unlinkSync } from "fs";
 import path from "path";
+import {
+  readJsonObjectFile,
+  writeJsonFileAtomic,
+  withFileLock,
+} from "./json-store";
 import { isValidDomain, isValidEmail, ValidationError } from "./validate";
 import {
   SSO_PROVIDERS,
@@ -32,15 +26,14 @@ import {
  * uses. It contains the client secret, so the file is created 0600 and never
  * serialised to the browser in full — see toPublicSsoConfig().
  *
- * Writes follow the same tmp-file + fsync + rename discipline as the tenant
- * store, serialised through an in-process mutex, so a crash mid-write can't
- * leave a truncated file and concurrent requests can't lose each other's
- * changes.
+ * Reads and writes go through the shared JSON store machinery (json-store.ts):
+ * corruption-safe reads, tmp-file + fsync + rename writes, and a per-file
+ * in-process mutex, so a crash mid-write can't leave a truncated file and
+ * concurrent requests can't lose each other's changes.
  */
 export const SSO_CONFIG_PATH = path.resolve(
   process.env.SSO_CONFIG_PATH || path.join(process.cwd(), "sso.json")
 );
-const STORE_TMP_PATH = `${SSO_CONFIG_PATH}.tmp`;
 
 // Re-tighten permissions at module load: a file created by hand (or under a
 // permissive umask by an older build) would otherwise keep exposing the client
@@ -52,28 +45,8 @@ try {
   // Not configured yet — the first write creates it with 0o600.
 }
 
-let writeLock: Promise<unknown> = Promise.resolve();
-
-async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
-  const previous = writeLock;
-  let release: () => void = () => {};
-  writeLock = new Promise<void>((res) => {
-    release = res;
-  });
-  try {
-    await previous;
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
-function quarantineStore(): void {
-  try {
-    renameSync(SSO_CONFIG_PATH, `${SSO_CONFIG_PATH}.corrupt-${Date.now()}`);
-  } catch {
-    // Nothing more we can do; the read path already treats this as "no config".
-  }
+function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  return withFileLock(SSO_CONFIG_PATH, fn);
 }
 
 let warnedUnusable = false;
@@ -142,40 +115,14 @@ function normalizeStored(raw: Record<string, unknown>): SsoConfig | null {
 
 /** The stored configuration, or null when single sign-on was never set up. */
 export function readSsoConfig(): SsoConfig | null {
-  if (!existsSync(SSO_CONFIG_PATH)) return null;
+  // Corruption-safe read: a missing, empty or corrupt file comes back as null
+  // (the unusable ones quarantined first); transient read errors (EBUSY,
+  // EMFILE, antivirus locks) throw so a read-modify-write under the lock
+  // aborts instead of persisting an empty store over the real config.
+  const parsed = readJsonObjectFile(SSO_CONFIG_PATH);
+  if (parsed === null) return null;
 
-  let raw: string;
-  try {
-    raw = readFileSync(SSO_CONFIG_PATH, "utf-8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return null;
-    // Transient read failures (EBUSY, EMFILE, antivirus locks) are not
-    // corruption — surface them rather than quarantining a healthy file.
-    throw new Error(
-      `Failed to read SSO config at ${SSO_CONFIG_PATH}: ${
-        e instanceof Error ? e.message : String(e)
-      }`
-    );
-  }
-
-  if (!raw.trim()) {
-    quarantineStore();
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    quarantineStore();
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    quarantineStore();
-    return null;
-  }
-
-  const cfg = normalizeStored(parsed as Record<string, unknown>);
+  const cfg = normalizeStored(parsed);
   if (!cfg && !warnedUnusable) {
     warnedUnusable = true;
     console.warn(
@@ -186,44 +133,9 @@ export function readSsoConfig(): SsoConfig | null {
 }
 
 async function writeStoreAtomic(cfg: SsoConfig): Promise<void> {
-  const fd = openSync(STORE_TMP_PATH, "w", 0o600);
-  try {
-    writeSync(fd, JSON.stringify(cfg, null, 2));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-
-  // Windows can transiently refuse the rename while antivirus or the search
-  // indexer holds the destination open — retry briefly before giving up.
-  const MAX_ATTEMPTS = 5;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      renameSync(STORE_TMP_PATH, SSO_CONFIG_PATH);
-      try {
-        const dirFd = openSync(path.dirname(SSO_CONFIG_PATH), "r");
-        try {
-          fsyncSync(dirFd);
-        } finally {
-          closeSync(dirFd);
-        }
-      } catch {
-        // Directory fsync is unsupported on Windows — ignore.
-      }
-      return;
-    } catch (e) {
-      lastError = e;
-      const code = (e as NodeJS.ErrnoException)?.code;
-      const transient = code === "EPERM" || code === "EBUSY" || code === "EACCES";
-      if (!transient || attempt === MAX_ATTEMPTS) break;
-      await new Promise((r) => setTimeout(r, 25 * attempt));
-    }
-  }
-  try {
-    if (existsSync(STORE_TMP_PATH)) unlinkSync(STORE_TMP_PATH);
-  } catch {}
-  throw lastError;
+  // The tmp file is created 0600, so the secret is never world-readable even
+  // for the instant before the rename.
+  await writeJsonFileAtomic(SSO_CONFIG_PATH, cfg);
 }
 
 /** Strip the client secret before a config crosses to the browser. */
@@ -579,5 +491,89 @@ export async function recordSsoTest(record: SsoTestRecord): Promise<void> {
     const existing = readSsoConfig();
     if (!existing) return;
     await writeStoreAtomic({ ...existing, lastTest: record });
+  });
+}
+
+const BUNDLE_SSO_FIELDS = [
+  "provider",
+  "displayName",
+  "issuer",
+  "clientId",
+  "clientSecret",
+  "redirectUri",
+  "allowedDomains",
+  "allowedEmails",
+  "allowAnyIdpUser",
+  "passwordLoginEnabled",
+  "enabled",
+] as const;
+
+/**
+ * Replace the stored configuration with the single sign-on block of an export
+ * bundle (a restore, not a merge). Returns what is stored afterwards plus
+ * operator-facing warnings. Two rules keep a restore from locking the server
+ * out:
+ *   - a bundle without a client secret can only restore a configuration whose
+ *     issuer and client ID match the one already stored (that secret is
+ *     reused); otherwise the settings are skipped with a warning rather than
+ *     stored in a state that can never sign anyone in
+ *   - the password fallback stays on unless this server is already running
+ *     single sign-on only for the same client: a restored configuration must
+ *     pass a test sign-in here before the password form can be turned off
+ * A malformed block throws ValidationError before anything is written.
+ */
+export async function importSsoConfig(
+  raw: unknown
+): Promise<{ config: SsoConfig | null; warnings: string[] }> {
+  const warnings: string[] = [];
+  if (raw === null || raw === undefined) {
+    await deleteSsoConfig();
+    return { config: null, warnings };
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError("app.sso must be an object or null");
+  }
+  const src = raw as Record<string, unknown>;
+  const body: Record<string, unknown> = {};
+  for (const key of BUNDLE_SSO_FIELDS) {
+    if (src[key] !== undefined) body[key] = src[key];
+  }
+
+  return withLock(async () => {
+    const existing = readSsoConfig();
+    const sameClient =
+      existing !== null &&
+      existing.issuer === body.issuer &&
+      existing.clientId === body.clientId;
+    const hasSecret =
+      typeof body.clientSecret === "string" && body.clientSecret.trim() !== "";
+    if (!hasSecret && !sameClient) {
+      warnings.push(
+        `The bundle carries no client secret for ${String(
+          body.issuer ?? "the identity provider"
+        )}, so its single sign-on settings were not restored${
+          existing ? " and the existing configuration was kept" : ""
+        } — set up single sign-on again from the SSO page.`
+      );
+      return { config: existing, warnings };
+    }
+    const alreadySsoOnly =
+      existing !== null &&
+      sameClient &&
+      existing.enabled &&
+      !existing.passwordLoginEnabled;
+    if (
+      body.enabled === true &&
+      body.passwordLoginEnabled === false &&
+      !alreadySsoOnly
+    ) {
+      body.passwordLoginEnabled = true;
+      warnings.push(
+        "Password sign-in was left on alongside single sign-on: a restored configuration must pass a test sign-in on this server before the password form can be turned off again."
+      );
+    }
+    const next = validateSsoUpdate(body, sameClient ? existing : null);
+    await writeStoreAtomic(next);
+    return { config: next, warnings };
   });
 }

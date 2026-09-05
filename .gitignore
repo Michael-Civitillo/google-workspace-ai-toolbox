@@ -51,3 +51,11 @@ audit.log
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# App-level configuration (onboarding state) — local to this install
+app-config.json
+app-config.json.tmp
+
+# Default landing spot for service-account keys restored by a config import
+# whose original path doesn't exist on this machine — never commit keys
+/credentials/

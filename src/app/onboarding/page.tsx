@@ -27,7 +27,9 @@ import {
   Check,
   CheckCircle2,
   Cloud,
+  Download,
   ExternalLink,
+  KeyRound,
   Loader2,
   PartyPopper,
   Rocket,
@@ -35,6 +37,10 @@ import {
   Terminal,
   XCircle,
 } from "lucide-react";
+import { buttonVariants } from "@/components/ui/button";
+import { SsoSetupWizard } from "@/components/sso-setup-wizard";
+import { loadSsoConfig } from "@/lib/sso-client";
+import { SSO_PROVIDER_PRESETS, type PublicSsoConfig } from "@/lib/sso-types";
 import { cn } from "@/lib/utils";
 import {
   TENANT_COLORS,
@@ -52,6 +58,7 @@ type StepId =
   | "install"
   | "service-account"
   | "tenant"
+  | "sso"
   | "verify";
 
 interface StepDef {
@@ -71,6 +78,7 @@ const STEPS: StepDef[] = [
     icon: Cloud,
   },
   { id: "tenant", title: "Add your first tenant", short: "Tenant", icon: Building2 },
+  { id: "sso", title: "Sign-in & SSO", short: "SSO", icon: KeyRound },
   { id: "verify", title: "Verify & finish", short: "Verify", icon: PartyPopper },
 ];
 
@@ -140,6 +148,11 @@ export default function OnboardingPage() {
   const [scopePreflight, setScopePreflight] = useState<PreflightState | null>(
     null
   );
+  // Single sign-on state for the optional SSO step: the stored (public)
+  // configuration, and whether its setup wizard is open.
+  const [ssoConfig, setSsoConfig] = useState<PublicSsoConfig | null>(null);
+  const [ssoWizardOpen, setSsoWizardOpen] = useState(false);
+  const [finishing, setFinishing] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -164,7 +177,37 @@ export default function OnboardingPage() {
 
   useEffect(() => {
     void refreshStatus();
+    // Seed the SSO step for operators re-visiting the wizard.
+    let cancelled = false;
+    loadSsoConfig()
+      .then((d) => {
+        if (!cancelled) setSsoConfig(d.config);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [refreshStatus]);
+
+  /**
+   * Leaving the wizard through any "done" affordance records completion, so
+   * the first-launch prompt stops offering itself. Best-effort: a failed
+   * write just means the wizard is offered again next launch.
+   */
+  const finishOnboarding = useCallback(async () => {
+    setFinishing(true);
+    try {
+      await fetch("/api/config/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completed: true }),
+      });
+    } catch {
+      // Best-effort — see above.
+    } finally {
+      router.push("/");
+    }
+  }, [router]);
 
   const stepIndex = STEPS.findIndex((s) => s.id === activeStep);
   const isFirst = stepIndex === 0;
@@ -316,12 +359,13 @@ export default function OnboardingPage() {
             install: !!status?.installed,
             "service-account": !!createdTenantId || tenantCount > 0,
             tenant: !!createdTenantId || tenantCount > 0,
+            sso: !!ssoConfig?.enabled,
             verify: !!verifyResult && verifyResult.ok,
           }}
         />
 
         {activeStep === "welcome" && (
-          <WelcomeStep tenantCount={tenantCount} />
+          <WelcomeStep tenantCount={tenantCount} onSkip={finishOnboarding} />
         )}
 
         {activeStep === "install" && (
@@ -345,6 +389,10 @@ export default function OnboardingPage() {
           />
         )}
 
+        {activeStep === "sso" && (
+          <SsoStep config={ssoConfig} onOpen={() => setSsoWizardOpen(true)} />
+        )}
+
         {activeStep === "verify" && (
           <VerifyStep
             status={status}
@@ -352,7 +400,8 @@ export default function OnboardingPage() {
             verifying={verifying}
             result={verifyResult}
             onVerify={handleVerify}
-            onFinish={() => router.push("/")}
+            onFinish={finishOnboarding}
+            finishing={finishing}
             tenantName={tenantForm.name || "your tenant"}
             tenantId={createdTenantId}
             scopePreflight={scopePreflight}
@@ -374,7 +423,10 @@ export default function OnboardingPage() {
             Step {stepIndex + 1} of {STEPS.length}
           </p>
           {isLast ? (
-            <Button size="sm" onClick={() => router.push("/")}>
+            <Button size="sm" onClick={finishOnboarding} disabled={finishing}>
+              {finishing ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : null}
               Go to dashboard
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </Button>
@@ -386,6 +438,13 @@ export default function OnboardingPage() {
           )}
         </div>
       </div>
+
+      <SsoSetupWizard
+        open={ssoWizardOpen}
+        onOpenChange={setSsoWizardOpen}
+        existing={ssoConfig}
+        onSaved={setSsoConfig}
+      />
     </>
   );
 }
@@ -467,7 +526,13 @@ function Stepper({
   );
 }
 
-function WelcomeStep({ tenantCount }: { tenantCount: number }) {
+function WelcomeStep({
+  tenantCount,
+  onSkip,
+}: {
+  tenantCount: number;
+  onSkip: () => void;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -551,6 +616,109 @@ function WelcomeStep({ tenantCount }: { tenantCount: number }) {
               </a>
             </li>
             <li>A super-admin Workspace account (for impersonation)</li>
+          </ul>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          Already set up, or prefer doing it by hand?{" "}
+          <button
+            type="button"
+            onClick={onSkip}
+            className="underline font-medium hover:text-foreground"
+          >
+            Skip the wizard
+          </button>{" "}
+          — it stays available under <em>Get Started</em> in the sidebar.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SsoStep({
+  config,
+  onOpen,
+}: {
+  config: PublicSsoConfig | null;
+  onOpen: () => void;
+}) {
+  const preset = config ? SSO_PROVIDER_PRESETS[config.provider] : null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg flex items-center gap-2">
+          <KeyRound className="h-5 w-5" />
+          Sign-in &amp; SSO
+        </CardTitle>
+        <CardDescription>
+          Optional: let admins sign in through your identity provider (OpenID
+          Connect) instead of sharing the Open Admin password. Skip this step
+          and set it up later under <strong>Single Sign-On</strong> in the
+          sidebar if you prefer.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <div className="rounded-lg border p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div
+              className={cn(
+                "h-9 w-9 rounded-md flex items-center justify-center shrink-0",
+                config?.enabled
+                  ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600"
+                  : "bg-muted text-muted-foreground"
+              )}
+            >
+              {config?.enabled ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <KeyRound className="h-4 w-4" />
+              )}
+            </div>
+            <div>
+              <p className="text-sm font-medium">
+                {config
+                  ? `${preset?.label ?? config.provider} — ${
+                      config.enabled ? "enabled" : "saved, not enabled yet"
+                    }`
+                  : "Not configured"}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {config
+                  ? `Login button: "Continue with ${config.displayName}"${
+                      config.passwordLoginEnabled
+                        ? ", password form kept as a fallback"
+                        : ", password sign-in off"
+                    }.`
+                  : "The login page only offers the password form."}
+              </p>
+            </div>
+          </div>
+          <Button size="sm" onClick={onOpen} data-testid="onboarding-sso-open">
+            <KeyRound className="h-4 w-4 mr-1.5" />
+            {config ? "Edit single sign-on" : "Set up single sign-on"}
+          </Button>
+        </div>
+
+        <div className="rounded-lg border bg-muted/40 p-4 text-sm text-muted-foreground space-y-1.5">
+          <p className="font-medium text-foreground">What the wizard walks through</p>
+          <ul className="list-disc list-inside space-y-1 text-xs">
+            <li>
+              Pick the provider — Google Workspace, Microsoft Entra ID, Okta, or
+              any other OpenID Connect provider — and register Open Admin with
+              it using the redirect URI it shows you.
+            </li>
+            <li>
+              Paste the issuer URL, client ID and client secret; the issuer is
+              checked live before anything is saved.
+            </li>
+            <li>
+              Decide who may sign in with domain and email allowlists — every
+              account that gets in has full admin access.
+            </li>
+            <li>
+              Run a real test sign-in in a pop-up, then enable. Turning the
+              password form off requires a passing test first.
+            </li>
           </ul>
         </div>
       </CardContent>
@@ -1074,6 +1242,7 @@ function VerifyStep({
   result,
   onVerify,
   onFinish,
+  finishing,
   tenantName,
   tenantId,
   scopePreflight,
@@ -1088,6 +1257,7 @@ function VerifyStep({
     | null;
   onVerify: () => void;
   onFinish: () => void;
+  finishing: boolean;
   tenantName: string;
   tenantId: string | null;
   scopePreflight: PreflightState | null;
@@ -1178,13 +1348,39 @@ function VerifyStep({
           </div>
         )}
 
+        <div className="rounded-lg border p-4 space-y-2">
+          <p className="text-sm font-medium flex items-center gap-2">
+            <Download className="h-4 w-4" />
+            Save a configuration backup
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Download everything you just configured — tenants, single sign-on,
+            and the service-account key files themselves — as one JSON bundle.
+            Import it on another server from{" "}
+            <strong>App Settings → Configuration backup</strong> and the whole
+            setup comes back, keys included. It contains live secrets, so
+            store it like a password.
+          </p>
+          <a
+            href="/api/config/export"
+            download
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-1")}
+          >
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download config bundle
+          </a>
+        </div>
+
         <div className="rounded-lg border bg-muted/40 p-4 text-sm space-y-2">
           <p className="font-medium">You&apos;re all set</p>
           <p className="text-muted-foreground">
             Head to the dashboard to delegate mailboxes, transfer calendars, run
             audits, or just type what you need into the AI Command box.
           </p>
-          <Button size="sm" onClick={onFinish} className="mt-1">
+          <Button size="sm" onClick={onFinish} disabled={finishing} className="mt-1">
+            {finishing ? (
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            ) : null}
             Open the dashboard
             <ArrowRight className="h-4 w-4 ml-1.5" />
           </Button>

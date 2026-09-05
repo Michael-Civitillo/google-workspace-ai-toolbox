@@ -39,10 +39,12 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 - 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` set. HMAC-signed session cookies, 12h TTL, rate-limited login.
 - 🔑 **Single sign-on (OIDC)** — Sign in with Google, Microsoft Entra ID, Okta, or any OpenID Connect provider instead of (or alongside) the shared password. A pop-up wizard registers the app, checks the issuer, runs a real test sign-in, and only then enables it. Allowlist by domain or email; sessions and audit entries record who signed in.
+- 🧭 **First-launch onboarding** — A fresh install takes you straight to the guided setup on first login: CLI install, service account, first tenant, single sign-on. Skip it or re-run it any time from **Get Started** in the sidebar.
+- 💼 **Portable configuration** — Export everything — single sign-on settings, tenants, and the service-account key files themselves — to one JSON bundle from **App Settings**, and restore it on another server in one click. Keys are written back to disk automatically (relocated if the original path doesn't exist there), with a preview first and a typed confirmation only when overwriting an already-configured server.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
 - ⚠️ **Confirmation dialogs** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension) shows a before→after diff and requires you to type the target email/identifier to confirm.
 - 📜 **Audit log** — Append-only JSON-lines log of every mutation, with secrets redacted (`AUDIT_LOG_PATH` env var to control location).
-- 🧪 **Atomic tenant config writes** — `tenants.json` is written via tmp-file + rename with an in-process mutex so a crash mid-write can't corrupt your config.
+- 🧪 **Atomic config writes** — `tenants.json`, `sso.json` and `app-config.json` share one store implementation: tmp-file + fsync + rename with an in-process mutex, so a crash mid-write can't corrupt your config.
 
 ### Polish
 
@@ -208,6 +210,8 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | `SSO_CONFIG_PATH` | optional | Override location of the single sign-on config (defaults to `./sso.json`). |
 | `APP_SSO_DISABLED` | optional | Set to `true` to switch single sign-on off and restore password login without editing `sso.json`. |
 
+State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600) and `app-config.json` (onboarding state) — all gitignored, all written atomically, all covered by the configuration export below.
+
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
 
 ## 🔑 Single sign-on (OIDC)
@@ -223,6 +227,17 @@ The shared `APP_PASSWORD` is fine for one admin on a laptop. For a team, connect
 Under the hood: authorization code flow with PKCE; the ID token's signature, issuer, audience, expiry and nonce are verified via [openid-client](https://github.com/panva/openid-client); the `email` claim (or `preferred_username` / `upn` for Entra ID) is checked against the allowlist; an allowed account gets the same 12-hour signed session as a password login, and audit-log entries (`auth.sso_login`, `auth.sso_test`, `auth.sso_config.save`, …) record who did what.
 
 The configuration — including the client secret — lives in `sso.json` (gitignored, mode 0600, next to `tenants.json`; relocate it with `SSO_CONFIG_PATH`). Locked out because the provider is down or misconfigured? Set `APP_SSO_DISABLED=true` on the server (or delete `sso.json`) and the password form comes back.
+
+## 💼 Moving servers: configuration export / import
+
+**App Settings → Configuration backup** exports the whole setup as one JSON bundle, and restores it on any other instance. Back up: click **Download config bundle**. Restore: install the app, log in, pick the file, click **Restore**. That's it.
+
+- The bundle contains everything: single sign-on settings (client secret included), every tenant with its Gemini key, and the **service-account JSON key files themselves** — so the restore needs no side-channel key copying. Treat the file like a password.
+- On import, key files are written back to their original paths. If a path doesn't work on the new machine (different OS or layout, e.g. a Windows export restored onto Linux, or outside `GWS_CREDENTIALS_DIR`), the key is relocated — into `GWS_CREDENTIALS_DIR` if set, else `./credentials/` — and the tenant re-pointed automatically. An existing different file at a target path is kept as a `.bak`, never destroyed.
+- Import **replaces** the target server's single sign-on settings and tenant list (it's a restore, not a merge) and previews what's inside first. On a fresh server it's a single click; overwriting an already-configured server asks you to type `REPLACE`.
+- A restored single sign-on configuration keeps the password form on until it passes a test sign-in on the new server, so a bundle can never lock you out. A bundle exported without secrets can't restore single sign-on at all (the settings are skipped with a warning) unless the server already holds the same client's secret.
+- Untick **Include secrets** to export a sanitised copy (no secrets, no key files) for sharing a config layout.
+- The onboarding wizard's final step offers the same export, so a fresh setup ends with a backup in hand.
 
 ## 🏢 Multiple tenants (Production, Sandbox, etc.)
 
