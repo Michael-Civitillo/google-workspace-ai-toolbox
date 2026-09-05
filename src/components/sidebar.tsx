@@ -22,10 +22,12 @@ import {
   Users,
   Activity,
   Layers,
+  KeyRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
 import { LogoutButton } from "./logout-button";
+import { SessionIdentity } from "./session-identity";
 
 const navigation = [
   {
@@ -168,6 +170,7 @@ export function Sidebar() {
       </nav>
 
       <div className="p-3 border-t border-border">
+        <SessionIdentity />
         <LogoutButton />
       </div>
     </aside>
