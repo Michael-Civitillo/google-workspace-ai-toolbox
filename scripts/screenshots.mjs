@@ -21,6 +21,7 @@ const pages = [
   { name: "offboarding", path: "/offboarding", delay: 800 },
   { name: "sharing-audit", path: "/sharing-audit", delay: 800 },
   { name: "tenants", path: "/tenants", delay: 800 },
+  { name: "sso", path: "/sso", delay: 800 },
   { name: "setup", path: "/setup", delay: 1500 },
   { name: "login", path: "/login", delay: 800, skipLogin: true },
 ];

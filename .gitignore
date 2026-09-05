@@ -38,6 +38,10 @@ yarn-error.log*
 tenants.json
 tenants.json.tmp
 
+# Single sign-on configuration (contains the OIDC client secret — keep local)
+sso.json
+sso.json.tmp
+
 # Append-only audit log of all mutating actions
 audit.log
 

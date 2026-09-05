@@ -38,6 +38,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 ### Safety & ops
 
 - 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` set. HMAC-signed session cookies, 12h TTL, rate-limited login.
+- 🔑 **Single sign-on (OIDC)** — Sign in with Google, Microsoft Entra ID, Okta, or any OpenID Connect provider instead of (or alongside) the shared password. A pop-up wizard registers the app, checks the issuer, runs a real test sign-in, and only then enables it. Allowlist by domain or email; sessions and audit entries record who signed in.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
 - ⚠️ **Confirmation dialogs** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension) shows a before→after diff and requires you to type the target email/identifier to confirm.
 - 📜 **Audit log** — Append-only JSON-lines log of every mutation, with secrets redacted (`AUDIT_LOG_PATH` env var to control location).
@@ -93,7 +94,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 ## 🚀 Getting started
 
 You'll need:
-- Node.js 18+
+- Node.js 20+
 - The [gws CLI](https://github.com/googleworkspace/cli)
 - A Google Workspace admin account
 
@@ -125,7 +126,7 @@ Hit [http://localhost:3000](http://localhost:3000), log in with your `APP_PASSWO
 Same flow, just different env-var syntax. Open **PowerShell** (or Windows Terminal):
 
 ```powershell
-# Install Node.js 18+ from https://nodejs.org and the gws CLI:
+# Install Node.js 20+ from https://nodejs.org and the gws CLI:
 npm install -g @googleworkspace/cli
 
 # Auth up
@@ -201,8 +202,24 @@ The toolbox is designed to be safe to run against a real tenant, but a few env v
 | `GOOGLE_GENERATIVE_AI_API_KEY` | ⚠️ for AI features | Gemini API key. |
 | `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
+| `SSO_CONFIG_PATH` | optional | Override location of the single sign-on config (defaults to `./sso.json`). |
+| `APP_SSO_DISABLED` | optional | Set to `true` to switch single sign-on off and restore password login without editing `sso.json`. |
 
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
+
+## 🔑 Single sign-on (OIDC)
+
+The shared `APP_PASSWORD` is fine for one admin on a laptop. For a team, connect your identity provider instead: **Single Sign-On** in the sidebar opens a pop-up wizard that walks through the whole thing.
+
+1. **Provider** — Google Workspace, Microsoft Entra ID, Okta, or any other OpenID Connect provider (Auth0, Keycloak, JumpCloud, …).
+2. **Register app** — provider-specific instructions plus the exact redirect URI to paste in (`<base URL>/api/auth/oidc/callback`).
+3. **Credentials** — issuer URL, client ID, client secret. *Check issuer* fetches the provider's discovery document from the server, so you know the endpoints are reachable before anything is saved.
+4. **Who can sign in** — allowed email domains and/or addresses (mandatory for Google, since any Google account can complete the handshake). Keep the password form as a fallback (default) or turn it off.
+5. **Test & enable** — save (stored disabled), run a real sign-in in a pop-up and see the email, name and access decision that came back, then enable. Turning the password form off requires a passing test first.
+
+Under the hood: authorization code flow with PKCE; the ID token's signature, issuer, audience, expiry and nonce are verified via [openid-client](https://github.com/panva/openid-client); the `email` claim (or `preferred_username` / `upn` for Entra ID) is checked against the allowlist; an allowed account gets the same 12-hour signed session as a password login, and audit-log entries (`auth.sso_login`, `auth.sso_test`, `auth.sso_config.save`, …) record who did what.
+
+The configuration — including the client secret — lives in `sso.json` (gitignored, mode 0600, next to `tenants.json`; relocate it with `SSO_CONFIG_PATH`). Locked out because the provider is down or misconfigured? Set `APP_SSO_DISABLED=true` on the server (or delete `sso.json`) and the password form comes back.
 
 ## 🏢 Multiple tenants (Production, Sandbox, etc.)
 
@@ -221,6 +238,7 @@ Tenant config is saved to `tenants.json` locally (gitignored — your credential
 - [googleapis](https://www.npmjs.com/package/googleapis) — direct Gmail, Calendar, Admin SDK, Drive, and Data Transfer calls (no CLI hop, fewer args quirks)
 - [gws CLI](https://github.com/googleworkspace/cli) — used for everything outside the Google APIs we wrap directly
 - Web Crypto API (Edge-runtime safe HMAC sessions)
+- [openid-client](https://github.com/panva/openid-client) — OpenID Connect relying party (discovery, PKCE, ID token validation) for single sign-on
 
 ## 💻 Dev stuff
 
