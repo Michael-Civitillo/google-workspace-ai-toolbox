@@ -145,7 +145,9 @@ export default function OnboardingPage() {
     setStatusLoading(true);
     try {
       const [s, t] = await Promise.all([
-        fetch("/api/gws/status")
+        // The operator just installed or signed in and clicked Re-check:
+        // bypass the server's short status cache.
+        fetch("/api/gws/status?fresh=1")
           .then((r) => r.json())
           .catch(() => ({ installed: false, authenticated: false } as GwsStatus)),
         fetch("/api/tenants")
@@ -244,7 +246,8 @@ export default function OnboardingPage() {
     setVerifying(true);
     setVerifyResult(null);
     try {
-      const r = await fetch("/api/gws/status");
+      // An explicit connection check must not answer from the status cache.
+      const r = await fetch("/api/gws/status?fresh=1");
       const data = (await r.json()) as GwsStatus;
       setStatus(data);
       if (data.installed) {

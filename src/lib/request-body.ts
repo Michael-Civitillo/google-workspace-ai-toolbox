@@ -54,7 +54,13 @@ export async function readCappedBody(
   }
 
   const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
+  // Decode as the chunks arrive instead of retaining them and concatenating
+  // at the end: that kept three copies of a large body alive at once (the
+  // chunks, the merged bytes, the decoded text) — on an 80 MB mailbox-import
+  // batch, a quarter of a gigabyte before JSON.parse even ran. A streaming
+  // decoder leaves one copy; the byte cap is still enforced on the wire bytes.
+  const decoder = new TextDecoder("utf-8");
+  let text = "";
   let total = 0;
   try {
     for (;;) {
@@ -63,8 +69,9 @@ export async function readCappedBody(
       if (!value) continue;
       total += value.byteLength;
       if (total > maxBytes) return BODY_TOO_LARGE;
-      chunks.push(value);
+      text += decoder.decode(value, { stream: true });
     }
+    text += decoder.decode();
   } catch {
     return "";
   } finally {
@@ -72,15 +79,7 @@ export async function readCappedBody(
     // normal path the stream is already closed, so this is a no-op.
     reader.cancel().catch(() => {});
   }
-
-  if (total === 0) return "";
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder("utf-8").decode(merged);
+  return text;
 }
 
 /**

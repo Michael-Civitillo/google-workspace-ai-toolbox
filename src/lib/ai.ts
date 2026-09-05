@@ -1,10 +1,20 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { Tenant } from "./tenant-types";
 
+/** Model used unless GEMINI_MODEL overrides it. */
+const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+
+// One provider per API key rather than one per call; keys are per tenant, so
+// this stays tiny, and the cap only matters if tenants are churned.
+const providerCache = new Map<string, ReturnType<typeof createGoogleGenerativeAI>>();
+const PROVIDER_CACHE_MAX = 16;
+
 /**
  * Get the configured Gemini model for a specific tenant.
  * Uses the tenant's geminiApiKey if set, otherwise falls back to
- * the GOOGLE_GENERATIVE_AI_API_KEY environment variable.
+ * the GOOGLE_GENERATIVE_AI_API_KEY environment variable. The model id comes
+ * from GEMINI_MODEL when set, so a newer model can be adopted without a
+ * code change.
  */
 export function getModel(tenant: Tenant | null) {
   const apiKey =
@@ -17,8 +27,34 @@ export function getModel(tenant: Tenant | null) {
     );
   }
 
-  const provider = createGoogleGenerativeAI({ apiKey });
-  return provider("gemini-2.0-flash");
+  let provider = providerCache.get(apiKey);
+  if (!provider) {
+    provider = createGoogleGenerativeAI({ apiKey });
+    providerCache.set(apiKey, provider);
+    while (providerCache.size > PROVIDER_CACHE_MAX) {
+      const oldest = providerCache.keys().next().value;
+      if (oldest === undefined) break;
+      providerCache.delete(oldest);
+    }
+  }
+  return provider(process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL);
+}
+
+/**
+ * Whether an error is the abort of a timed-out request. The AI SDK wraps the
+ * underlying DOMException in its own error classes, so a bare `name` check on
+ * the outer error misses it and a timeout would surface as a generic 500
+ * instead of a 504 — walk the `cause` chain and accept either abort name.
+ */
+export function isTimeoutError(e: unknown): boolean {
+  let current: unknown = e;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
+    if (current.name === "TimeoutError" || current.name === "AbortError") {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**

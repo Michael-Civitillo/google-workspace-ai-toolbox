@@ -143,18 +143,22 @@ export async function gws(
  * the operator can debug PATH / shim / permissions issues from the Setup
  * page without having to spelunk through server logs.
  */
-export async function checkGwsStatus(): Promise<{
+export interface GwsStatus {
   installed: boolean;
   version?: string;
   authenticated: boolean;
   bin?: string;
   error?: string;
-}> {
+}
+
+async function probeGwsStatus(): Promise<GwsStatus> {
   try {
     const { stdout } = await runGws(["--version"], { timeout: 5000 });
     const version = stdout.trim();
 
     try {
+      // The CLI has no read-only "am I signed in" command, so exporting the
+      // credentials (to a pipe that is discarded) is the auth probe.
       await runGws(["auth", "export"], { timeout: 5000 });
       return { installed: true, version, authenticated: true, bin: GWS_BIN };
     } catch {
@@ -164,4 +168,32 @@ export async function checkGwsStatus(): Promise<{
     const error = e instanceof Error ? e.message : String(e);
     return { installed: false, authenticated: false, bin: GWS_BIN, error };
   }
+}
+
+// The probe spawns two processes; the dashboard and setup pages ask for it on
+// every visit. Cache the answer briefly and coalesce concurrent probes — the
+// "Re-check" buttons pass `fresh` to bypass the cache.
+const STATUS_CACHE_TTL_MS = 30_000;
+let statusCache: { at: number; value: GwsStatus } | null = null;
+let statusInFlight: Promise<GwsStatus> | null = null;
+
+export async function checkGwsStatus(
+  opts: { fresh?: boolean } = {}
+): Promise<GwsStatus> {
+  if (!opts.fresh) {
+    if (statusCache && Date.now() - statusCache.at < STATUS_CACHE_TTL_MS) {
+      return statusCache.value;
+    }
+    if (statusInFlight) return statusInFlight;
+  }
+  const probe = probeGwsStatus()
+    .then((value) => {
+      statusCache = { at: Date.now(), value };
+      return value;
+    })
+    .finally(() => {
+      if (statusInFlight === probe) statusInFlight = null;
+    });
+  statusInFlight = probe;
+  return probe;
 }

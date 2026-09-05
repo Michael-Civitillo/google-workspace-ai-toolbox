@@ -222,6 +222,8 @@ export default function BulkOperations() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Pending debounced preview rebuild (see schedulePreview).
+  const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
 
@@ -229,6 +231,7 @@ export default function BulkOperations() {
     return () => {
       cancelRef.current = true;
       abortRef.current?.abort();
+      if (previewTimer.current) clearTimeout(previewTimer.current);
     };
   }, []);
 
@@ -244,6 +247,11 @@ export default function BulkOperations() {
   const op = OPERATIONS[operation];
 
   const buildPreview = (text: string, opId: OperationId) => {
+    // An immediate rebuild supersedes any debounced one still pending.
+    if (previewTimer.current) {
+      clearTimeout(previewTimer.current);
+      previewTimer.current = null;
+    }
     const def = OPERATIONS[opId];
     setParseError(null);
     setRan(false);
@@ -283,6 +291,18 @@ export default function BulkOperations() {
         };
       })
     );
+  };
+
+  // Typing in the textarea re-parses and re-validates the whole input; on a
+  // large paste (up to 1 MB / 500 rows) doing that on every keystroke made
+  // typing stutter. Debounce it briefly — file picks and operation changes
+  // still rebuild immediately.
+  const schedulePreview = (text: string, opId: OperationId) => {
+    if (previewTimer.current) clearTimeout(previewTimer.current);
+    previewTimer.current = setTimeout(() => {
+      previewTimer.current = null;
+      buildPreview(text, opId);
+    }, 150);
   };
 
   const onPickFile = async (file: File | null) => {
@@ -484,7 +504,7 @@ export default function BulkOperations() {
                 value={csvText}
                 onChange={(e) => {
                   setCsvText(e.target.value);
-                  buildPreview(e.target.value, operation);
+                  schedulePreview(e.target.value, operation);
                 }}
                 disabled={running}
                 className="font-mono text-xs"

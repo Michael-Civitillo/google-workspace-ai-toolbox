@@ -2259,6 +2259,15 @@ export interface DriveTransferCursor {
     pageToken: string | null;
     selfTransferred: boolean;
   } | null;
+  /**
+   * The folders the operator originally selected. A folder reached by walking
+   * is listed by its single parent exactly once, so only a SELECTED folder can
+   * be rediscovered (as a child of another selected folder) in a later chunk
+   * after its own walk finished. Carrying the selection lets every chunk skip
+   * such a subtree instead of walking — and counting — it twice. Bounded by
+   * TRANSFER_FOLDER_SELECTION_CAP.
+   */
+  selected?: string[];
 }
 
 export interface DriveTransferErrorEntry {
@@ -2315,7 +2324,7 @@ export function buildInitialTransferCursor(
     seen.add(id);
     queue.push(id);
   }
-  return { queue, current: null };
+  return { queue, current: null, selected: [...queue] };
 }
 
 /**
@@ -2326,7 +2335,7 @@ function sanitizeCursor(cursor: unknown): DriveTransferCursor {
   if (typeof cursor !== "object" || cursor === null) {
     throw new Error("cursor must be an object");
   }
-  const c = cursor as { queue?: unknown; current?: unknown };
+  const c = cursor as { queue?: unknown; current?: unknown; selected?: unknown };
   if (!Array.isArray(c.queue)) {
     throw new Error("cursor.queue must be an array");
   }
@@ -2373,7 +2382,29 @@ function sanitizeCursor(cursor: unknown): DriveTransferCursor {
       selfTransferred: cur.selfTransferred === true,
     };
   }
-  return { queue, current };
+  let selected: string[] | undefined;
+  if (c.selected !== undefined && c.selected !== null) {
+    if (!Array.isArray(c.selected)) {
+      throw new Error("cursor.selected must be an array");
+    }
+    if (c.selected.length > TRANSFER_FOLDER_SELECTION_CAP) {
+      throw new Error(
+        `cursor.selected exceeds the selection cap of ${TRANSFER_FOLDER_SELECTION_CAP}`
+      );
+    }
+    selected = [];
+    for (const s of c.selected) {
+      if (typeof s !== "string") {
+        throw new Error("cursor.selected entries must be strings");
+      }
+      assertDriveFolderId(s);
+      if (s === "root") {
+        throw new Error("cursor may not reference My Drive root");
+      }
+      selected.push(s);
+    }
+  }
+  return selected ? { queue, current, selected } : { queue, current };
 }
 
 export function sanitizeTransferCursor(cursor: unknown): DriveTransferCursor {
@@ -2429,11 +2460,17 @@ export async function transferDriveFoldersOwnership(
   const local: DriveTransferCursor = {
     queue: [...cursor.queue],
     current: cursor.current ? { ...cursor.current } : null,
+    ...(cursor.selected ? { selected: [...cursor.selected] } : {}),
   };
-  // Every folder known to this call — queued, in progress, or dequeued during
-  // the loop below. Discovered subfolders already in here are NOT re-enqueued
-  // (a selection of a parent plus its subfolder would walk the subtree twice).
-  const enqueuedFolders = new Set<string>(local.queue);
+  // Every folder known to this call — queued, in progress, dequeued during
+  // the loop below, or part of the original selection (which earlier chunks
+  // may already have walked to completion). Discovered subfolders already in
+  // here are NOT re-enqueued: a selection of a parent plus its subfolder would
+  // otherwise walk that subtree twice.
+  const enqueuedFolders = new Set<string>([
+    ...local.queue,
+    ...(local.selected ?? []),
+  ]);
   if (local.current) enqueuedFolders.add(local.current.folderId);
 
   const out: DriveTransferProgress = {
