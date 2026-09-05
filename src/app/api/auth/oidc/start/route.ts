@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { authConfigured, verifySessionToken, SESSION_COOKIE_NAME } from "@/lib/auth";
+import { authConfigured } from "@/lib/auth";
 import { readSsoConfig, ssoLoginAvailable } from "@/lib/sso-server";
 import { beginOidcAuthorization, type OidcMode } from "@/lib/oidc";
 import {
@@ -9,6 +9,7 @@ import {
   safeNextPath,
 } from "@/lib/oidc-handshake";
 import { renderTestResultPage } from "@/lib/oidc-pages";
+import { identityFromRequest, describeActor } from "@/lib/session";
 
 /**
  * Kick off a single sign-on attempt.
@@ -26,17 +27,22 @@ function loginError(req: NextRequest, code: string): NextResponse {
   return res;
 }
 
-function testFailure(message: string, detail?: string): NextResponse {
+function testFailure(
+  message: string,
+  detail?: string,
+  code = "start_failed",
+  status = 200
+): NextResponse {
   return new NextResponse(
     renderTestResultPage({
       type: "gws-sso-test",
       ok: false,
-      code: "start_failed",
+      code,
       message,
       detail,
     }),
     {
-      status: 200,
+      status,
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
@@ -55,13 +61,25 @@ export async function GET(req: NextRequest) {
       : loginError(req, "server_error");
   }
 
+  // Test mode runs inside the wizard's pop-up and needs a session. This is a
+  // same-origin navigation, so the Strict session cookie is present here —
+  // and this is the only place the tester's identity can be read (the
+  // callback arrives from the provider, cross-site, without that cookie).
+  let actor: string | undefined;
   if (mode === "test") {
-    const ok = await verifySessionToken(
-      req.cookies.get(SESSION_COOKIE_NAME)?.value
-    );
-    if (!ok) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const identity = await identityFromRequest(req);
+    if (!identity) {
+      // Render a result page rather than bare JSON: the wizard is listening
+      // for the pop-up's message and would otherwise wait until the window
+      // is closed by hand.
+      return testFailure(
+        "Your Open Admin session has expired — sign in again and re-run the test",
+        undefined,
+        "unauthorized",
+        401
+      );
     }
+    actor = describeActor(identity);
   }
 
   let cfg;
@@ -87,7 +105,12 @@ export async function GET(req: NextRequest) {
 
   const next = safeNextPath(req.nextUrl.searchParams.get("next"));
   try {
-    const { url, handshake } = await beginOidcAuthorization(cfg, mode, next);
+    const { url, handshake } = await beginOidcAuthorization(
+      cfg,
+      mode,
+      next,
+      actor
+    );
     const res = NextResponse.redirect(url, 302);
     res.cookies.set(
       HANDSHAKE_COOKIE_NAME,

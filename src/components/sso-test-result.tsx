@@ -21,6 +21,8 @@ const HINTS: Record<string, string> = {
     "The provider reported an error — the details above usually name the misconfigured setting.",
   popup_blocked: "Allow pop-ups for this site, then run the test again.",
   popup_closed: "Run the test again and complete the sign-in in the pop-up window.",
+  unauthorized:
+    "Your session expired while the wizard was open. Reload the page, sign in, and run the test again.",
   start_failed:
     "The server couldn't begin the sign-in. Check the server log for the full error.",
 };

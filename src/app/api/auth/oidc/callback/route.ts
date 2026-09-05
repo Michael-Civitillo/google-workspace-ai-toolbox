@@ -107,9 +107,14 @@ export async function GET(req: NextRequest) {
 
   const auditAction = mode === "test" ? "auth.sso_test" : "auth.sso_login";
   // In test mode the person running the test is the actor; in login mode the
-  // actor is whoever the provider just authenticated.
+  // actor is whoever the provider just authenticated. The tester's identity
+  // travels in the signed handshake: this request is the provider's cross-site
+  // redirect, on which the browser withholds the Strict session cookie, so
+  // reading it here would always report the anonymous password session.
   const testerActor =
-    mode === "test" ? describeActor(await identityFromRequest(req)) : undefined;
+    mode === "test"
+      ? handshake.actor ?? describeActor(await identityFromRequest(req))
+      : undefined;
 
   let failure: OidcFlowError;
   let failedEmail: string | undefined;

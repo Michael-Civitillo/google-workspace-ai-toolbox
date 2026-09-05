@@ -1,5 +1,8 @@
 import { createSignedValue, readSignedValue } from "./auth";
 import type { OidcHandshake } from "./oidc";
+import { safeNextPath } from "./safe-next";
+
+export { safeNextPath };
 
 /**
  * The single sign-on handshake cookie.
@@ -49,7 +52,7 @@ export async function parseHandshake(
   ) {
     return null;
   }
-  return {
+  const handshake: OidcHandshake = {
     v: 1,
     state: p.state,
     nonce: p.nonce,
@@ -57,21 +60,8 @@ export async function parseHandshake(
     mode: p.mode,
     next: safeNextPath(p.next),
   };
-}
-
-/**
- * Restrict the post-login destination to an internal page path. Mirrors the
- * login page's client-side check so `?next=` can never become an open
- * redirect, and additionally refuses to bounce into API routes or back to
- * the login page.
- */
-export function safeNextPath(raw: string | null | undefined): string {
-  if (!raw) return "/";
-  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
-  if (raw.includes("\\") || /[\r\n]/.test(raw)) return "/";
-  if (raw.startsWith("/api/") || raw === "/login" || raw.startsWith("/login?")) {
-    return "/";
+  if (typeof p.actor === "string" && p.actor) {
+    handshake.actor = p.actor.slice(0, 254);
   }
-  if (raw.length > 2048) return "/";
-  return raw;
+  return handshake;
 }

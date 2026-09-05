@@ -339,7 +339,12 @@ export function validateIssuer(value: unknown): string {
       "issuer must use https (plain http is only allowed for localhost)"
     );
   }
-  return s;
+  // Discovery compares the document's `issuer` byte-for-byte with what was
+  // typed. Providers publish path issuers without a trailing slash (Entra's
+  // ".../v2.0", Okta's ".../oauth2/default"), so a pasted trailing slash
+  // would fail with an opaque "issuer mismatch" — drop it. An origin-only
+  // issuer keeps its root slash, which the URL parser normalises anyway.
+  return url.pathname !== "/" && s.endsWith("/") ? s.replace(/\/+$/, "") : s;
 }
 
 /**
@@ -492,13 +497,32 @@ export function validateSsoUpdate(
   }
 
   const now = new Date().toISOString();
-  // A test result only vouches for the exact client it was run against.
+  // A test result only vouches for the exact client AND access policy it was
+  // run against: an allowlist edit can turn a passing test into a lockout.
+  const sameList = (a: string[], b: string[]) =>
+    a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i]);
   const coreChanged =
     !existing ||
     existing.issuer !== issuer ||
     existing.clientId !== clientId ||
     existing.clientSecret !== clientSecret ||
-    existing.redirectUri !== redirectUri;
+    existing.redirectUri !== redirectUri ||
+    existing.allowAnyIdpUser !== allowAnyIdpUser ||
+    !sameList(existing.allowedDomains, allowedDomains) ||
+    !sameList(existing.allowedEmails, allowedEmails);
+  const lastTest = coreChanged ? undefined : existing?.lastTest;
+
+  // Turning single sign-on on with the password form off is the one change
+  // that can lock every admin out, so the server — not just the wizard —
+  // demands a passing test of this exact configuration first. Only the
+  // transition is gated: a config that is already live without the fallback
+  // can still be edited (its admins signed in through the provider).
+  const wasSsoOnly = !!existing && existing.enabled && !existing.passwordLoginEnabled;
+  if (enabled && !passwordLoginEnabled && !wasSsoOnly && !lastTest?.ok) {
+    throw new ValidationError(
+      "Password sign-in is off in this configuration, so a passing test sign-in of the saved configuration is required before it can be enabled. Save, run \"Test sign-in\", then enable."
+    );
+  }
 
   return {
     version: 1,
@@ -515,7 +539,7 @@ export function validateSsoUpdate(
     passwordLoginEnabled,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
-    lastTest: coreChanged ? undefined : existing?.lastTest,
+    lastTest,
   };
 }
 

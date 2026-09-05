@@ -10,25 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Lock, Loader2, KeyRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SSO_ERROR_MESSAGES, type SsoLoginStatus } from "@/lib/sso-types";
-
-/**
- * Restrict the post-login redirect target to internal paths to prevent
- * `?next=https://evil.com` open-redirect attacks. Anything that isn't a
- * single leading-slash path is silently dropped to "/".
- */
-function safeNext(raw: string | null): string {
-  if (!raw) return "/";
-  // Reject protocol-relative ("//evil.com") and absolute URLs.
-  if (!raw.startsWith("/") || raw.startsWith("//")) return "/";
-  // Reject backslashes outright: the WHATWG URL parser treats "\" as "/",
-  // so "/\evil.com" would otherwise navigate to https://evil.com.
-  if (raw.includes("\\")) return "/";
-  // Reject paths containing schemes (e.g. "/foo?x=javascript:bad" is fine
-  // — that's just a query string, but a bare scheme like "javascript:..." in
-  // the path itself is dangerous).
-  if (/[\r\n]/.test(raw)) return "/";
-  return raw;
-}
+import { safeNextPath } from "@/lib/safe-next";
 
 const PASSWORD_ONLY: SsoLoginStatus = {
   ssoEnabled: false,
@@ -39,7 +21,9 @@ const PASSWORD_ONLY: SsoLoginStatus = {
 function LoginInner() {
   const router = useRouter();
   const params = useSearchParams();
-  const next = safeNext(params.get("next"));
+  // Same rules as the single sign-on routes: a `next` that would bounce into
+  // an API route or back to this page is dropped to "/".
+  const next = safeNextPath(params.get("next"));
   const ssoErrorCode = params.get("sso_error");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);

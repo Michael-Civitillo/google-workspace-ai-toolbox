@@ -301,6 +301,15 @@ export function SsoSetupWizard({
     }
   }
 
+  // Turning the password fallback off on a LIVE configuration is the one
+  // lockout-capable edit, and the server refuses it without a passing test of
+  // the saved configuration. So a save keeps the fallback on for now, and the
+  // finish step offers the flip as its own action once the test has passed.
+  const deferFallbackOff =
+    !!existing?.enabled &&
+    existing.passwordLoginEnabled &&
+    !form.passwordLoginEnabled;
+
   async function save() {
     if (!redirect.uri) return;
     setSaving(true);
@@ -316,7 +325,7 @@ export function SsoSetupWizard({
         allowedDomains: domains,
         allowedEmails: emails,
         allowAnyIdpUser: form.allowAnyIdpUser,
-        passwordLoginEnabled: form.passwordLoginEnabled,
+        passwordLoginEnabled: deferFallbackOff ? true : form.passwordLoginEnabled,
         // A fresh setup stays off until the admin enables it deliberately;
         // editing a live config keeps it live.
         enabled: existing?.enabled ?? false,
@@ -339,19 +348,29 @@ export function SsoSetupWizard({
     });
   }
 
-  async function enable() {
+  async function applySwitch(
+    patch: { enabled: true } | { passwordLoginEnabled: false },
+    failure: string
+  ) {
     setEnabling(true);
     setEnableError(null);
     try {
-      const cfg = await saveSsoConfig({ enabled: true });
+      const cfg = await saveSsoConfig(patch);
       setSaved(cfg);
       onSaved(cfg);
     } catch (e) {
-      setEnableError(e instanceof Error ? e.message : "Failed to enable");
+      setEnableError(e instanceof Error ? e.message : failure);
     } finally {
       setEnabling(false);
     }
   }
+
+  const enable = () => applySwitch({ enabled: true }, "Failed to enable");
+  const turnOffFallback = () =>
+    applySwitch(
+      { passwordLoginEnabled: false },
+      "Failed to turn off password sign-in"
+    );
 
   function handleOpenChange(nextOpen: boolean) {
     if (!nextOpen && (saving || enabling)) return;
@@ -424,6 +443,8 @@ export function SsoSetupWizard({
               enabling={enabling}
               enableError={enableError}
               onEnable={enable}
+              deferFallbackOff={deferFallbackOff}
+              onTurnOffFallback={turnOffFallback}
               needsTestBeforeEnable={needsTestBeforeEnable}
               testPassed={testPassed}
             />
@@ -1028,6 +1049,8 @@ function FinishStep({
   enabling,
   enableError,
   onEnable,
+  deferFallbackOff,
+  onTurnOffFallback,
   needsTestBeforeEnable,
   testPassed,
 }: {
@@ -1045,6 +1068,9 @@ function FinishStep({
   enabling: boolean;
   enableError: string | null;
   onEnable: () => void;
+  /** Editing a live config and turning its password fallback off. */
+  deferFallbackOff: boolean;
+  onTurnOffFallback: () => void;
   needsTestBeforeEnable: boolean;
   testPassed: boolean;
 }) {
@@ -1066,9 +1092,20 @@ function FinishStep({
     ["Allowed domains", domains.length ? domains.join(", ") : "none"],
     ["Allowed addresses", emails.length ? emails.join(", ") : "none"],
     ["Any provider account", form.allowAnyIdpUser ? "yes" : "no"],
-    ["Password fallback", form.passwordLoginEnabled ? "on" : "off"],
+    [
+      "Password fallback",
+      deferFallbackOff
+        ? "on until a test passes, then off"
+        : form.passwordLoginEnabled
+        ? "on"
+        : "off",
+    ],
   ];
   const enableBlocked = needsTestBeforeEnable && !testPassed;
+  // Live config whose fallback is being turned off: the flip is offered here,
+  // after a passing test, instead of riding along with the save.
+  const fallbackFlipPending =
+    deferFallbackOff && !!saved?.enabled && saved.passwordLoginEnabled;
 
   return (
     <div className="space-y-4">
@@ -1144,7 +1181,29 @@ function FinishStep({
 
       <div className="space-y-2">
         <p className="text-sm font-semibold">Enable</p>
-        {saved?.enabled ? (
+        {fallbackFlipPending ? (
+          <>
+            <Hint>
+              {testPassed
+                ? "The test passed with the saved configuration — password sign-in can now be turned off."
+                : "Single sign-on is live with the password form still on. Run the test sign-in above; once it passes, password sign-in can be turned off."}
+            </Hint>
+            {enableError && <Problem>{enableError}</Problem>}
+            <Button
+              size="sm"
+              onClick={onTurnOffFallback}
+              disabled={enabling || !testPassed}
+              data-testid="sso-fallback-off"
+            >
+              {enabling ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <ShieldCheck className="h-3.5 w-3.5 mr-1.5" />
+              )}
+              Turn off password sign-in
+            </Button>
+          </>
+        ) : saved?.enabled ? (
           <div className="rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40 p-3 text-xs text-emerald-800 dark:text-emerald-300">
             Single sign-on is enabled. The login page now offers &ldquo;Continue
             with {saved.displayName}&rdquo;

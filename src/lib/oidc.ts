@@ -230,12 +230,20 @@ export interface OidcHandshake {
   mode: OidcMode;
   /** Validated internal path to land on after a login-mode success. */
   next: string;
+  /**
+   * Test mode only: who started the test, for the audit entry. Captured at
+   * /start, which the browser reaches by a same-origin navigation that carries
+   * the Strict session cookie; the callback arrives from the provider's
+   * cross-site redirect, where that cookie is withheld.
+   */
+  actor?: string;
 }
 
 export async function beginOidcAuthorization(
   cfg: SsoConfig,
   mode: OidcMode,
-  next: string
+  next: string,
+  actor?: string
 ): Promise<{ url: URL; handshake: OidcHandshake }> {
   const config = await loadOidcClient(cfg);
   const verifier = client.randomPKCECodeVerifier();
@@ -261,7 +269,9 @@ export async function beginOidcAuthorization(
   }
 
   const url = client.buildAuthorizationUrl(config, params);
-  return { url, handshake: { v: 1, state, nonce, verifier, mode, next } };
+  const handshake: OidcHandshake = { v: 1, state, nonce, verifier, mode, next };
+  if (mode === "test" && actor) handshake.actor = actor;
+  return { url, handshake };
 }
 
 export interface OidcIdentity {
