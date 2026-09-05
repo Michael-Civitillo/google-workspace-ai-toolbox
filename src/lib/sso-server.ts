@@ -345,7 +345,7 @@ export function validateIssuer(value: unknown): string {
 /**
  * The redirect URI is what the provider sends the browser back to, so it must
  * point at this app's one callback handler. Non-loopback http is allowed to
- * match how the toolbox itself can be served in development, but providers
+ * match how Open Admin itself can be served in development, but providers
  * generally refuse to register it — the wizard warns about that.
  */
 export function validateRedirectUri(value: unknown): string {

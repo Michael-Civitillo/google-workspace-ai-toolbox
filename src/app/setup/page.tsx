@@ -203,7 +203,7 @@ export default function Setup() {
                       <XCircle className="h-5 w-5 text-red-500" />
                     )}
                     <div>
-                      <p className="text-sm font-medium">Toolbox tenants</p>
+                      <p className="text-sm font-medium">Open Admin tenants</p>
                       <p className="text-xs text-muted-foreground">
                         {tenantCount === null
                           ? "Checking..."
@@ -235,7 +235,7 @@ export default function Setup() {
                 <p className="text-xs text-muted-foreground pt-1">
                   <strong>CLI authentication</strong> means the{" "}
                   <code className="font-mono">gws</code> CLI itself has
-                  credentials. <strong>Toolbox tenants</strong> are what this
+                  credentials. <strong>Open Admin tenants</strong> are what this
                   app uses to run operations against your Workspace — each
                   tenant points at a service account JSON and an admin email.
                   You need at least one tenant before any feature works.

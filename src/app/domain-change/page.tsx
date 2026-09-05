@@ -513,7 +513,7 @@ export default function DomainChange() {
           warnings={
             <>
               Irreversible from this tool. If wrong, undo via the Google Admin
-              Console. Make sure the user is not the admin this toolbox is
+              Console. Make sure the user is not the admin Open Admin is
               impersonating.
             </>
           }

@@ -1,7 +1,7 @@
 /**
  * Tiny in-process rate limiter for the login endpoint.
  *
- * Single-process only — fine for the toolbox's single-instance deployment
+ * Single-process only — fine for Open Admin's single-instance deployment
  * model. If you ever scale horizontally, swap this for Redis or a similar
  * shared store.
  *

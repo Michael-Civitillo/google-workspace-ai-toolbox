@@ -103,7 +103,7 @@ export function renderRedirectPage(next: string): string {
 <main class="card">
   <div class="icon wait">→</div>
   <h1>Signing you in…</h1>
-  <p>Taking you to the toolbox. <a href="${href}">Continue</a> if nothing happens.</p>
+  <p>Taking you to Open Admin. <a href="${href}">Continue</a> if nothing happens.</p>
 </main>
 <script>window.location.replace(${jsonForScript(next)});</script>
 </body>
@@ -142,7 +142,7 @@ export function renderTestResultPage(result: SsoTestResult): string {
   <h1>${result.ok ? "Sign-in test passed" : "Sign-in test failed"}</h1>
   <p>${
     result.ok
-      ? "The identity provider authenticated you and the toolbox accepted the result. No session was created."
+      ? "The identity provider authenticated you and Open Admin accepted the result. No session was created."
       : "Fix the problem below and run the test again from the wizard."
   }</p>
   ${dl}

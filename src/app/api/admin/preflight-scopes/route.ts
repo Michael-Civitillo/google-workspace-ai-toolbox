@@ -6,7 +6,7 @@ import { audit } from "@/lib/audit";
 /**
  * GET /api/admin/preflight-scopes
  *
- * Verifies that every OAuth scope this toolbox uses is authorised in the
+ * Verifies that every OAuth scope Open Admin uses is authorised in the
  * tenant's Domain-Wide Delegation config. Surfaces a per-scope result so the
  * operator can fix Admin Console without having to run a real operation and
  * watch it fail.

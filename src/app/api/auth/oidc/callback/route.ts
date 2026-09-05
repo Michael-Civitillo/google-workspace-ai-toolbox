@@ -125,7 +125,7 @@ export async function GET(req: NextRequest) {
       failedEmail = identity.email;
       failure = new OidcFlowError(
         "not_allowed",
-        "This account isn't allowed to use the toolbox",
+        "This account isn't allowed to use Open Admin",
         access.reason
       );
     } else if (mode === "test") {

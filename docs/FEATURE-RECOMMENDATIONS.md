@@ -1,6 +1,6 @@
 # Codebase Review & Feature Recommendations
 
-A review of where the toolbox stands today, followed by a prioritized set of new features. Each recommendation maps onto the extension points the codebase already has, so the implementation sketches reference real files and established patterns rather than green-field designs.
+A review of where Open Admin stands today, followed by a prioritized set of new features. Each recommendation maps onto the extension points the codebase already has, so the implementation sketches reference real files and established patterns rather than green-field designs.
 
 ## Where the codebase stands
 

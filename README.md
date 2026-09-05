@@ -1,8 +1,8 @@
 <p align="left">
-  <img src="public/logo.svg" alt="Google Workspace AI Toolbox" width="80" />
+  <img src="public/logo.svg" alt="Google Workspace Open Admin" width="80" />
 </p>
 
-<h1 align="left">Google Workspace AI Toolbox</h1>
+<h1 align="left">Google Workspace Open Admin</h1>
 
 <p align="left">
   <strong>If you grew up on <a href="https://github.com/GAM-team/GAM">GAM</a>, this is what comes next.</strong><br/>
@@ -88,6 +88,9 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### Setup
 ![Setup](docs/screenshots/setup.png)
+
+### Single Sign-On
+![Single Sign-On](docs/screenshots/sso.png)
 
 </details>
 
@@ -192,7 +195,7 @@ export GOOGLE_GENERATIVE_AI_API_KEY=your-key-here
 
 ## 🔒 Production deployment
 
-The toolbox is designed to be safe to run against a real tenant, but a few env vars matter:
+Open Admin is designed to be safe to run against a real tenant, but a few env vars matter:
 
 | Variable | Required | What it does |
 |---|---|---|

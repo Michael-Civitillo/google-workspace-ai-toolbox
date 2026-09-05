@@ -5,7 +5,7 @@ import type { Tenant } from "./tenant-types";
 /**
  * Pre-flight check for a tenant's Domain-Wide Delegation configuration.
  *
- * For each scope this toolbox needs, we attempt a token-exchange against
+ * For each scope Open Admin needs, we attempt a token-exchange against
  * Google's OAuth servers. A `unauthorized_client` failure means DWD is set
  * up for the service account but the operator never added that specific
  * scope in Admin Console → Security → API controls → Domain-wide delegation.
@@ -35,7 +35,7 @@ export interface PreflightResult {
 }
 
 /**
- * The full set of OAuth scopes the toolbox impersonates with. Adding a new
+ * The full set of OAuth scopes Open Admin impersonates with. Adding a new
  * feature that needs a new scope? Add it here so the preflight catches it.
  */
 const REQUIRED_SCOPES: ReadonlyArray<{

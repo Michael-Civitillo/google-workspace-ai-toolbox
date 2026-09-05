@@ -1,5 +1,5 @@
 /**
- * Auth helpers for the toolbox.
+ * Auth helpers for Open Admin.
  *
  * Uses Web Crypto (globalThis.crypto.subtle) so the same module works in
  * both Edge Middleware and Node API routes — `node:crypto` would crash the
@@ -292,7 +292,7 @@ export async function passwordMatches(input: string): Promise<boolean> {
  * Cookie attributes shared by every code path that issues a session.
  *
  * `strict` blocks the cookie on any cross-site navigation, top-level or
- * otherwise. The toolbox has no flow that depends on inbound cross-site
+ * otherwise. Open Admin has no flow that depends on inbound cross-site
  * links (the single sign-on callback lands on a same-origin interstitial
  * before navigating on), so this gives belt-and-braces CSRF protection on top
  * of the Origin/Referer check enforced by the middleware.

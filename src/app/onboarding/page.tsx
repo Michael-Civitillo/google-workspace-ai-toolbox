@@ -473,7 +473,7 @@ function WelcomeStep({ tenantCount }: { tenantCount: number }) {
             <Sparkles className="h-5 w-5 text-primary" />
           </div>
           <div>
-            <CardTitle className="text-lg">Welcome to the Toolbox</CardTitle>
+            <CardTitle className="text-lg">Welcome to Open Admin</CardTitle>
             <CardDescription>
               We&apos;ll get you connected to Google Workspace in about 10 minutes.
             </CardDescription>
@@ -482,7 +482,7 @@ function WelcomeStep({ tenantCount }: { tenantCount: number }) {
       </CardHeader>
       <CardContent className="space-y-5">
         <p className="text-sm text-muted-foreground">
-          To run admin operations, the toolbox needs three things: the{" "}
+          To run admin operations, Open Admin needs three things: the{" "}
           <code className="font-mono bg-muted px-1 rounded">gws</code> CLI,
           a Google Cloud service account with domain-wide delegation, and a
           <em> tenant</em> entry that points at your service account JSON.
@@ -601,7 +601,7 @@ function InstallStep({
           Install the gws CLI
         </CardTitle>
         <CardDescription>
-          Pick your platform and run the install command. The toolbox shells out to
+          Pick your platform and run the install command. Open Admin shells out to
           this CLI for everything that isn&apos;t a direct Google API call.
         </CardDescription>
       </CardHeader>
@@ -643,7 +643,7 @@ function InstallStep({
               command="npm install -g @googleworkspace/cli"
             />
             <p className="text-xs text-muted-foreground">
-              If <code className="font-mono">gws --version</code> isn&apos;t recognised after install, point the toolbox at the shim explicitly:
+              If <code className="font-mono">gws --version</code> isn&apos;t recognised after install, point Open Admin at the shim explicitly:
             </p>
             <CommandSnippet
               label="PowerShell — set GWS_BIN"
@@ -736,7 +736,7 @@ function ServiceAccountStep() {
           Set up a service account
         </CardTitle>
         <CardDescription>
-          A GCP service account with domain-wide delegation lets the toolbox act
+          A GCP service account with domain-wide delegation lets Open Admin act
           on behalf of any user in your tenant — no per-user OAuth dance.
         </CardDescription>
       </CardHeader>
@@ -1098,7 +1098,7 @@ function VerifyStep({
           Verify and finish
         </CardTitle>
         <CardDescription>
-          One last sanity check that the toolbox can talk to{" "}
+          One last sanity check that Open Admin can talk to{" "}
           <strong>{tenantName}</strong> via the gws CLI.
         </CardDescription>
       </CardHeader>
@@ -1146,7 +1146,7 @@ function VerifyStep({
                 Verify Domain-Wide Delegation scopes
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Checks every OAuth scope this toolbox impersonates against
+                Checks every OAuth scope Open Admin impersonates against
                 Google&apos;s auth server, so missing scopes surface here
                 instead of silently breaking a future operation.
               </p>

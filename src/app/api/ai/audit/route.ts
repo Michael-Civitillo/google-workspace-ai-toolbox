@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     const model = getModel(tenant);
 
     // Gather the audit inputs via the same Workspace API clients the rest of
-    // the toolbox uses, impersonating the user under audit.
+    // Open Admin uses, impersonating the user under audit.
     const gmail = buildGmailClient(tenant, user, GMAIL_AUDIT_SCOPES);
     const cal = buildCalendarClient(tenant, user);
 

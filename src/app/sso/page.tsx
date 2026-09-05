@@ -195,7 +195,7 @@ export default function SsoPage() {
                   No identity provider connected yet.
                 </p>
                 <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
-                  The setup wizard walks through registering the toolbox with
+                  The setup wizard walks through registering Open Admin with
                   Google, Microsoft Entra ID, Okta or any other OpenID Connect
                   provider, tests a real sign-in, and only then enables it.
                 </p>
@@ -381,7 +381,7 @@ export default function SsoPage() {
                   as a password login, and audit-log entries record their email.
                 </li>
                 <li>
-                  Signing out of the toolbox does not sign out of the provider.
+                  Signing out of Open Admin does not sign out of the provider.
                 </li>
                 <li>
                   The configuration (including the client secret) lives in{" "}

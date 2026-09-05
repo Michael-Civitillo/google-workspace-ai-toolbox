@@ -13,8 +13,8 @@ import {
  * Built on openid-client, which implements discovery, PKCE, the authorization
  * code grant and ID token validation (issuer, audience, expiry, nonce and —
  * with non-repudiation checks enabled — the JWS signature against the
- * provider's published keys). This module adds what is specific to the
- * toolbox: which provider to talk to, how to remember the in-flight
+ * provider's published keys). This module adds what is specific to
+ * Open Admin: which provider to talk to, how to remember the in-flight
  * handshake, which claim counts as the user's email, and who is allowed in.
  *
  * Server-only: never import from a client component.
@@ -196,7 +196,7 @@ export async function checkIssuer(issuerRaw: string): Promise<IssuerCheckResult>
   const algs = strings(server.id_token_signing_alg_values_supported);
   if (algs.length > 0 && algs.every((a) => a.startsWith("HS"))) {
     warnings.push(
-      "Only symmetric ID token signing (HS*) is advertised. The toolbox verifies signatures against the provider's published keys and needs RS256 / ES256 / PS256."
+      "Only symmetric ID token signing (HS*) is advertised. Open Admin verifies signatures against the provider's published keys and needs RS256 / ES256 / PS256."
     );
   }
 

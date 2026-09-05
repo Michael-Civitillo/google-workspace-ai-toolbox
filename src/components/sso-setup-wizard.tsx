@@ -635,7 +635,7 @@ function RegisterStep({
   return (
     <div className="space-y-4">
       <div>
-        <p className="text-sm font-semibold">Register the toolbox with {preset.label}</p>
+        <p className="text-sm font-semibold">Register Open Admin with {preset.label}</p>
         <Hint>
           Create a web application at the provider and give it the redirect URI
           below. Keep that tab open — the next step needs its client ID and
@@ -668,17 +668,17 @@ function RegisterStep({
 
       <div className="space-y-1.5">
         <Label htmlFor="sso-base-url" className="text-xs">
-          Toolbox base URL
+          Open Admin base URL
         </Label>
         <Input
           id="sso-base-url"
           value={form.baseUrl}
           onChange={(e) => onChange("baseUrl", e.target.value)}
-          placeholder="https://toolbox.example.com"
+          placeholder="https://admin.example.com"
           className="h-8 text-sm font-mono"
         />
         <Hint>
-          The address people open the toolbox at. Behind a reverse proxy, use the
+          The address people use to reach Open Admin. Behind a reverse proxy, use the
           public URL — the provider sends the browser back here.
         </Hint>
       </div>
@@ -912,7 +912,7 @@ function AccessStep({
         <p className="text-sm font-semibold">Who can sign in?</p>
         <Hint>
           The provider proves who someone is; this list decides whether they get
-          into the toolbox. Every account that gets in has full admin access.
+          into Open Admin. Every account that gets in has full admin access.
         </Hint>
       </div>
 

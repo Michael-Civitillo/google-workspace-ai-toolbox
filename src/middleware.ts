@@ -19,7 +19,7 @@ const PUBLIC_PATHS = new Set([
  *
  *   1. APP_PASSWORD must be set. If it isn't, the entire app refuses to serve
  *      anything except /login (which itself will tell the operator to set it).
- *      This means the toolbox can never be accidentally deployed wide-open.
+ *      This means Open Admin can never be accidentally deployed wide-open.
  *
  *   2. Authenticated session for every page and API route.
  *
@@ -61,7 +61,7 @@ export async function middleware(req: NextRequest) {
         NextResponse.json(
           {
             error:
-              "Server not configured: APP_PASSWORD is not set. The toolbox refuses to run mutating actions without it.",
+              "Server not configured: APP_PASSWORD is not set. Open Admin refuses to run mutating actions without it.",
           },
           { status: 503 }
         )

@@ -459,7 +459,7 @@ export default function TenantsPage() {
                               preflightByTenant[tenant.id]?.kind === "loading"
                             }
                             className="h-8 text-xs"
-                            title="Verify that every OAuth scope this toolbox needs is authorized in Domain-Wide Delegation"
+                            title="Verify that every OAuth scope Open Admin needs is authorized in Domain-Wide Delegation"
                           >
                             {preflightByTenant[tenant.id]?.kind === "loading" ? (
                               <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
@@ -561,7 +561,7 @@ export default function TenantsPage() {
         open={!!deleteTarget}
         onOpenChange={(o) => !saving && !o && setDeleteTarget(null)}
         title="Delete tenant"
-        summary="This only removes the tenant from the toolbox. It does NOT modify Google Workspace."
+        summary="This only removes the tenant from Open Admin. It does NOT modify Google Workspace."
         tenant={null}
         severity="medium"
         confirmLabel="Delete tenant"

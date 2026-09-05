@@ -111,10 +111,10 @@ function LoginInner() {
           <CardTitle>Sign in</CardTitle>
           <CardDescription>
             {showSso && showPassword
-              ? "Use your organization account, or the toolbox password."
+              ? "Use your organization account, or the Open Admin password."
               : showSso
               ? "Use your organization account to continue."
-              : "Enter the toolbox password to continue."}
+              : "Enter the Open Admin password to continue."}
           </CardDescription>
         </CardHeader>
         <CardContent>

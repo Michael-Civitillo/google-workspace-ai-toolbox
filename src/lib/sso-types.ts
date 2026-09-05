@@ -217,12 +217,12 @@ export const SSO_ERROR_MESSAGES: Record<string, string> = {
   idp_denied: "Sign-in was cancelled or denied by your identity provider.",
   idp_error: "Your identity provider returned an error. Please try again.",
   exchange_failed:
-    "The identity provider accepted your sign-in but the toolbox couldn't complete the handshake. Check the server log.",
+    "The identity provider accepted your sign-in but Open Admin couldn't complete the handshake. Check the server log.",
   discovery_failed:
-    "The toolbox couldn't reach your identity provider. Check the server log.",
+    "Open Admin couldn't reach your identity provider. Check the server log.",
   no_email: "Your identity provider didn't share an email address, so access can't be checked.",
   email_unverified: "Your identity provider reports this email address as unverified.",
   not_allowed:
-    "This account isn't allowed to use the toolbox. Ask an administrator to add your email or domain.",
+    "This account isn't allowed to use Open Admin. Ask an administrator to add your email or domain.",
   server_error: "Something went wrong on the server while signing you in.",
 };

@@ -655,16 +655,16 @@ export async function suspendUser(
   const { client, impersonatedAdmin } = getAdminClient(tenant);
   if (userEmail.toLowerCase() === impersonatedAdmin) {
     throw new Error(
-      "Refusing to suspend the admin this tool is impersonating — would lock the toolbox out."
+      "Refusing to suspend the admin this tool is impersonating — would lock Open Admin out."
     );
   }
   // `userKey` accepts aliases and resolves them to the same account, so resolve
   // the canonical primary email before suspending: an alias of the admin would
-  // otherwise slip past the string compare above and lock the toolbox out.
+  // otherwise slip past the string compare above and lock Open Admin out.
   const target = await getUser(tenant, userEmail);
   if (target.primaryEmail.toLowerCase() === impersonatedAdmin) {
     throw new Error(
-      "Refusing to suspend the admin this tool is impersonating — would lock the toolbox out."
+      "Refusing to suspend the admin this tool is impersonating — would lock Open Admin out."
     );
   }
   await withGoogleRetry(

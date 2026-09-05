@@ -525,8 +525,8 @@ export default function Offboarding() {
                     <AlertTriangle className="h-4 w-4 text-red-600" />
                     <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
                       This user is a <strong>super admin</strong>. Demote their
-                      admin role in the Google Admin Console first — the
-                      toolbox refuses to suspend an admin.
+                      admin role in the Google Admin Console first —
+                      Open Admin refuses to suspend an admin.
                     </AlertDescription>
                   </Alert>
                 )}

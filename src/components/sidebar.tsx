@@ -112,14 +112,14 @@ export function Sidebar() {
         <div className="flex items-center gap-3">
           <Image
             src="/logo.svg"
-            alt="GWS AI Toolbox"
+            alt="Google Workspace Open Admin"
             width={36}
             height={36}
             className="rounded-lg"
           />
           <div>
             <h1 className="text-sm font-semibold tracking-tight">
-              AI Toolbox
+              Open Admin
             </h1>
             <p className="text-xs text-muted-foreground">Google Workspace</p>
           </div>
