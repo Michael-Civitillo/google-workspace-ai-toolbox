@@ -3,9 +3,11 @@
  * End-to-end check of a built single-file executable.
  *
  * Starts the binary against a throwaway data folder and exercises the paths
- * that packaging can plausibly break: the auth gate, the CSRF host rule, the
- * static assets Next expects you to copy yourself, where state is written, the
- * warm restart, and the "already running" shortcut.
+ * that packaging can plausibly break: the auth gate, the CSRF host rule (own
+ * host, loopback spellings, and an operator-allow-listed public origin as a
+ * reverse proxy would present), the static assets Next expects you to copy
+ * yourself, where state is written, the warm restart, and the "already
+ * running" shortcut.
  *
  * Usage: node packaging/smoke.mjs [path-to-binary]
  */
@@ -16,16 +18,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packagingDir = path.dirname(fileURLToPath(import.meta.url));
-const defaultBinary = path.join(
-  packagingDir,
-  "dist",
-  process.platform === "win32" ? "OpenAdmin-win-x64.exe" : "open-admin"
-);
 
-const binary = path.resolve(process.argv[2] ?? defaultBinary);
+/** Mirrors the naming in build-bin.sh / build-exe.ps1. */
+function defaultBinaryName() {
+  if (process.platform === "win32") return "OpenAdmin-win-x64.exe";
+  const platform = process.platform === "darwin" ? "macos" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  return `open-admin-${platform}-${arch}`;
+}
+
+const binary = path.resolve(process.argv[2] ?? path.join(packagingDir, "dist", defaultBinaryName()));
 const PORT = Number(process.env.SMOKE_PORT ?? 3123);
 const PASSWORD = "smoke-test-password-123";
 const BASE = `http://localhost:${PORT}`;
+/** What a browser would send when reaching the app through a reverse proxy. */
+const PUBLIC_ORIGIN = "https://admin.example.test";
 
 let failures = 0;
 let checks = 0;
@@ -38,6 +45,10 @@ function check(name, condition, detail = "") {
     failures++;
     console.log(`  FAIL ${name}${detail ? ` - ${detail}` : ""}`);
   }
+}
+
+function skip(name, why) {
+  console.log(`  skip ${name} - ${why}`);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,7 +85,12 @@ function start(root, extraArgs = []) {
   const child = spawn(
     binary,
     ["--no-browser", "--port", String(PORT), "--password", PASSWORD, "--root", root, ...extraArgs],
-    { stdio: ["ignore", "pipe", "pipe"] }
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      // The launcher passes its environment through to the embedded server;
+      // this is how a tunnel or proxy deployment names its public URL.
+      env: { ...process.env, APP_ALLOWED_ORIGINS: PUBLIC_ORIGIN },
+    }
   );
   let output = "";
   child.stdout.on("data", (b) => (output += b.toString()));
@@ -85,6 +101,8 @@ function start(root, extraArgs = []) {
 async function stop(child, timeoutMs = 10_000) {
   if (child.exitCode !== null) return child.exitCode;
   const exited = new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+  // Windows has no signal delivery between processes: kill() terminates the
+  // process outright, so exit handlers never run there.
   child.kill(process.platform === "win32" ? undefined : "SIGINT");
   const result = await Promise.race([exited, sleep(timeoutMs).then(() => "timeout")]);
   if (result === "timeout") {
@@ -158,6 +176,24 @@ async function main() {
       `status ${numericOrigin.status}`
     );
 
+    const publicOrigin = await postJson(
+      "/api/auth/login",
+      { password: PASSWORD },
+      { origin: PUBLIC_ORIGIN }
+    );
+    check(
+      "login works from an allow-listed public origin (reverse proxy)",
+      publicOrigin.status === 200,
+      `status ${publicOrigin.status}`
+    );
+
+    const nearMiss = await postJson(
+      "/api/auth/login",
+      { password: PASSWORD },
+      { origin: `${PUBLIC_ORIGIN}:8443` }
+    );
+    check("a public origin on another port is still blocked", nearMiss.status === 403);
+
     const login = await postJson(
       "/api/auth/login",
       { password: PASSWORD },
@@ -230,11 +266,18 @@ async function main() {
 
     console.log("\nShutdown and warm restart");
     const exitCode = await stop(first.child);
-    check("stops on signal", exitCode !== "timeout", "did not exit within 10s");
-    check(
-      "the lock file is cleaned up",
-      !fs.existsSync(path.join(root, "data", "launcher.lock"))
-    );
+    check("stops when asked", exitCode !== "timeout", "did not exit within 10s");
+    if (process.platform === "win32") {
+      skip(
+        "the lock file is cleaned up",
+        "no graceful signal on Windows; a stale lock is detected and replaced on the next start"
+      );
+    } else {
+      check(
+        "the lock file is cleaned up",
+        !fs.existsSync(path.join(root, "data", "launcher.lock"))
+      );
+    }
 
     secondHandle = start(root);
     const warmStart = Date.now();

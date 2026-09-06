@@ -4,8 +4,9 @@ This folder turns Open Admin into one executable a Workspace admin can
 download and double-click. No Node.js, no `npm install`, no `gws` CLI on the
 target machine — the runtime and the whole application are inside the file.
 
-Users don't need anything here. Point them at the release: **[Windows download
-and run](../README.md#-windows-download-and-run)**.
+Users don't need anything here. Point them at the release: **[Single file:
+download and run](../README.md#single-file-download-and-run)**, which covers
+Windows, macOS and Linux.
 
 ## What gets built
 
@@ -14,7 +15,11 @@ and run](../README.md#-windows-download-and-run)**.
 | `dist/payload.zip` | ~6 MB | The `next build` standalone output plus `public/` and `.next/static` |
 | `dist/sea-prep.blob` | ~6 MB | The bundled launcher plus that archive, as a Node single-executable blob |
 | `dist/OpenAdmin-win-x64.exe` | ~93 MB | `node.exe` with the blob injected, icon and version stamped |
-| `dist/open-admin` | ~125 MB | Same thing for Linux/macOS, used by CI to test the pipeline |
+| `dist/open-admin-linux-x64` | ~125 MB | The Linux runtime with the blob injected |
+| `dist/open-admin-macos-arm64` | ~110 MB | The macOS runtime with the blob injected, ad-hoc signed |
+
+Each binary gets a `<name>.sha256` beside it. The release workflow builds all
+three on their own operating systems and smoke-tests each before publishing.
 
 ## Build it
 
@@ -24,7 +29,7 @@ Everything runs from the repository root.
 npm ci
 npm run package        # next build -> payload.zip -> sea-prep.blob
 npm run package:exe    # Windows: assemble OpenAdmin-win-x64.exe
-npm run package:bin    # Linux/macOS: assemble ./packaging/dist/open-admin
+npm run package:bin    # Linux/macOS: assemble dist/open-admin-<os>-<cpu>
 npm run package:smoke  # start the built binary and check it end to end
 ```
 
@@ -70,11 +75,13 @@ keeps tenants, sign-on config, the audit log and imported keys.
 
 **1. The bind address decides which URL works.** In a standalone build Next
 treats the address it bound as the canonical host, and the app's CSRF check
-compares the browser's `Origin` against it. Bind `0.0.0.0` and *every*
-mutating request is rejected with 403. The launcher binds `127.0.0.1` and
-advertises `http://localhost:<port>` — which is also what makes the `Secure`
-session cookie work over plain HTTP, since browsers treat `localhost` as a
-trustworthy origin. This applies to `next start` too, not just the exe.
+compares the browser's `Origin` against it. Anything that isn't the local
+machine — a LAN address, a public hostname through a tunnel — is rejected with
+403 unless the operator lists it in `APP_ALLOWED_ORIGINS`. The launcher binds
+`127.0.0.1` and advertises `http://localhost:<port>` — which is also what makes
+the `Secure` session cookie work over plain HTTP, since browsers treat
+`localhost` as a trustworthy origin. This applies to `next start` too, not
+just the exe; see `docs/DEPLOY-CLOUDFLARE.md`.
 
 **2. `next build` does not copy everything.** The standalone output leaves out
 `public/` and `.next/static`; `build-payload.mjs` copies both. Forget them and
@@ -95,7 +102,7 @@ against a real single-executable build. Don't "fix" `slice(2)` to `slice(1)`.
 | `build-bin.sh` | Linux/macOS equivalent, without the resource stamping |
 | `stamp-exe.mjs` | Icon and version resource, via `resedit` (pure JS, no native tool) |
 | `make-icon.mjs` | `public/logo.svg` → `assets/icon.ico` |
-| `smoke.mjs` | End-to-end test of a built binary (25 checks) |
+| `smoke.mjs` | End-to-end test of a built binary (27 checks, one Windows-only skip) |
 | `launcher/src/` | The launcher itself — see below |
 | `launcher/test/` | `node --test` suites for the pure parts |
 
@@ -139,10 +146,11 @@ Bump `version` in `package.json`, commit, then push a tag:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-`.github/workflows/release-windows.yml` builds the Linux binary and runs the
-launcher tests and smoke test first, then builds, smoke-tests and publishes the
-Windows executable with its `SHA256SUMS.txt`. `workflow_dispatch` runs the same
-pipeline without publishing.
+`.github/workflows/release.yml` runs the Linux job first (lint, launcher unit
+tests, build, smoke test), then the macOS and Windows builds and a Docker image
+build in parallel — each executable smoke-tested on its own OS, the image probed
+as a running container — and finally publishes every binary with its `.sha256`
+to the release. `workflow_dispatch` runs the same pipeline without publishing.
 
 Design rationale, alternatives considered, and the measurements behind these
 choices: [`docs/WINDOWS-SINGLE-EXE-ARCHITECTURE.md`](../docs/WINDOWS-SINGLE-EXE-ARCHITECTURE.md).

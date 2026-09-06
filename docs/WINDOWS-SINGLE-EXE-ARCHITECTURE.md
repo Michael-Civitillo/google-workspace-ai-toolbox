@@ -609,7 +609,7 @@ Release procedure: bump `version` in `package.json`, commit, `git tag v0.2.0`, p
 
 ## 12. Known limitations and follow-ups
 
-- **LAN or team use.** The standalone server makes the bind hostname the canonical host (C2), so serving colleagues would require `--host <machine-name>` and everyone browsing exactly that name; `0.0.0.0` never works. The clean fix is a custom server entry that calls Next's `startServer` with `hostname: undefined` (trusting the `Host` header) plus an `APP_ALLOWED_HOSTS` allowlist in the middleware. Out of scope for v1; the existing `npm start` behind a reverse proxy remains the team deployment.
+- **LAN or team use** — *resolved after this was written.* The standalone server makes the bind hostname the canonical host (C2), so anything other than the local machine failed the CSRF check. `APP_ALLOWED_ORIGINS` (a comma-separated allowlist of public origins, compared exactly) lets the operator name the URL people type, and a `0.0.0.0` bind is treated as local for loopback origins so plain Docker port-mapping works. The team deployment is documented in [`DEPLOY-CLOUDFLARE.md`](DEPLOY-CLOUDFLARE.md): any of the three run modes behind a Cloudflare Tunnel with Access in front.
 - **Hashed admin password.** Would need `APP_PASSWORD_HASH` support in `src/lib/auth.ts` (scrypt or argon2 via Web Crypto is not available; `node:crypto` scrypt is fine in API routes but `middleware.ts` only checks the signed session, so the hash would be verified only in the login route).
 - **HTTP proxies.** `googleapis` honours `HTTPS_PROXY`; global `fetch` (AI SDK, `openid-client`) does not by default. Node 24 adds `NODE_USE_ENV_PROXY=1`; when the embedded Node moves to 24, have the launcher set it. Verify whether Node 22.x has the backport before relying on it.
 - **Windowless mode and tray icon.** Keep the console for v1: it is the stop button and the log. A later `--tray` mode needs a small native helper or a WebView shell (Tauri), and is the natural point to revisit the "desktop shell" option.
@@ -799,6 +799,8 @@ found by building the thing and running it.
 | Linux binary ≈ 134.8 MB | 125 MB, same arithmetic against a slightly different runtime. The Windows executable should land near 93 MB. |
 | `rcedit` for icon and version (§5, §7.3) | `rcedit` is deprecated. Uses [`resedit`](https://github.com/jet2jet/resedit-js) instead, driven by `packaging/stamp-exe.mjs` — pure JS, so it needs no native tool and runs on any build host. |
 | `outputFileTracingExcludes` "was not tested" (§6.2) | Tested, and load-bearing: it is what keeps `src/`, `docs/` and `scripts/` out of the payload. |
+| One shared `SHA256SUMS.txt` (§1, §7.3, §9) | One `<binary>.sha256` per file: each download's hash sits next to it, and three OS jobs don't have to merge into one list. |
+| Windows-only release; workflow `release-windows.yml` (§1, §9) | Linux x64 and macOS arm64 binaries are built, smoke-tested on their own runners and published alongside, named `open-admin-<os>-<cpu>`; the workflow is `release.yml` and also builds and probes the Docker image. |
 | Repository layout (§5) | Matches, with `rcedit.mjs` → `stamp-exe.mjs`, plus `packaging/package.json` and `packaging/tsconfig.json` (see below). |
 
 **Additions the plan did not call for.**
@@ -847,6 +849,13 @@ on plain-HTTP localhost in Edge and Firefox. The CI workflow asserts what it can
 — size, absence of an invalid signature, product version — and then runs the
 full smoke test on the executable.
 
-**Not built, still open.** §12 stands unchanged: LAN/team serving, a hashed
-admin password, `HTTPS_PROXY` for `fetch`, a tray or windowless mode,
-auto-update, and macOS/Linux releases.
+**Built since, in a follow-up review:** `APP_ALLOWED_ORIGINS` for reverse
+proxies (the review found that `npm start` behind *any* proxy refused every
+POST with 403 — a pre-existing bug that the README's own "run behind HTTPS"
+advice walked straight into), relative redirects on the two OIDC error paths
+that built absolute URLs from the internal request, a `Dockerfile`, a Cloudflare
+Tunnel + Access deployment guide with a Compose file, and Linux and macOS
+binaries published from the same pipeline.
+
+**Not built, still open:** a hashed admin password, `HTTPS_PROXY` for `fetch`,
+a tray or windowless mode, auto-update, Intel macOS binaries.

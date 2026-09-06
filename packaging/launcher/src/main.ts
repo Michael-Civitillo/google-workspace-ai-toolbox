@@ -187,8 +187,9 @@ async function run(userArgs: string[]): Promise<number | null> {
   if (host !== DEFAULT_HOST) {
     warn(
       `Binding ${host} instead of loopback. Anyone who can reach this machine on ` +
-        `the network can reach the app, over plain HTTP. Browsers must use exactly ` +
-        `"${host}" in the address bar.`
+        `the network can reach the app, over plain HTTP. Add the URL people will ` +
+        `type to APP_ALLOWED_ORIGINS in launcher.env, or every sign-in is refused ` +
+        `as cross-origin.`
     );
   }
 

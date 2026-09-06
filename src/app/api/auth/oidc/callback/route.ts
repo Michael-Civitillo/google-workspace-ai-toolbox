@@ -40,12 +40,21 @@ function html(markup: string): NextResponse {
   });
 }
 
-function loginError(req: NextRequest, code: string): NextResponse {
-  const url = new URL("/login", req.url);
-  url.searchParams.set("sso_error", code);
-  const res = NextResponse.redirect(url, 302);
-  res.headers.set("cache-control", "no-store");
-  return res;
+/**
+ * Bounce to the login page with an error code.
+ *
+ * The Location is deliberately relative. `req.url` here is the address this
+ * server bound - localhost, or 0.0.0.0 in a container - not the URL the
+ * browser used, so an absolute redirect built from it would send anyone behind
+ * a reverse proxy (Cloudflare Tunnel, nginx) to a host that doesn't exist for
+ * them. Browsers resolve a relative Location against the page they asked for.
+ */
+function loginError(code: string): NextResponse {
+  const params = new URLSearchParams({ sso_error: code });
+  return new NextResponse(null, {
+    status: 302,
+    headers: { location: `/login?${params}`, "cache-control": "no-store" },
+  });
 }
 
 /** The handshake cookie is single-use: drop it on every outcome. */
@@ -62,7 +71,7 @@ function testPage(result: Omit<SsoTestResult, "type">): NextResponse {
 }
 
 export async function GET(req: NextRequest) {
-  if (!authConfigured()) return loginError(req, "server_error");
+  if (!authConfigured()) return loginError("server_error");
 
   const handshake = await parseHandshake(
     req.cookies.get(HANDSHAKE_COOKIE_NAME)?.value
@@ -70,7 +79,7 @@ export async function GET(req: NextRequest) {
   if (!handshake) {
     // No (or expired) handshake: we can't even tell which mode this was, so
     // the login page's generic "try again" is the best available answer.
-    return clearHandshake(loginError(req, "session_expired"));
+    return clearHandshake(loginError("session_expired"));
   }
   const mode: OidcMode = handshake.mode;
 
@@ -87,7 +96,7 @@ export async function GET(req: NextRequest) {
             message: "Could not read the single sign-on configuration",
             detail: e instanceof Error ? e.message : String(e),
           })
-        : loginError(req, "server_error")
+        : loginError("server_error")
     );
   }
   if (!cfg) {
@@ -98,11 +107,11 @@ export async function GET(req: NextRequest) {
             code: "not_configured",
             message: "Single sign-on is no longer configured",
           })
-        : loginError(req, "not_configured")
+        : loginError("not_configured")
     );
   }
   if (mode === "login" && !ssoLoginAvailable(cfg)) {
-    return clearHandshake(loginError(req, "disabled"));
+    return clearHandshake(loginError("disabled"));
   }
 
   const auditAction = mode === "test" ? "auth.sso_test" : "auth.sso_login";
@@ -239,5 +248,5 @@ export async function GET(req: NextRequest) {
       })
     );
   }
-  return clearHandshake(loginError(req, failure.code));
+  return clearHandshake(loginError(failure.code));
 }

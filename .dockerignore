@@ -1,0 +1,20 @@
+# Build inputs only. Anything else would either bloat the context or - worse -
+# bake local state and secrets into the image.
+node_modules
+.next
+packaging/dist
+.git
+.github
+docs
+deploy
+*.md
+
+# Local state: never ship a tenants file, sign-on config, audit log or keys.
+.env
+.env.*
+!.env.example
+tenants.json*
+sso.json*
+app-config.json*
+audit.log
+credentials

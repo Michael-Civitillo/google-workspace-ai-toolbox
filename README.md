@@ -96,46 +96,61 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 </details>
 
-## 🪟 Windows: download and run
+## ⬇️ Pick how you want to run it
 
-Don't want to install Node, clone a repo, or set environment variables? Grab
-the single file.
+Same app, same features. Choose what suits you and the machine it's on:
 
-1. Download **`OpenAdmin-win-x64.exe`** from the [latest release](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest).
-2. Double-click it. Windows may show a "Windows protected your PC" screen for a
-   new download — click **More info → Run anyway**. (Verify the download first
-   if you like: `Get-FileHash .\OpenAdmin-win-x64.exe` should match
-   `SHA256SUMS.txt` on the release page.)
-3. Choose a password when it asks. That's the password for the web interface.
-4. Your browser opens at `http://localhost:3000`. Sign in and you're in. 🎉
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| **Single file, nothing to install** | ✅ `OpenAdmin-win-x64.exe` | ✅ `open-admin-macos-arm64` (Apple silicon) | ✅ `open-admin-linux-x64` |
+| **From source** — `npm run dev` / `npm start` | ✅ | ✅ | ✅ |
+| **Docker** — `Dockerfile` in the repo | ✅ Docker Desktop | ✅ Docker Desktop | ✅ |
+| **For a team, behind Cloudflare Tunnel + Access** | any of the above → [deployment guide](docs/DEPLOY-CLOUDFLARE.md) | | |
 
-Everything is inside that one file — the runtime, the app, the lot. No Node.js,
-no `npm install`, no `gws` CLI. It serves on **this machine only**: the server
-listens on loopback, so nothing is exposed to your network and Windows Firewall
-never prompts.
+Your configuration moves between all of them: **App Settings → Configuration backup** exports tenants, single sign-on and the service-account keys as one file, and restores it anywhere. Intel Macs: run from source or Docker for now.
 
-You still need a **service account with domain-wide delegation** before you can
-run operations against your tenant — the app walks you through it on first
-launch. See [Auth setup](#-auth-setup-the-important-part) below.
+### Single file: download and run
 
-**Where things live.** Your configuration — tenants, single sign-on, the audit
-log, and any service-account keys restored from a backup — is in
-`%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data`. The app itself unpacks to
-`...\app\<version>` and is disposable.
+Grab the file for your OS from the [latest release](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest). Each has a `.sha256` next to it if you want to verify the download.
 
-**Upgrading.** Download the new exe and run it. Your configuration is untouched
-and the old copy of the app is cleaned up.
+**Windows** — double-click `OpenAdmin-win-x64.exe`. Windows may show "Windows protected your PC" for a new download: click **More info → Run anyway**.
 
-**Uninstalling.** Delete the exe and the `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin`
-folder.
+**macOS** (Apple silicon) — in Terminal:
 
-**Stopping it.** Press Ctrl+C in the console window, or just close it.
+```bash
+chmod +x ~/Downloads/open-admin-macos-arm64
+xattr -d com.apple.quarantine ~/Downloads/open-admin-macos-arm64
+~/Downloads/open-admin-macos-arm64
+```
+
+The build is signed ad hoc rather than notarised, so without the `xattr` line macOS refuses it ("Apple could not verify…"). Allowing it under **System Settings → Privacy & Security → Open Anyway** works too.
+
+**Linux** (x86-64) —
+
+```bash
+chmod +x ~/Downloads/open-admin-linux-x64
+~/Downloads/open-admin-linux-x64
+```
+
+Then, on every OS: choose a password when asked, and your browser opens at `http://localhost:3000`. Sign in and you're in. 🎉
+
+Everything is inside that one file — the runtime, the app, the lot. No Node.js, no `npm install`, no `gws` CLI. It serves **this machine only**: the server listens on loopback, so nothing is exposed to your network and no firewall prompts. You still need a **service account with domain-wide delegation** before you can run operations — the app walks you through it on first launch ([Auth setup](#-auth-setup-the-important-part)).
+
+**Where things live**
+
+| | The app (disposable, replaced on upgrade) | Your data |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\app\` | `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data\` |
+| macOS | `~/Library/Application Support/GoogleWorkspaceOpenAdmin/app/` | `…/GoogleWorkspaceOpenAdmin/data/` |
+| Linux | `~/.local/share/GoogleWorkspaceOpenAdmin/app/` | `…/GoogleWorkspaceOpenAdmin/data/` |
+
+**Upgrading:** download the new file and run it — your data is untouched and the old copy of the app is cleaned up. **Uninstalling:** delete the file and the `GoogleWorkspaceOpenAdmin` folder. **Stopping:** Ctrl+C in the console, or close it.
 
 <details>
-<summary>Command-line options</summary>
+<summary>Command-line options and extras</summary>
 
 ```
-OpenAdmin-win-x64.exe [options]
+open-admin [options]
 
   --port <n>           HTTP port (default 3000, remembered after first use)
   --host <addr>        bind address (default 127.0.0.1 — this machine only)
@@ -149,25 +164,33 @@ OpenAdmin-win-x64.exe [options]
   --help, -h           show this help
 ```
 
-**Portable mode.** Create an empty file called `portable.txt` next to the exe
-and it keeps everything beside itself instead of in your user profile — handy
-for a USB stick or a locked-down machine.
+**Portable mode.** Create an empty file called `portable.txt` next to the executable and it keeps everything beside itself instead of in your user profile — handy for a USB stick or a locked-down machine.
 
-**Extra settings.** Optional keys like a Gemini API key can go in a
-`launcher.env` file in the data folder (`KEY=value`, one per line), so you never
-have to touch Windows environment variables. Real environment variables win over
-that file.
+**Extra settings.** Optional keys like a Gemini API key can go in a `launcher.env` file in the data folder (`KEY=value`, one per line), so you never touch system environment variables. Real environment variables win over that file. This is also where `APP_ALLOWED_ORIGINS` goes if you put the single-file build behind a [Cloudflare Tunnel](docs/DEPLOY-CLOUDFLARE.md).
 
-**Changing the port** changes the sign-in URL, so update the redirect URI in
-your identity provider if you use single sign-on.
+**Changing the port** changes the sign-in URL, so update the redirect URI in your identity provider if you use single sign-on.
 
 </details>
 
-Building the exe yourself, or wondering how it works: [`packaging/README.md`](packaging/README.md).
+Building it yourself, or wondering how it works: [`packaging/README.md`](packaging/README.md).
+
+### Docker
+
+```bash
+docker build -t open-admin .
+docker run -d --name open-admin -p 3000:3000 -v open-admin-data:/data \
+  -e APP_PASSWORD='something-long-and-random' open-admin
+```
+
+Open [http://localhost:3000](http://localhost:3000). State lives in the `open-admin-data` volume. To serve it under a real hostname, set `APP_ALLOWED_ORIGINS=https://admin.example.com` and put a proxy in front — the [Cloudflare guide](docs/DEPLOY-CLOUDFLARE.md) ships a ready-made Compose file with `cloudflared` alongside.
+
+### From source
+
+Everything below. Same commands on Windows, macOS and Linux.
 
 ## 🚀 Getting started
 
-Running from source — for development, non-Windows machines, or serving a team.
+For development, or when you'd rather have the code in front of you.
 
 You'll need:
 - Node.js 20+
@@ -276,6 +299,8 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | `GOOGLE_WORKSPACE_ADMIN_EMAIL` | ✅ for Admin SDK ops | Subject for service account impersonation. |
 | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | ⚠️ if not using per-tenant config | Path to service account JSON. |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | ⚠️ for AI features | Gemini API key. |
+| `APP_ALLOWED_ORIGINS` | ✅ behind a proxy | Comma-separated public origin(s) browsers use, e.g. `https://admin.example.com`. Behind Cloudflare Tunnel, nginx or Docker with a hostname the browser's `Origin` is the public URL while the server only knows the address it bound — without this every mutating request is refused (403). |
+| `TRUSTED_PROXY` | optional | Set to `true` when nothing but a trusted proxy can reach the app; per-address login rate limiting then reads `X-Forwarded-For`. |
 | `OPEN_ADMIN_DATA_DIR` | optional | Where `tenants.json`, `app-config.json`, `sso.json`, `audit.log` and imported keys are kept (defaults to the working directory). The packaged Windows build sets this to your user profile. |
 | `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
@@ -286,13 +311,12 @@ State configured in the UI lives next to `tenants.json`: `sso.json` (single sign
 
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
 
-> **Running the standalone build directly?** `next build` emits
-> `.next/standalone`; if you run its `server.js` yourself (in Docker, say), set
-> `HOSTNAME` to the host users will actually type. In standalone mode Next
-> treats the bound address as the canonical host and the CSRF check compares
-> the browser's `Origin` against it — leave `HOSTNAME` at its `0.0.0.0` default
-> and every mutating request is rejected with 403. `npm start` and the packaged
-> exe handle this for you.
+> **Behind a reverse proxy?** Set `APP_ALLOWED_ORIGINS` to the URL people type
+> (`https://admin.example.com`). The CSRF check compares the browser's `Origin`
+> against the address the server bound, which behind a proxy is never the
+> public name — so without it every POST, sign-in included, is refused with 403.
+> Step-by-step for Cloudflare Tunnel + Access, including a Docker Compose file:
+> [docs/DEPLOY-CLOUDFLARE.md](docs/DEPLOY-CLOUDFLARE.md).
 
 ## 🔑 Single sign-on (OIDC)
 

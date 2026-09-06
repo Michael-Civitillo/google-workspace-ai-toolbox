@@ -1,0 +1,40 @@
+# Google Workspace Open Admin behind a Cloudflare Tunnel.
+#
+#   cp .env.example .env     # then fill it in
+#   docker compose up -d --build
+#
+# The app container has no published ports: the only way in is through the
+# tunnel, and Cloudflare Access decides who gets through the tunnel. Full
+# walkthrough in docs/DEPLOY-CLOUDFLARE.md.
+name: open-admin
+
+services:
+  app:
+    build:
+      context: ../..
+    image: open-admin:local
+    restart: unless-stopped
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:?Set APP_SESSION_SECRET in .env (openssl rand -hex 32)}
+      # The URL people type. Without it every sign-in is refused as cross-origin.
+      APP_ALLOWED_ORIGINS: https://${PUBLIC_HOSTNAME:?Set PUBLIC_HOSTNAME in .env}
+      # Only cloudflared can reach this container, so X-Forwarded-For is honest
+      # and per-address login rate limiting works.
+      TRUSTED_PROXY: "true"
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+    volumes:
+      - data:/data
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      - app
+
+volumes:
+  data:
