@@ -1,14 +1,16 @@
 import { appendFileSync, chmodSync, statSync } from "fs";
 import path from "path";
+import { dataPath } from "./data-dir";
 
 /**
  * Resolve the audit log path once at module load. We prefer an explicit env
  * var so a systemd-managed deployment never writes audit entries somewhere
  * unexpected if cwd changes (e.g. service restart in /). Falls back to
- * <cwd>/audit.log for local dev.
+ * audit.log in the data directory — the working directory for a normal
+ * install, a per-user folder for the packaged desktop build (see data-dir.ts).
  */
 export const AUDIT_LOG_PATH = path.resolve(
-  process.env.AUDIT_LOG_PATH || path.join(process.cwd(), "audit.log")
+  process.env.AUDIT_LOG_PATH || dataPath("audit.log")
 );
 
 // Re-tighten file permissions at module load: `appendFileSync` only applies

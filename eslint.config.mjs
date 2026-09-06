@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Packaging tooling: not a Next.js surface, and it has its own tsconfig
+    // and node --test suite (npm run test:launcher).
+    "packaging/**",
   ]),
 ]);
 

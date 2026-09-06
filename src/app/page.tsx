@@ -28,6 +28,8 @@ interface GwsStatus {
   installed: boolean;
   version?: string;
   authenticated: boolean;
+  /** True in the packaged desktop build, where the gws CLI is optional. */
+  packaged?: boolean;
 }
 
 interface TenantsListPayload {
@@ -154,6 +156,9 @@ export default function Dashboard() {
   }, []);
 
   const showFirstRunBanner = !loading && tenantCount === 0;
+  // The packaged desktop build talks to Google through the googleapis SDK and
+  // never needs the gws CLI, so report its absence as a neutral fact.
+  const cliOptional = !!status?.packaged;
 
   return (
     <>
@@ -196,7 +201,9 @@ export default function Dashboard() {
         <CardContent className="pt-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <h3 className="text-sm font-medium">CLI Status</h3>
+              <h3 className="text-sm font-medium">
+                CLI Status{cliOptional ? " (optional)" : ""}
+              </h3>
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
               ) : (
@@ -205,11 +212,17 @@ export default function Dashboard() {
                     {status?.installed ? (
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                     ) : (
-                      <XCircle className="h-4 w-4 text-red-500" />
+                      <XCircle
+                        className={`h-4 w-4 ${
+                          cliOptional ? "text-muted-foreground" : "text-red-500"
+                        }`}
+                      />
                     )}
                     <span className="text-sm">
                       {status?.installed
                         ? `gws ${status.version || ""}`
+                        : cliOptional
+                        ? "gws not installed — not needed in this build"
                         : "gws not installed"}
                     </span>
                   </div>
@@ -220,6 +233,10 @@ export default function Dashboard() {
                         className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
                       >
                         Authenticated
+                      </Badge>
+                    ) : cliOptional ? (
+                      <Badge variant="outline" className="text-muted-foreground">
+                        Optional
                       </Badge>
                     ) : (
                       <Badge
@@ -233,7 +250,7 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
-            {!loading && (!status?.installed || !status?.authenticated) && (
+            {!loading && !cliOptional && (!status?.installed || !status?.authenticated) && (
               <Link
                 href="/setup"
                 className="text-sm font-medium text-primary underline underline-offset-4 hover:no-underline"

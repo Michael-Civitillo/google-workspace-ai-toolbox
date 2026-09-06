@@ -1,5 +1,5 @@
-import path from "path";
 import type { Tenant, PublicTenant } from "./tenant-types";
+import { dataPath } from "./data-dir";
 import { ValidationError } from "./validate";
 import {
   readJsonObjectFile,
@@ -23,7 +23,7 @@ interface TenantStore {
   tenants: Tenant[];
 }
 
-const STORE_PATH = path.join(process.cwd(), "tenants.json");
+const STORE_PATH = dataPath("tenants.json");
 
 function readStore(): TenantStore {
   // Corruption-safe read: missing/empty/corrupt files come back as null (the

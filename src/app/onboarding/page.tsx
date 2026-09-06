@@ -88,6 +88,8 @@ interface GwsStatus {
   authenticated: boolean;
   bin?: string;
   error?: string;
+  /** True in the packaged desktop build, where the gws CLI is optional. */
+  packaged?: boolean;
 }
 
 interface TenantForm {
@@ -365,7 +367,11 @@ export default function OnboardingPage() {
         />
 
         {activeStep === "welcome" && (
-          <WelcomeStep tenantCount={tenantCount} onSkip={finishOnboarding} />
+          <WelcomeStep
+            tenantCount={tenantCount}
+            onSkip={finishOnboarding}
+            packaged={!!status?.packaged}
+          />
         )}
 
         {activeStep === "install" && (
@@ -529,9 +535,11 @@ function Stepper({
 function WelcomeStep({
   tenantCount,
   onSkip,
+  packaged,
 }: {
   tenantCount: number;
   onSkip: () => void;
+  packaged: boolean;
 }) {
   return (
     <Card>
@@ -550,17 +558,32 @@ function WelcomeStep({
       </CardHeader>
       <CardContent className="space-y-5">
         <p className="text-sm text-muted-foreground">
-          To run admin operations, Open Admin needs three things: the{" "}
-          <code className="font-mono bg-muted px-1 rounded">gws</code> CLI,
-          a Google Cloud service account with domain-wide delegation, and a
-          <em> tenant</em> entry that points at your service account JSON.
+          {packaged ? (
+            <>
+              To run admin operations, Open Admin needs two things: a Google
+              Cloud service account with domain-wide delegation, and a
+              <em> tenant</em> entry that points at your service account JSON.
+              This build bundles everything else.
+            </>
+          ) : (
+            <>
+              To run admin operations, Open Admin needs three things: the{" "}
+              <code className="font-mono bg-muted px-1 rounded">gws</code> CLI,
+              a Google Cloud service account with domain-wide delegation, and a
+              <em> tenant</em> entry that points at your service account JSON.
+            </>
+          )}
         </p>
 
         <div className="grid sm:grid-cols-3 gap-3">
           <PrereqCard
             icon={Terminal}
             title="gws CLI"
-            description="Google's official Workspace CLI, installed on this machine."
+            description={
+              packaged
+                ? "Optional in this build — install it only for terminal use."
+                : "Google's official Workspace CLI, installed on this machine."
+            }
             tone="blue"
           />
           <PrereqCard
@@ -764,19 +787,32 @@ function InstallStep({
   onRefresh: () => void;
 }) {
   const installed = !!status?.installed;
+  const packaged = !!status?.packaged;
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-lg flex items-center gap-2">
           <Terminal className="h-5 w-5" />
-          Install the gws CLI
+          {packaged ? "Install the gws CLI (optional)" : "Install the gws CLI"}
         </CardTitle>
         <CardDescription>
-          Pick your platform and run the install command. Open Admin shells out to
-          this CLI for everything that isn&apos;t a direct Google API call.
+          {packaged
+            ? "Nothing to do here — this build runs every Workspace operation through Google's APIs. Install the CLI only if you also want it in your terminal."
+            : "Pick your platform and run the install command. Open Admin shells out to this CLI for everything that isn't a direct Google API call."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
+        {packaged && (
+          <div className="rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40 p-3 text-xs text-emerald-900 dark:text-emerald-200">
+            <p className="font-semibold">You can skip this step.</p>
+            <p className="mt-0.5">
+              The desktop build bundles its own runtime and authenticates with
+              the service account you configure in the next steps. Click{" "}
+              <strong>Continue</strong>.
+            </p>
+          </div>
+        )}
+
         <Tabs defaultValue="mac">
           <TabsList>
             <TabsTrigger value="mac">macOS</TabsTrigger>
@@ -1263,6 +1299,7 @@ function VerifyStep({
   scopePreflight: PreflightState | null;
   onScopeCheck: () => void;
 }) {
+  const packaged = !!status?.packaged;
   return (
     <Card>
       <CardHeader>
@@ -1271,17 +1308,34 @@ function VerifyStep({
           Verify and finish
         </CardTitle>
         <CardDescription>
-          One last sanity check that Open Admin can talk to{" "}
-          <strong>{tenantName}</strong> via the gws CLI.
+          {packaged ? (
+            <>
+              One last sanity check that Open Admin can talk to{" "}
+              <strong>{tenantName}</strong> with the service account you
+              configured.
+            </>
+          ) : (
+            <>
+              One last sanity check that Open Admin can talk to{" "}
+              <strong>{tenantName}</strong> via the gws CLI.
+            </>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
         <div className="rounded-lg border p-4 space-y-3">
           <StatusRow
-            label="gws CLI installed"
+            label={packaged ? "gws CLI (optional)" : "gws CLI installed"}
             ok={!!status?.installed}
+            optional={packaged}
             loading={loading}
-            detail={status?.installed ? `v${status?.version}` : "Not detected"}
+            detail={
+              status?.installed
+                ? `v${status?.version}`
+                : packaged
+                ? "Not needed"
+                : "Not detected"
+            }
           />
           <StatusRow
             label="Tenant configured"
@@ -1291,26 +1345,28 @@ function VerifyStep({
           />
         </div>
 
-        <div className="flex items-center gap-3">
-          <Button onClick={onVerify} disabled={verifying} variant="outline">
-            {verifying ? (
-              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-            ) : null}
-            {verifying ? "Running check..." : "Run connection check"}
-          </Button>
-          {result?.ok && (
-            <span className="text-sm text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1.5">
-              <CheckCircle2 className="h-4 w-4" />
-              CLI responded — gws v{result.version}
-            </span>
-          )}
-          {result && !result.ok && (
-            <span className="text-sm text-red-600 dark:text-red-400 inline-flex items-center gap-1.5">
-              <XCircle className="h-4 w-4" />
-              {result.message}
-            </span>
-          )}
-        </div>
+        {!packaged && (
+          <div className="flex items-center gap-3">
+            <Button onClick={onVerify} disabled={verifying} variant="outline">
+              {verifying ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : null}
+              {verifying ? "Running check..." : "Run connection check"}
+            </Button>
+            {result?.ok && (
+              <span className="text-sm text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1.5">
+                <CheckCircle2 className="h-4 w-4" />
+                CLI responded — gws v{result.version}
+              </span>
+            )}
+            {result && !result.ok && (
+              <span className="text-sm text-red-600 dark:text-red-400 inline-flex items-center gap-1.5">
+                <XCircle className="h-4 w-4" />
+                {result.message}
+              </span>
+            )}
+          </div>
+        )}
 
         {tenantId && (
           <div className="rounded-lg border p-4 space-y-3">
@@ -1395,11 +1451,14 @@ function StatusRow({
   ok,
   loading,
   detail,
+  optional = false,
 }: {
   label: string;
   ok: boolean;
   loading: boolean;
   detail: string;
+  /** Render a not-ok row as a neutral fact rather than a failure. */
+  optional?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between">
@@ -1409,7 +1468,11 @@ function StatusRow({
         ) : ok ? (
           <CheckCircle2 className="h-4 w-4 text-emerald-500" />
         ) : (
-          <XCircle className="h-4 w-4 text-red-500" />
+          <XCircle
+            className={`h-4 w-4 ${
+              optional ? "text-muted-foreground" : "text-red-500"
+            }`}
+          />
         )}
         <span className="text-sm">{label}</span>
       </div>

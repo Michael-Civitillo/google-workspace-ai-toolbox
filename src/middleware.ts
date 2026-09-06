@@ -95,24 +95,26 @@ export async function middleware(req: NextRequest) {
   }
 
   // CSRF: same-origin check on mutating API calls. Compare the Origin /
-  // Referer host against the *canonical* request host (req.nextUrl.host),
-  // which Next.js derives from the deployment's URL — not the client-supplied
-  // Host header, which is trivially spoofable behind a misconfigured proxy.
+  // Referer against the *canonical* request host (req.nextUrl.host), which
+  // Next.js derives from the address it bound — not the client-supplied Host
+  // header, which is trivially spoofable behind a misconfigured proxy. Behind
+  // a *correctly* configured proxy the public URL is unknowable from the
+  // request, so the operator names it in APP_ALLOWED_ORIGINS instead.
   if (isApi && isMutating) {
     const expectedHost = req.nextUrl.host;
     const origin = req.headers.get("origin");
     const referer = req.headers.get("referer");
 
     if (origin) {
-      let originHost: string;
+      let originUrl: URL;
       try {
-        originHost = new URL(origin).host;
+        originUrl = new URL(origin);
       } catch {
         return withSecurityHeaders(
           NextResponse.json({ error: "Invalid Origin header" }, { status: 400 })
         );
       }
-      if (originHost !== expectedHost) {
+      if (!isAllowedOrigin(expectedHost, originUrl)) {
         return withSecurityHeaders(
           NextResponse.json(
             { error: "Cross-origin request blocked" },
@@ -121,15 +123,15 @@ export async function middleware(req: NextRequest) {
         );
       }
     } else if (referer) {
-      let refererHost: string;
+      let refererUrl: URL;
       try {
-        refererHost = new URL(referer).host;
+        refererUrl = new URL(referer);
       } catch {
         return withSecurityHeaders(
           NextResponse.json({ error: "Invalid Referer header" }, { status: 400 })
         );
       }
-      if (refererHost !== expectedHost) {
+      if (!isAllowedOrigin(expectedHost, refererUrl)) {
         return withSecurityHeaders(
           NextResponse.json(
             { error: "Cross-origin request blocked" },
@@ -163,6 +165,86 @@ export async function middleware(req: NextRequest) {
   }
 
   return withSecurityHeaders(NextResponse.next());
+}
+
+const LOOPBACK_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i;
+// The "any interface" addresses. A server bound to one of these is reachable
+// as localhost too — the Docker default, for instance — so a loopback Origin
+// against an unspecified expected host is still the same machine.
+const UNSPECIFIED_HOST = /^(?:0\.0\.0\.0|\[::\])$/;
+
+/**
+ * Public origins allowed to make mutating requests, from APP_ALLOWED_ORIGINS
+ * (comma-separated, e.g. "https://admin.example.com").
+ *
+ * Behind a reverse proxy — Cloudflare Tunnel, nginx, a Docker network — the
+ * browser's Origin is the public URL, while req.nextUrl.host is only ever the
+ * address this process bound. Nothing in the request can tell the server its
+ * public name safely (the Host header is attacker-controlled), so the operator
+ * states it. Entries are normalised through URL#origin, which lowercases and
+ * drops default ports exactly as browsers do when they send Origin, so the
+ * comparison is a plain string equality.
+ *
+ * Parsed on first use: environment variables don't change while the process
+ * runs, and a malformed entry is dropped rather than fatal — the app then
+ * still works on its own host, which is the safe way to fail.
+ */
+let allowedOriginsCache: ReadonlySet<string> | null = null;
+
+function allowedOrigins(): ReadonlySet<string> {
+  if (allowedOriginsCache) return allowedOriginsCache;
+  const out = new Set<string>();
+  for (const part of (process.env.APP_ALLOWED_ORIGINS ?? "").split(",")) {
+    const candidate = part.trim();
+    if (!candidate) continue;
+    try {
+      const { origin } = new URL(candidate);
+      if (origin !== "null") out.add(origin);
+    } catch {
+      // Ignored: see above.
+    }
+  }
+  allowedOriginsCache = out;
+  return out;
+}
+
+/** The CSRF decision: the server's own host, or an origin the operator named. */
+function isAllowedOrigin(expectedHost: string, candidate: URL): boolean {
+  return (
+    sameOriginHost(expectedHost, candidate.host) ||
+    allowedOrigins().has(candidate.origin)
+  );
+}
+
+/** Split "host:port" into its parts, keeping bracketed IPv6 literals intact. */
+function splitHostPort(hostport: string): [string, string] {
+  const i = hostport.lastIndexOf(":");
+  if (i === -1 || hostport.endsWith("]")) return [hostport, ""];
+  return [hostport.slice(0, i), hostport.slice(i + 1)];
+}
+
+/**
+ * Same-origin host comparison for the CSRF check above.
+ *
+ * Exact match is the normal answer. The one deliberate relaxation is the
+ * local machine: Next canonicalises every loopback spelling in `req.nextUrl`
+ * to `localhost`, so a user browsing http://127.0.0.1:3000 sends an Origin of
+ * 127.0.0.1 against an expected host of localhost and would be refused even
+ * though it is literally the same server; and a server bound to 0.0.0.0 (the
+ * Docker default) reports that as its host while being reached as localhost.
+ * All loopback names on the SAME port are that server; a different port is
+ * still rejected, so another app on the machine can't forge requests here.
+ */
+function sameOriginHost(expected: string, actual: string): boolean {
+  if (expected === actual) return true;
+  const [expectedHostname, expectedPort] = splitHostPort(expected);
+  const [actualHostname, actualPort] = splitHostPort(actual);
+  return (
+    expectedPort === actualPort &&
+    (LOOPBACK_HOST.test(expectedHostname) ||
+      UNSPECIFIED_HOST.test(expectedHostname)) &&
+    LOOPBACK_HOST.test(actualHostname)
+  );
 }
 
 function withSecurityHeaders(res: NextResponse): NextResponse {

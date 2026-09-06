@@ -30,12 +30,18 @@ interface GwsStatus {
   authenticated: boolean;
   bin?: string;
   error?: string;
+  /** True in the packaged desktop build, where the gws CLI is optional. */
+  packaged?: boolean;
 }
 
 export default function Setup() {
   const [status, setStatus] = useState<GwsStatus | null>(null);
   const [tenantCount, setTenantCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  // In the packaged desktop build the gws CLI is optional: every Workspace
+  // operation runs through the googleapis SDK with the tenant's service
+  // account. Missing CLI is then a neutral fact, not a broken install.
+  const cliOptional = !!status?.packaged;
 
   useEffect(() => {
     Promise.all([
@@ -110,7 +116,11 @@ export default function Setup() {
                     {status?.installed ? (
                       <CheckCircle2 className="h-5 w-5 text-emerald-500" />
                     ) : (
-                      <XCircle className="h-5 w-5 text-red-500" />
+                      <XCircle
+                        className={`h-5 w-5 ${
+                          cliOptional ? "text-muted-foreground" : "text-red-500"
+                        }`}
+                      />
                     )}
                     <div>
                       <p className="text-sm font-medium">
@@ -119,6 +129,8 @@ export default function Setup() {
                       <p className="text-xs text-muted-foreground">
                         {status?.installed
                           ? `Version ${status.version}`
+                          : cliOptional
+                          ? "Not installed — this build doesn't need it"
                           : "Not detected on this machine"}
                       </p>
                     </div>
@@ -128,14 +140,20 @@ export default function Setup() {
                     className={
                       status?.installed
                         ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
+                        : cliOptional
+                        ? "text-muted-foreground"
                         : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
                     }
                   >
-                    {status?.installed ? "Installed" : "Missing"}
+                    {status?.installed
+                      ? "Installed"
+                      : cliOptional
+                      ? "Optional"
+                      : "Missing"}
                   </Badge>
                 </div>
 
-                {!status?.installed && (status?.bin || status?.error) && (
+                {!status?.installed && !cliOptional && (status?.bin || status?.error) && (
                   <div className="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs space-y-1">
                     <p className="font-semibold text-amber-900 dark:text-amber-200">
                       Diagnostic info
@@ -172,13 +190,19 @@ export default function Setup() {
                     {status?.authenticated ? (
                       <CheckCircle2 className="h-5 w-5 text-emerald-500" />
                     ) : (
-                      <XCircle className="h-5 w-5 text-red-500" />
+                      <XCircle
+                        className={`h-5 w-5 ${
+                          cliOptional ? "text-muted-foreground" : "text-red-500"
+                        }`}
+                      />
                     )}
                     <div>
                       <p className="text-sm font-medium">CLI authentication</p>
                       <p className="text-xs text-muted-foreground">
                         {status?.authenticated
                           ? "gws CLI has its own credentials configured"
+                          : cliOptional
+                          ? "Not applicable — operations use the tenant's service account"
                           : "gws CLI has no credentials — run gws auth login or set up a service account"}
                       </p>
                     </div>
@@ -188,10 +212,16 @@ export default function Setup() {
                     className={
                       status?.authenticated
                         ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
+                        : cliOptional
+                        ? "text-muted-foreground"
                         : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
                     }
                   >
-                    {status?.authenticated ? "Connected" : "Not Connected"}
+                    {status?.authenticated
+                      ? "Connected"
+                      : cliOptional
+                      ? "Optional"
+                      : "Not Connected"}
                   </Badge>
                 </div>
 
@@ -231,6 +261,16 @@ export default function Setup() {
                     </Badge>
                   )}
                 </div>
+
+                {cliOptional && (
+                  <p className="text-xs text-muted-foreground pt-1">
+                    This is the packaged desktop build. It bundles its own
+                    runtime and runs every Workspace operation through Google&apos;s
+                    APIs with your tenant&apos;s service account, so the{" "}
+                    <code className="font-mono">gws</code> CLI is optional —
+                    install it only if you want to use it from a terminal.
+                  </p>
+                )}
 
                 <p className="text-xs text-muted-foreground pt-1">
                   <strong>CLI authentication</strong> means the{" "}

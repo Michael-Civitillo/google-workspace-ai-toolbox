@@ -4,6 +4,7 @@ import path from "path";
 import type { Tenant } from "./tenant-types";
 import { writeTextFileAtomic } from "./json-store";
 import { validateCredentialsFilePath } from "./validate";
+import { dataPath } from "./data-dir";
 
 /**
  * Bundling of service-account key FILES into configuration exports, and
@@ -48,7 +49,7 @@ export function credentialFallbackDir(): string {
   const allowed = process.env.GWS_CREDENTIALS_DIR;
   return allowed
     ? path.resolve(allowed)
-    : path.join(process.cwd(), "credentials");
+    : dataPath("credentials");
 }
 
 /**

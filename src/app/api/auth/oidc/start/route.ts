@@ -19,12 +19,21 @@ import { identityFromRequest, describeActor } from "@/lib/session";
  * the setup wizard's popup and requires an existing session, so the config
  * can be exercised end to end without ever issuing a session from it.
  */
-function loginError(req: NextRequest, code: string): NextResponse {
-  const url = new URL("/login", req.url);
-  url.searchParams.set("sso_error", code);
-  const res = NextResponse.redirect(url, 302);
-  res.headers.set("cache-control", "no-store");
-  return res;
+/**
+ * Bounce to the login page with an error code.
+ *
+ * The Location is deliberately relative. `req.url` here is the address this
+ * server bound - localhost, or 0.0.0.0 in a container - not the URL the
+ * browser used, so an absolute redirect built from it would send anyone behind
+ * a reverse proxy (Cloudflare Tunnel, nginx) to a host that doesn't exist for
+ * them. Browsers resolve a relative Location against the page they asked for.
+ */
+function loginError(code: string): NextResponse {
+  const params = new URLSearchParams({ sso_error: code });
+  return new NextResponse(null, {
+    status: 302,
+    headers: { location: `/login?${params}`, "cache-control": "no-store" },
+  });
 }
 
 function testFailure(
@@ -58,7 +67,7 @@ export async function GET(req: NextRequest) {
   if (!authConfigured()) {
     return mode === "test"
       ? testFailure("APP_PASSWORD is not set on the server")
-      : loginError(req, "server_error");
+      : loginError("server_error");
   }
 
   // Test mode runs inside the wizard's pop-up and needs a session. This is a
@@ -92,15 +101,15 @@ export async function GET(req: NextRequest) {
           "Could not read the single sign-on configuration",
           e instanceof Error ? e.message : String(e)
         )
-      : loginError(req, "server_error");
+      : loginError("server_error");
   }
   if (!cfg) {
     return mode === "test"
       ? testFailure("Single sign-on isn't configured yet — save the configuration first")
-      : loginError(req, "not_configured");
+      : loginError("not_configured");
   }
   if (mode === "login" && !ssoLoginAvailable(cfg)) {
-    return loginError(req, "disabled");
+    return loginError("disabled");
   }
 
   const next = safeNextPath(req.nextUrl.searchParams.get("next"));
@@ -126,6 +135,6 @@ export async function GET(req: NextRequest) {
           "Could not reach the identity provider",
           e instanceof Error ? e.message : String(e)
         )
-      : loginError(req, "discovery_failed");
+      : loginError("discovery_failed");
   }
 }

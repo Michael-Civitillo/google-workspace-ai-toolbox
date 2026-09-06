@@ -1,0 +1,168 @@
+name: Release builds
+
+# Builds the single-file executables for Windows, macOS and Linux and smoke-tests
+# each one on its own OS; builds the Docker image and probes a running container;
+# publishes the executables when a v* tag is pushed.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "src/**"
+      - "public/**"
+      - "next.config.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+  # Nothing here drives a browser; skip the ~150 MB Chromium download.
+  PUPPETEER_SKIP_DOWNLOAD: "1"
+
+jobs:
+  # Fast feedback on a cheap runner, and the gate for the slower OS builds:
+  # identical launcher, identical payload, only the runtime differs.
+  linux:
+    name: Linux x64 (lint, unit tests, build, smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:launcher
+      - run: npm run package
+      - run: npm run package:bin
+      - run: npm run package:smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-admin-linux-x64
+          path: |
+            packaging/dist/open-admin-linux-x64
+            packaging/dist/open-admin-linux-x64.sha256
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64 (build, smoke test)
+    runs-on: macos-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package
+      - run: npm run package:bin
+      - run: npm run package:smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-admin-macos-arm64
+          path: |
+            packaging/dist/open-admin-macos-arm64
+            packaging/dist/open-admin-macos-arm64.sha256
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64 (build, smoke test)
+    runs-on: windows-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package
+      - run: npm run package:exe
+      - name: Check the executable was assembled correctly
+        shell: pwsh
+        run: |
+          $exe = "packaging/dist/OpenAdmin-win-x64.exe"
+          $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "size: $size MB"
+          if ($size -gt 150) { throw "executable is $size MB, larger than expected" }
+          # A broken signature is worse than none: postject appends a section,
+          # which invalidates whatever the runtime shipped with.
+          $sig = (Get-AuthenticodeSignature $exe).Status
+          Write-Host "signature status: $sig"
+          if ($sig -eq 'HashMismatch') { throw "executable carries an invalid signature" }
+          Write-Host "product version: $((Get-Item $exe).VersionInfo.ProductVersion)"
+      - run: npm run package:smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenAdmin-win-x64
+          path: |
+            packaging/dist/OpenAdmin-win-x64.exe
+            packaging/dist/OpenAdmin-win-x64.exe.sha256
+          if-no-files-found: error
+
+  docker:
+    name: Docker image (build, probe a container, validate the Compose file)
+    runs-on: ubuntu-latest
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t open-admin:ci .
+      - name: Start a container the way the README does and probe it
+        run: |
+          set -euo pipefail
+          docker run -d --name oa -p 3000:3000 -e APP_PASSWORD=ci-password-123456 open-admin:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3000/login && break
+            sleep 1
+          done
+          post() { curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' "$@" \
+                   -d '{"password":"ci-password-123456"}' http://localhost:3000/api/auth/login; }
+          echo "login page:        $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/login) (expect 200)"
+          echo "login, localhost:  $(post -H 'origin: http://localhost:3000') (expect 200: 0.0.0.0 bind, loopback origin)"
+          echo "login, foreign:    $(post -H 'origin: https://evil.example') (expect 403)"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/login)" = 200 ]
+          [ "$(post -H 'origin: http://localhost:3000')" = 200 ]
+          [ "$(post -H 'origin: https://evil.example')" = 403 ]
+          echo "runs as: $(docker exec oa id -un) (expect node)"
+          [ "$(docker exec oa id -un)" = node ]
+          docker exec oa test -d /data
+      - name: Show container logs
+        if: always()
+        run: docker logs oa || true
+      - name: Validate the Cloudflare Tunnel Compose file
+        working-directory: deploy/cloudflare-tunnel
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i 's/^PUBLIC_HOSTNAME=.*/PUBLIC_HOSTNAME=admin.example.com/; s/^APP_PASSWORD=.*/APP_PASSWORD=ci-password-123456/; s/^APP_SESSION_SECRET=.*/APP_SESSION_SECRET=ci-secret/; s/^CLOUDFLARE_TUNNEL_TOKEN=.*/CLOUDFLARE_TUNNEL_TOKEN=ci-token/' .env
+          docker compose config > /dev/null
+          docker compose config | grep -q 'APP_ALLOWED_ORIGINS: https://admin.example.com'
+          # The app must not publish a port: the tunnel is the only way in.
+          ! docker compose config | grep -q 'published:'
+
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
