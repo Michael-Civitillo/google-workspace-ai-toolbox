@@ -1,10 +1,16 @@
 import * as client from "openid-client";
 import { isValidEmail } from "./validate-email";
 import {
+  isPrivateIssuerHost,
+  privateIssuerAllowed,
+  PRIVATE_ISSUER_REFUSED,
+} from "./sso-server";
+import {
   isLoopbackHost,
   SSO_SCOPES,
   type IssuerCheckResult,
   type SsoConfig,
+  type SsoProvider,
 } from "./sso-types";
 
 /**
@@ -65,11 +71,28 @@ function insecureAllowed(issuer: URL): boolean {
 }
 
 /**
- * Fetch and sanity-check the provider's metadata document. Throws a plain
- * Error with an operator-readable message when the document is unreachable
- * or missing something the code flow needs.
+ * A request that never got an answer (refused, DNS, TLS, timeout) surfaces as
+ * a TypeError or an abort; anything else means the host did answer, just not
+ * with metadata this app can use. Callers only ever learn which of the two.
+ */
+function unreachable(e: unknown): boolean {
+  if (e instanceof TypeError) return true;
+  const name = e instanceof Error ? e.name : "";
+  return name === "AbortError" || name === "TimeoutError";
+}
+
+/**
+ * Fetch and sanity-check the provider's metadata document. Throws an
+ * OidcFlowError whose `message` is safe to show: the raw failure text would
+ * otherwise tell the caller which ports answer on the server's own network,
+ * so it goes to the service log instead.
  */
 async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
+  // Belt and braces: validateIssuer already refuses these, but a hand-edited
+  // sso.json would otherwise have the server dial its own network.
+  if (!privateIssuerAllowed() && isPrivateIssuerHost(issuer.hostname)) {
+    throw new OidcFlowError("discovery_failed", `The ${PRIVATE_ISSUER_REFUSED}`);
+  }
   let probe: client.Configuration;
   try {
     probe = await client.discovery(issuer, "discovery", undefined, client.None(), {
@@ -77,8 +100,14 @@ async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
       timeout: REQUEST_TIMEOUT_SECONDS,
     });
   } catch (e) {
-    throw new Error(
-      `Could not load ${issuer.href.replace(/\/$/, "")}/.well-known/openid-configuration: ${errorDetail(e)}`
+    console.error(
+      `[sso] discovery failed for ${issuer.href.replace(/\/$/, "")}/.well-known/openid-configuration: ${errorDetail(e)}`
+    );
+    throw new OidcFlowError(
+      "discovery_failed",
+      unreachable(e)
+        ? "The issuer could not be reached — see the server log for the reason"
+        : "The issuer did not return valid OpenID metadata — see the server log for the reason"
     );
   }
   const server = probe.serverMetadata();
@@ -86,7 +115,8 @@ async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
     ["authorization_endpoint", "token_endpoint", "jwks_uri"] as const
   ).filter((k) => typeof server[k] !== "string" || !server[k]);
   if (missing.length > 0) {
-    throw new Error(
+    throw new OidcFlowError(
+      "discovery_failed",
       `The provider's discovery document is missing ${missing.join(", ")}, which the authorization code flow requires`
     );
   }
@@ -94,7 +124,8 @@ async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
     Array.isArray(server.response_types_supported) &&
     !server.response_types_supported.includes("code")
   ) {
-    throw new Error(
+    throw new OidcFlowError(
+      "discovery_failed",
       "The provider does not advertise the authorization code flow (response_type=code)"
     );
   }
@@ -345,11 +376,33 @@ function pickName(claims: client.IDToken): string | null {
 }
 
 /**
+ * Whether an address the provider has not marked verified may sign in.
+ *
+ * Off by default: a session here is full tenant admin, and against a provider
+ * where users manage their own email (Keycloak with verification disabled, an
+ * Auth0 database connection) an unverified claim means a user can present an
+ * allowlisted address they do not own. Named in the refusal so an operator who
+ * knows their provider — one that simply omits the claim for admin-managed
+ * accounts — can restore the old behaviour instead of being locked out.
+ */
+function unverifiedEmailAllowed(): boolean {
+  return process.env.APP_SSO_TRUST_UNVERIFIED_EMAIL === "true";
+}
+
+/**
  * Pull the identity out of validated ID token claims. `email` is preferred;
  * Entra ID commonly omits it unless the optional claim is configured, so
  * `preferred_username` and `upn` are accepted when they hold an address.
+ *
+ * `provider` decides how strict the verification check is: Entra ID's UPN is
+ * administrator-controlled and the directory is the source of truth, so an
+ * absent `email_verified` is accepted there. For Google, Okta and a generic
+ * provider the claim has to say `true`.
  */
-export function extractIdentity(claims: client.IDToken): OidcIdentity {
+export function extractIdentity(
+  claims: client.IDToken,
+  provider?: SsoProvider
+): OidcIdentity {
   const candidates: Array<[OidcIdentity["emailSource"], unknown]> = [
     ["email", claims.email],
     ["preferred_username", claims.preferred_username],
@@ -381,6 +434,17 @@ export function extractIdentity(claims: client.IDToken): OidcIdentity {
       email
     );
   }
+  // An absent claim used to pass, as did an address taken from
+  // preferred_username or upn, which skips the check entirely.
+  if (emailVerified !== true && provider !== "entra" && !unverifiedEmailAllowed()) {
+    throw new OidcFlowError(
+      "email_unverified",
+      emailSource === "email"
+        ? "The identity provider did not confirm this email address is verified (no email_verified claim). Add the claim, or set APP_SSO_TRUST_UNVERIFIED_EMAIL=true on the server to accept it as-is."
+        : `The identity provider supplied the address through ${emailSource} rather than a verified email claim. Configure the email claim, or set APP_SSO_TRUST_UNVERIFIED_EMAIL=true on the server to accept it as-is.`,
+      email
+    );
+  }
 
   return {
     sub: String(claims.sub),
@@ -404,6 +468,9 @@ export async function completeOidcAuthorization(
   try {
     config = await loadOidcClient(cfg);
   } catch (e) {
+    // discoverServer already produced a shareable verdict (and logged the
+    // detail); only other failures need wrapping.
+    if (e instanceof OidcFlowError) throw e;
     throw new OidcFlowError(
       "discovery_failed",
       "Could not reach the identity provider",
@@ -438,7 +505,10 @@ export async function completeOidcAuthorization(
       "The identity provider did not return an ID token"
     );
   }
-  return { identity: extractIdentity(claims), claimNames: Object.keys(claims) };
+  return {
+    identity: extractIdentity(claims, cfg.provider),
+    claimNames: Object.keys(claims),
+  };
 }
 
 // ---------------------------------------------------------------------------

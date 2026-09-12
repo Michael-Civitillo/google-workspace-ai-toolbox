@@ -10,7 +10,7 @@ const HINTS: Record<string, string> = {
   no_email:
     "Configure the provider to include an email claim in ID tokens (Microsoft Entra ID: Token configuration → add optional claim \"email\").",
   email_unverified:
-    "The provider marks this address unverified. Verify it at the provider or sign in with a different account.",
+    "Either the provider marks this address unverified, or it never sent an email_verified claim. Verify the address at the provider, configure the claim, or — if the provider's directory is the source of truth — set APP_SSO_TRUST_UNVERIFIED_EMAIL=true on the server.",
   exchange_failed:
     "Check the client ID and secret, and that the redirect URI is registered exactly as shown in the wizard.",
   discovery_failed:
