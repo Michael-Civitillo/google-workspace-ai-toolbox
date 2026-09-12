@@ -57,21 +57,27 @@ function loginError(code: string): NextResponse {
   });
 }
 
-/** The handshake cookie is single-use: drop it on every outcome. */
-function clearHandshake(res: NextResponse): NextResponse {
-  res.cookies.set(HANDSHAKE_COOKIE_NAME, "", {
-    ...handshakeCookieOptions(),
-    maxAge: 0,
-  });
-  return res;
-}
-
-function testPage(result: Omit<SsoTestResult, "type">): NextResponse {
-  return html(renderTestResultPage({ type: "gws-sso-test", ...result }));
-}
-
 export async function GET(req: NextRequest) {
   if (!authConfigured()) return loginError("server_error");
+
+  // The nonce the proxy minted for this request. Both interstitials carry an
+  // inline script, and the Content-Security-Policy allows script by nonce only.
+  const nonce = req.headers.get("x-nonce") ?? undefined;
+
+  const testPage = (result: Omit<SsoTestResult, "type">): NextResponse =>
+    html(renderTestResultPage({ type: "gws-sso-test", ...result }, nonce));
+
+  // The handshake cookie is single-use: drop it on every outcome. Defined here
+  // rather than at module scope so it can pass the request to
+  // handshakeCookieOptions — a clearing cookie has to carry the same `Secure`
+  // as the one it replaces, or the browser keeps the original.
+  const clearHandshake = (res: NextResponse): NextResponse => {
+    res.cookies.set(HANDSHAKE_COOKIE_NAME, "", {
+      ...handshakeCookieOptions(req),
+      maxAge: 0,
+    });
+    return res;
+  };
 
   const handshake = await parseHandshake(
     req.cookies.get(HANDSHAKE_COOKIE_NAME)?.value
@@ -192,8 +198,8 @@ export async function GET(req: NextRequest) {
         outcome: "success",
         actor: identity.email,
       });
-      const res = html(renderRedirectPage(handshake.next));
-      res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions());
+      const res = html(renderRedirectPage(handshake.next, nonce));
+      res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions(req));
       return clearHandshake(res);
     }
   } catch (e) {

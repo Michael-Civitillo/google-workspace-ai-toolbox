@@ -107,6 +107,6 @@ export async function POST(req: NextRequest) {
   const res = NextResponse.json({ success: true });
   // Cookie attributes (including SameSite=Strict) are shared with the single
   // sign-on callback so both login paths issue identical sessions.
-  res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions(req));
   return res;
 }

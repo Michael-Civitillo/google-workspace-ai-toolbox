@@ -31,6 +31,11 @@ function escapeHtml(value: string): string {
   });
 }
 
+/** ` nonce="…"` when the caller has one, nothing when it does not. */
+function nonceAttr(nonce?: string): string {
+  return nonce ? ` nonce="${escapeHtml(nonce)}"` : "";
+}
+
 /** JSON that is safe to embed inside a <script> element. */
 function jsonForScript(value: unknown): string {
   return JSON.stringify(value)
@@ -67,7 +72,18 @@ const STYLE = `
   }
 `;
 
-function page(title: string, body: string, script: string): string {
+/**
+ * `nonce` comes from the proxy's Content-Security-Policy for this request: the
+ * policy allows script by nonce only, so an interstitial whose script is not
+ * stamped with it would be blocked — and the test popup's whole job is to
+ * postMessage its result back to the wizard.
+ */
+function page(
+  title: string,
+  body: string,
+  script: string,
+  nonce?: string
+): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -79,7 +95,7 @@ function page(title: string, body: string, script: string): string {
 </head>
 <body>
 <main class="card">${body}</main>
-<script>${script}</script>
+<script${nonceAttr(nonce)}>${script}</script>
 </body>
 </html>`;
 }
@@ -88,7 +104,7 @@ function page(title: string, body: string, script: string): string {
  * Login-mode success: the session cookie rides on this response, and the page
  * immediately navigates to `next` (an already-validated internal path).
  */
-export function renderRedirectPage(next: string): string {
+export function renderRedirectPage(next: string, nonce?: string): string {
   const href = escapeHtml(next);
   return `<!doctype html>
 <html lang="en">
@@ -105,7 +121,7 @@ export function renderRedirectPage(next: string): string {
   <h1>Signing you in…</h1>
   <p>Taking you to Open Admin. <a href="${href}">Continue</a> if nothing happens.</p>
 </main>
-<script>window.location.replace(${jsonForScript(next)});</script>
+<script${nonceAttr(nonce)}>window.location.replace(${jsonForScript(next)});</script>
 </body>
 </html>`;
 }
@@ -114,7 +130,10 @@ export function renderRedirectPage(next: string): string {
  * Test-mode result: shows the outcome in the popup and posts it to the
  * window that opened us (the setup wizard), then closes itself.
  */
-export function renderTestResultPage(result: SsoTestResult): string {
+export function renderTestResultPage(
+  result: SsoTestResult,
+  nonce?: string
+): string {
   const rows: Array<[string, string]> = [];
   if (result.ok) {
     if (result.email) rows.push(["Email", result.email]);
@@ -158,5 +177,10 @@ export function renderTestResultPage(result: SsoTestResult): string {
   setTimeout(function(){ try { window.close(); } catch (e) {} }, 2500);
 })();`;
 
-  return page(result.ok ? "Sign-in test passed" : "Sign-in test failed", body, script);
+  return page(
+    result.ok ? "Sign-in test passed" : "Sign-in test failed",
+    body,
+    script,
+    nonce
+  );
 }

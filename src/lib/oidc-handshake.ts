@@ -1,4 +1,4 @@
-import { createSignedValue, readSignedValue } from "./auth";
+import { createSignedValue, readSignedValue, requestIsSecure } from "./auth";
 import type { OidcHandshake } from "./oidc";
 import { safeNextPath } from "./safe-next";
 
@@ -12,15 +12,21 @@ export { safeNextPath };
  * callback can prove the response belongs to a request this server started.
  * It is scoped to the OIDC routes, short-lived, and SameSite=Lax (not Strict)
  * because the callback is a top-level navigation arriving from the provider.
+ *
+ * No `__Host-` prefix, for the same reason as the session cookie (see auth.ts):
+ * the prefix demands Secure, which browsers refuse over the plain http this
+ * tool is routinely reached on — and it also demands Path=/, which would widen
+ * this cookie beyond the sign-in routes it belongs to.
  */
 export const HANDSHAKE_COOKIE_NAME = "gws_toolbox_oidc";
 export const HANDSHAKE_TTL_SECONDS = 10 * 60;
 
-export function handshakeCookieOptions() {
+/** Pass the request wherever one is at hand: `Secure` follows its scheme. */
+export function handshakeCookieOptions(req?: Request) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
+    secure: requestIsSecure(req),
     path: "/api/auth/oidc",
     maxAge: HANDSHAKE_TTL_SECONDS,
   };

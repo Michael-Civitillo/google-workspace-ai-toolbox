@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { revokeSessionToken, SESSION_COOKIE_NAME } from "@/lib/auth";
+import {
+  requestIsSecure,
+  revokeSessionToken,
+  SESSION_COOKIE_NAME,
+} from "@/lib/auth";
 
 /**
  * Sign out: clear the cookie AND revoke the token server-side, so a copy of
@@ -12,7 +16,9 @@ export async function POST(req: NextRequest) {
   res.cookies.set(SESSION_COOKIE_NAME, "", {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    // Match the attributes the cookie was issued with, or the browser keeps
+    // the old one alongside this one.
+    secure: requestIsSecure(req),
     path: "/",
     maxAge: 0,
   });

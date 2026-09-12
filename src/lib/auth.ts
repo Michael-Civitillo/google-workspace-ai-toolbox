@@ -14,6 +14,12 @@
 
 import { resolveSessionSecret } from "./session-secret";
 
+// Deliberately NOT a `__Host-` prefixed name. That prefix requires the Secure
+// attribute, which browsers refuse over plain http, and this tool is built to be
+// reached that way: http://localhost for `next dev`, the packaged desktop build,
+// a container on a LAN. Being able to sign in at all beats the prefix's
+// guarantee (no other host on the registrable domain can overwrite the cookie),
+// which SameSite=Strict plus the proxy's Origin check already largely cover.
 const COOKIE_NAME = "gws_toolbox_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 const TEXT_ENCODER = new TextEncoder();
@@ -324,6 +330,35 @@ export async function passwordMatches(input: string): Promise<boolean> {
 }
 
 /**
+ * Whether a cookie issued for this request may carry `Secure`.
+ *
+ * Keyed on the scheme the browser actually used rather than NODE_ENV: the
+ * packaged desktop build and a LAN container both run with NODE_ENV=production
+ * over plain http, where the browser drops a Secure cookie and nobody can sign
+ * in, while a development server behind TLS would issue a cookie a network
+ * attacker can strip.
+ *
+ * Behind a TLS-terminating proxy the scheme survives only in
+ * `X-Forwarded-Proto`, which any client can send, so that header is read under
+ * the same `TRUSTED_PROXY=true` opt-in the login rate limiter uses for
+ * `X-Forwarded-For` (see rate-limit.ts); proxies put the scheme the browser
+ * used in the leftmost entry. Callers with no request in hand fall back to
+ * NODE_ENV, which is what every caller did before.
+ */
+export function requestIsSecure(req?: Request): boolean {
+  if (!req) return process.env.NODE_ENV === "production";
+  if (process.env.TRUSTED_PROXY === "true") {
+    const proto = req.headers.get("x-forwarded-proto");
+    if (proto) return proto.split(",")[0].trim().toLowerCase() === "https";
+  }
+  try {
+    return new URL(req.url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Cookie attributes shared by every code path that issues a session.
  *
  * `strict` blocks the cookie on any cross-site navigation, top-level or
@@ -331,12 +366,14 @@ export async function passwordMatches(input: string): Promise<boolean> {
  * links (the single sign-on callback lands on a same-origin interstitial
  * before navigating on), so this gives belt-and-braces CSRF protection on top
  * of the Origin/Referer check enforced by the middleware.
+ *
+ * Pass the request wherever one is at hand: `Secure` follows its scheme.
  */
-export function sessionCookieOptions() {
+export function sessionCookieOptions(req?: Request) {
   return {
     httpOnly: true,
     sameSite: "strict" as const,
-    secure: process.env.NODE_ENV === "production",
+    secure: requestIsSecure(req),
     path: "/",
     maxAge: SESSION_TTL_SECONDS,
   };
