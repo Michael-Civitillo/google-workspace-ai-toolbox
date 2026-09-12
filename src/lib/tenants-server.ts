@@ -1,3 +1,4 @@
+import { chmodSync, statSync } from "fs";
 import type { Tenant, PublicTenant } from "./tenant-types";
 import { dataPath } from "./data-dir";
 import { ValidationError } from "./validate";
@@ -24,6 +25,16 @@ interface TenantStore {
 }
 
 const STORE_PATH = dataPath("tenants.json");
+
+// tenants.json carries per-tenant Gemini keys. Re-tighten its mode at module
+// load, as sso-server.ts and audit.ts do for their files: the atomic writer
+// creates it 0600, but a file created by an older build under a permissive
+// umask would keep that mode until its next write.
+try {
+  if ((statSync(STORE_PATH).mode & 0o777) !== 0o600) chmodSync(STORE_PATH, 0o600);
+} catch {
+  // Not created yet.
+}
 
 function readStore(): TenantStore {
   // Corruption-safe read: missing/empty/corrupt files come back as null (the

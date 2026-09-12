@@ -1,9 +1,11 @@
+import { randomBytes } from "crypto";
 import {
   readFileSync,
   renameSync,
   existsSync,
   unlinkSync,
   openSync,
+  fchmodSync,
   writeSync,
   fsyncSync,
   closeSync,
@@ -103,9 +105,14 @@ export async function writeTextFileAtomic(
   text: string
 ): Promise<void> {
   mkdirSync(path.dirname(storePath), { recursive: true, mode: 0o700 });
-  const tmpPath = `${storePath}.tmp`;
-  const fd = openSync(tmpPath, "w", 0o600);
+  // A fresh, exclusively created temp file every time ("wx" plus a random
+  // suffix): a `.tmp` planted in advance by another local user would
+  // otherwise keep its own — possibly world-readable — mode through the
+  // rename. fchmod pins 0600 regardless of the process umask.
+  const tmpPath = `${storePath}.${randomBytes(6).toString("hex")}.tmp`;
+  const fd = openSync(tmpPath, "wx", 0o600);
   try {
+    fchmodSync(fd, 0o600);
     writeSync(fd, text);
     fsyncSync(fd);
   } finally {

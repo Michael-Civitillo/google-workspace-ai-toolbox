@@ -35,15 +35,16 @@ yarn-error.log*
 !.env.example
 
 # Tenant configuration (contains paths to credentials — keep local)
-tenants.json
-tenants.json.tmp
+tenants.json*
 
 # Single sign-on configuration (contains the OIDC client secret — keep local)
-sso.json
-sso.json.tmp
+sso.json*
 
 # Append-only audit log of all mutating actions
 audit.log
+
+# Auto-generated key that signs session cookies when APP_SESSION_SECRET is unset
+session-secret
 
 # vercel
 .vercel
@@ -53,8 +54,7 @@ audit.log
 next-env.d.ts
 
 # App-level configuration (onboarding state) — local to this install
-app-config.json
-app-config.json.tmp
+app-config.json*
 
 # Default landing spot for service-account keys restored by a config import
 # whose original path doesn't exist on this machine — never commit keys

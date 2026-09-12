@@ -1,14 +1,18 @@
 import { existsSync } from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import { updateAppConfig } from "@/lib/app-config";
-import { replaceTenantStore } from "@/lib/tenants-server";
-import { importSsoConfig } from "@/lib/sso-server";
+import {
+  getTenantStoreSnapshot,
+  replaceTenantStore,
+} from "@/lib/tenants-server";
+import { importSsoConfig, readSsoConfig } from "@/lib/sso-server";
 import {
   placeCredentialFile,
   MAX_CREDENTIAL_FILE_BYTES,
   type CredentialPlacement,
 } from "@/lib/credential-files";
 import { audit } from "@/lib/audit";
+import { actorFromRequest } from "@/lib/session";
 import {
   isValidEmail,
   validateCredentialsFilePath,
@@ -50,6 +54,7 @@ function freshId(): string {
  *     missing files come back as warnings so the operator knows what to copy.
  */
 export async function POST(req: NextRequest) {
+  const actor = await actorFromRequest(req);
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
@@ -70,6 +75,30 @@ export async function POST(req: NextRequest) {
       },
       { status: 400 }
     );
+  }
+
+  // Overwriting an already-configured server is destructive (replace, not
+  // merge): require the same typed phrase the UI collects, so a bare POST can
+  // never wipe the tenant list. A fresh server has nothing to lose.
+  let alreadyConfigured = false;
+  try {
+    alreadyConfigured =
+      getTenantStoreSnapshot().tenants.length > 0 || readSsoConfig() !== null;
+  } catch {
+    // Can't tell — treat the server as configured and demand the phrase.
+    alreadyConfigured = true;
+  }
+  if (alreadyConfigured) {
+    const confirm = typeof body.confirm === "string" ? body.confirm.trim() : "";
+    if (confirm !== "REPLACE") {
+      return NextResponse.json(
+        {
+          error:
+            'This server already has configuration. Send confirm: "REPLACE" to overwrite it.',
+        },
+        { status: 400 }
+      );
+    }
   }
 
   const appPart =
@@ -295,6 +324,7 @@ export async function POST(req: NextRequest) {
       action: "config.import",
       tenantId: null,
       tenantName: null,
+      actor,
       params: {
         tenantCount: tenants.length,
         ssoConfigured: Boolean(ssoResult.config),
@@ -324,6 +354,7 @@ export async function POST(req: NextRequest) {
       action: "config.import",
       tenantId: null,
       tenantName: null,
+      actor,
       params: {},
       outcome: "error",
       error: message,

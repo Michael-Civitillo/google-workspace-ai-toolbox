@@ -17,4 +17,5 @@ tenants.json*
 sso.json*
 app-config.json*
 audit.log
+session-secret
 credentials

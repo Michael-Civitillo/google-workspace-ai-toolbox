@@ -51,6 +51,9 @@ export function ConfigBackupPanel() {
   const [importing, setImporting] = useState(false);
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // With nothing configured yet (the restore-onto-new-server case) the import
@@ -127,10 +130,15 @@ export function ConfigBackupPanel() {
     setImporting(true);
     setImportError(null);
     try {
+      // The server demands the same phrase the dialog collected whenever it
+      // already holds configuration; on a fresh server it is ignored.
       const res = await fetch("/api/config/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preview.raw),
+        body: JSON.stringify({
+          ...(preview.raw as Record<string, unknown>),
+          confirm: "REPLACE",
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -154,6 +162,44 @@ export function ConfigBackupPanel() {
     } finally {
       setImporting(false);
       setConfirmOpen(false);
+    }
+  }
+
+  // The bundle with secrets is a POST behind a typed confirmation: one file
+  // carries every private key the server holds, so it is a deliberate act
+  // rather than a link that any page could point at.
+  async function runExport() {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const res = await fetch("/api/config/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "EXPORT SECRETS" }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setExportError(data?.error ?? "Export failed");
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") ?? "";
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download =
+        match?.[1] ??
+        `gws-toolbox-config-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setExportConfirmOpen(false);
+    } catch {
+      setExportError("Network error — nothing was exported");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -196,14 +242,29 @@ export function ConfigBackupPanel() {
             it like a password and store it somewhere access-controlled.
           </p>
         )}
-        <a
-          href={`/api/config/export${includeSecrets ? "" : "?secrets=0"}`}
-          className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
-          download
-        >
-          <Download className="h-3.5 w-3.5 mr-1.5" />
-          Download config bundle
-        </a>
+        {includeSecrets ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setExportError(null);
+              setExportConfirmOpen(true);
+            }}
+          >
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download config bundle
+          </Button>
+        ) : (
+          <a
+            href="/api/config/export"
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+            download
+          >
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download sanitised bundle
+          </a>
+        )}
+        {exportError && <p className="text-xs text-danger">{exportError}</p>}
       </div>
 
       {/* Import */}
@@ -377,6 +438,40 @@ export function ConfigBackupPanel() {
         confirmLabel={freshServer ? "Restore" : "Import bundle"}
         busy={importing}
         onConfirm={runImport}
+      />
+
+      <ConfirmActionDialog
+        open={exportConfirmOpen}
+        onOpenChange={(o) => !exporting && setExportConfirmOpen(o)}
+        title="Export configuration with secrets"
+        summary="One file will hold every service-account private key, the OIDC client secret and every Gemini key this server has."
+        tenant={null}
+        severity="high"
+        confirmPhrase="EXPORT SECRETS"
+        confirmLabel="Download bundle"
+        busy={exporting}
+        changes={[
+          {
+            label: "Tenants",
+            after:
+              currentTenants !== null
+                ? `${currentTenants} with their key files`
+                : "all configured tenants with their key files",
+          },
+          {
+            label: "Single sign-on",
+            after: currentSsoIssuer
+              ? `${currentSsoIssuer} with its client secret`
+              : "not configured",
+          },
+          {
+            label: "Handling",
+            after:
+              "Anyone holding the file can act as this app — store it somewhere access-controlled",
+            emphasis: true,
+          },
+        ]}
+        onConfirm={runExport}
       />
     </div>
   );
