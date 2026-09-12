@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { DM_Sans, JetBrains_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/sidebar";
@@ -24,11 +25,16 @@ export const metadata: Metadata = {
   description: "Modern web UI for day-to-day Google Workspace admin tasks",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // The nonce the proxy minted for this request (src/proxy.ts). Reading a
+  // header also keeps every page rendering per request, which a nonce policy
+  // needs: a page cached from an earlier build would carry a stale one.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html
       lang="en"
@@ -38,6 +44,7 @@ export default function RootLayout({
       <head>
         {/* Apply theme before first paint to avoid flash */}
         <script
+          nonce={nonce}
           dangerouslySetInnerHTML={{
             __html: `(function(){var t=localStorage.getItem('theme');var d=window.matchMedia('(prefers-color-scheme: dark)').matches;if(t==='dark'||(t===null&&d))document.documentElement.classList.add('dark');})()`,
           }}

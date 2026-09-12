@@ -37,18 +37,19 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### Safety & ops
 
-- 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` set. HMAC-signed session cookies, 12h TTL, rate-limited login.
+- 🔐 **Password gate + signed sessions** — App refuses to serve any route without `APP_PASSWORD` set. HMAC-signed session cookies, 12h TTL, rate-limited login, and signing out revokes the token server-side rather than only clearing the cookie.
 - 🔑 **Single sign-on (OIDC)** — Sign in with Google, Microsoft Entra ID, Okta, or any OpenID Connect provider instead of (or alongside) the shared password. A pop-up wizard registers the app, checks the issuer, runs a real test sign-in, and only then enables it. Allowlist by domain or email; sessions and audit entries record who signed in.
 - 🧭 **First-launch onboarding** — A fresh install takes you straight to the guided setup on first login: CLI install, service account, first tenant, single sign-on. Skip it or re-run it any time from **Get Started** in the sidebar.
 - 💼 **Portable configuration** — Export everything — single sign-on settings, tenants, and the service-account key files themselves — to one JSON bundle from **App Settings**, and restore it on another server in one click. Keys are written back to disk automatically (relocated if the original path doesn't exist there), with a preview first and a typed confirmation only when overwriting an already-configured server.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
-- ⚠️ **Confirmation dialogs** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension) shows a before→after diff and requires you to type the target email/identifier to confirm.
-- 📜 **Audit log** — Append-only JSON-lines log of every mutation, with secrets redacted (`AUDIT_LOG_PATH` env var to control location).
+- ⚠️ **Confirmation dialogs, enforced server-side** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension, Drive transfer, mailbox import, bulk un-share) shows a before→after diff and requires you to type the target email or identifier. The API re-checks that typed value, so the guard holds for anything calling the routes directly, not just the browser.
+- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location). Rotates at 8 MB keeping three older files, so a long-running install stays bounded at ~32 MB.
 - 🧪 **Atomic config writes** — `tenants.json`, `sso.json` and `app-config.json` share one store implementation: tmp-file + fsync + rename with an in-process mutex, so a crash mid-write can't corrupt your config.
 
 ### Polish
 
 - 🌗 **Dark mode** — Auto-detects your system preference, persists across reloads, one-click toggle in the sidebar.
+- 🌈 **RGB accents** — A hint of spectrum lighting where it earns its place: a soft aura behind the logo, a light bar on the active nav item, a ring around the AI command bar while you type, and a glow on hovered cards. Everything freezes under `prefers-reduced-motion`.
 - 🪟 **Cross-platform** — Tested on macOS, Linux, and Windows 11 (handles `gws.cmd` shim, CRLF line endings, AV-related file lock retries).
 
 <details>
@@ -157,7 +158,7 @@ open-admin [options]
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
   --set-password       set a new admin password for the web UI
-  --password <pw>      admin password for this run only
+  --password <pw>      set the admin password (saved; visible in the process list)
   --no-browser         don't open a browser window on start
   --reset-app-cache    re-extract the bundled application files
   --version, -v        print version information
@@ -296,20 +297,38 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | Variable | Required | What it does |
 |---|---|---|
 | `APP_PASSWORD` | ✅ | Password gate. App refuses to serve any route without it. |
+| `APP_SESSION_SECRET` | recommended | Key that signs session cookies. Unset, the server generates one and keeps it in `session-secret` (mode 0600) beside `tenants.json`, so sessions survive a restart. Set it explicitly when the data directory is not persistent, or when several instances share sessions. |
 | `GOOGLE_WORKSPACE_ADMIN_EMAIL` | ✅ for Admin SDK ops | Subject for service account impersonation. |
 | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | ⚠️ if not using per-tenant config | Path to service account JSON. |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | ⚠️ for AI features | Gemini API key. |
 | `APP_ALLOWED_ORIGINS` | ✅ behind a proxy | Comma-separated public origin(s) browsers use, e.g. `https://admin.example.com`. Behind Cloudflare Tunnel, nginx or Docker with a hostname the browser's `Origin` is the public URL while the server only knows the address it bound — without this every mutating request is refused (403). |
 | `TRUSTED_PROXY` | optional | Set to `true` when nothing but a trusted proxy can reach the app; per-address login rate limiting then reads `X-Forwarded-For`. |
 | `OPEN_ADMIN_DATA_DIR` | optional | Where `tenants.json`, `app-config.json`, `sso.json`, `audit.log` and imported keys are kept (defaults to the working directory). The packaged Windows build sets this to your user profile. |
-| `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). |
+| `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). At 8 MB it rotates to `audit.log.1`, shifting older files up to `.3` and dropping the rest — about 32 MB of history, all mode 0600. The in-app viewer reads the current file; the rotated ones are there for your own archive or log shipper. |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
 | `SSO_CONFIG_PATH` | optional | Override location of the single sign-on config (defaults to `./sso.json`). |
 | `APP_SSO_DISABLED` | optional | Set to `true` to switch single sign-on off and restore password login without editing `sso.json`. |
+| `APP_SSO_ALLOW_PRIVATE_ISSUER` | optional | Set to `true` to allow an OIDC issuer on a private, loopback or link-local host (a local development provider). Refused by default: the server performs the discovery fetch, so an unrestricted issuer check would tell any signed-in user which ports answer on the server's own network. |
+| `APP_SSO_TRUST_UNVERIFIED_EMAIL` | optional | Set to `true` to accept a sign-in whose ID token has no `email_verified: true` claim. Refused by default, except for Entra ID where the UPN is administrator-controlled. Only set this when the provider's directory is the source of truth for addresses. |
+| `NODE_OPTIONS` | optional | Memory caps for the Node process. The Docker image ships `--max-old-space-size=768 --max-semi-space-size=8`; pass the same when you run from source on a small host. Without a cap Node sizes its heap from the machine's total memory and holds on to it long after a request finishes. |
 
-State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600) and `app-config.json` (onboarding state) — all gitignored, all written atomically, all covered by the configuration export below.
+State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600), `app-config.json` (onboarding state) and `session-secret` (the generated cookie-signing key, mode 0600) — all gitignored, all written atomically with 0600 permissions, and everything but `session-secret` is covered by the configuration export below.
 
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
+
+**Running on a small box?** `npm start` runs `next start`, which supervises a
+second Node process — both together idle around 282 MB. The build also emits a
+self-contained server, which is what the Docker image runs:
+
+```bash
+npm run build
+cp -r public .next/standalone/                # static assets the server serves
+cp -r .next/static .next/standalone/.next/
+node .next/standalone/server.js              # one process, ~97 MB idle
+```
+
+Add `NODE_OPTIONS="--max-old-space-size=768 --max-semi-space-size=8"` to keep
+V8 from sizing its heap to the whole machine.
 
 > **Behind a reverse proxy?** Set `APP_ALLOWED_ORIGINS` to the URL people type
 > (`https://admin.example.com`). The CSRF check compares the browser's `Origin`
@@ -334,13 +353,13 @@ The configuration — including the client secret — lives in `sso.json` (gitig
 
 ## 💼 Moving servers: configuration export / import
 
-**App Settings → Configuration backup** exports the whole setup as one JSON bundle, and restores it on any other instance. Back up: click **Download config bundle**. Restore: install the app, log in, pick the file, click **Restore**. That's it.
+**App Settings → Configuration backup** exports the whole setup as one JSON bundle, and restores it on any other instance. Back up: click **Download config bundle** and type the confirmation it asks for. Restore: install the app, log in, pick the file, click **Restore**. That's it.
 
 - The bundle contains everything: single sign-on settings (client secret included), every tenant with its Gemini key, and the **service-account JSON key files themselves** — so the restore needs no side-channel key copying. Treat the file like a password.
-- On import, key files are written back to their original paths. If a path doesn't work on the new machine (different OS or layout, e.g. a Windows export restored onto Linux, or outside `GWS_CREDENTIALS_DIR`), the key is relocated — into `GWS_CREDENTIALS_DIR` if set, else `./credentials/` — and the tenant re-pointed automatically. An existing different file at a target path is kept as a `.bak`, never destroyed.
+- On import, key files land in the credentials directory — `GWS_CREDENTIALS_DIR` if set, else `./credentials/`. A bundle's original path is reused only when it already sits inside that directory; anything else (a Windows export restored onto Linux, a path from someone else's home directory, an absolute path chosen by whoever wrote the bundle) is relocated there and the tenant re-pointed automatically, so restoring a file cannot write outside the one directory the app owns. An existing different file at a target path is kept as a `.bak`, never destroyed.
 - Import **replaces** the target server's single sign-on settings and tenant list (it's a restore, not a merge) and previews what's inside first. On a fresh server it's a single click; overwriting an already-configured server asks you to type `REPLACE`.
 - A restored single sign-on configuration keeps the password form on until it passes a test sign-in on the new server, so a bundle can never lock you out. A bundle exported without secrets can't restore single sign-on at all (the settings are skipped with a warning) unless the server already holds the same client's secret.
-- Untick **Include secrets** to export a sanitised copy (no secrets, no key files) for sharing a config layout.
+- The **Include secrets** checkbox picks which download you get. Ticked (the default), **Download config bundle** asks you to type `EXPORT SECRETS` first — the file it then hands over carries every service-account private key and the single sign-on client secret, so the server refuses to produce it on a bare link a stray click or an embedded image could follow. Unticked, **Download sanitised bundle** is a plain download with the secrets and key files stripped, fine for sharing a config layout.
 - The onboarding wizard's final step offers the same export, so a fresh setup ends with a backup in hand.
 
 ## 🏢 Multiple tenants (Production, Sandbox, etc.)

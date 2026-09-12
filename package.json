@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/prune-standalone.mjs",
     "start": "next start",
     "lint": "eslint",
     "screenshots": "node scripts/screenshots.mjs",
@@ -23,6 +24,7 @@
     "ai": "^6.0.141",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "google-auth-library": "^10.6.2",
     "googleapis": "^171.4.0",
     "lucide-react": "^1.7.0",
     "next": "16.2.1",

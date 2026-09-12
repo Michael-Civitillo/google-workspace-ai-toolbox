@@ -221,7 +221,8 @@ export const SSO_ERROR_MESSAGES: Record<string, string> = {
   discovery_failed:
     "Open Admin couldn't reach your identity provider. Check the server log.",
   no_email: "Your identity provider didn't share an email address, so access can't be checked.",
-  email_unverified: "Your identity provider reports this email address as unverified.",
+  email_unverified:
+    "Your identity provider didn't confirm this email address is verified.",
   not_allowed:
     "This account isn't allowed to use Open Admin. Ask an administrator to add your email or domain.",
   server_error: "Something went wrong on the server while signing you in.",

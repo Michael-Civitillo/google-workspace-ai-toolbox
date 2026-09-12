@@ -15,6 +15,11 @@ import { createRequire } from "node:module";
 interface SeaModule {
   isSea(): boolean;
   getAsset(key: string): ArrayBuffer;
+  /**
+   * Node 22+: a view over the bytes embedded in the executable, without the
+   * copy getAsset makes. Read-only by contract; the launcher only reads.
+   */
+  getRawAsset?(key: string): ArrayBuffer | Uint8Array;
 }
 
 // `node:sea` is a built-in, so the resolution base is irrelevant; execPath is
@@ -41,9 +46,18 @@ export function isSea(): boolean {
 
 export const PAYLOAD_ASSET_NAME = "payload.zip";
 
+/**
+ * The archive bytes. Only called when an extraction is actually needed: the
+ * app directory is keyed by the hash baked in at build time, so a launch that
+ * finds it already unpacked never loads the payload at all.
+ */
 export function loadPayload(): Uint8Array {
   const sea = seaModule();
-  if (sea && sea.isSea()) return new Uint8Array(sea.getAsset(PAYLOAD_ASSET_NAME));
+  if (sea && sea.isSea()) {
+    const raw =
+      sea.getRawAsset?.(PAYLOAD_ASSET_NAME) ?? sea.getAsset(PAYLOAD_ASSET_NAME);
+    return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  }
 
   // Not a packaged run: the archive sits beside the bundled script.
   const scriptDir = path.dirname(process.argv[1] ?? process.execPath);

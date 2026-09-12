@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import {
   ArrowRightLeft,
   ArrowRight,
@@ -168,34 +169,12 @@ export default function CalendarTransfer() {
         badge="Calendar"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${
-            message.type === "error"
-              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
-              : message.type === "warning"
-                ? "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
-                : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-          }`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error"
-                ? "text-red-800 dark:text-red-300"
-                : message.type === "warning"
-                  ? "text-amber-800 dark:text-amber-300"
-                  : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <div className="max-w-2xl">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <ArrowRightLeft className="h-5 w-5" />
               Transfer Calendar Ownership
             </CardTitle>
@@ -269,9 +248,9 @@ export default function CalendarTransfer() {
               </label>
             </div>
 
-            <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-              <AlertTriangle className="h-4 w-4 text-amber-600" />
-              <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
+            <Alert variant="warning">
+              <AlertTriangle className="h-4 w-4 text-warning" />
+              <AlertDescription>
                 Granting owner access is reversible. Removing the source
                 user&apos;s access on a secondary calendar is much harder to
                 undo if the calendar has no other owners.

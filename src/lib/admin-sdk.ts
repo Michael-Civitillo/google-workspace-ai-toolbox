@@ -1,11 +1,15 @@
-import {
-  google,
-  type drive_v3,
-  type admin_directory_v1,
-  type admin_datatransfer_v1,
-  type admin_reports_v1,
-} from "googleapis";
-import { readFileSync, statSync } from "fs";
+// Deep-import exactly the API versions this file uses. `import { google } from
+// "googleapis"` drags all ~320 API definitions into the server bundle: an
+// 11 MB chunk that costs ~40 MB of resident memory and most of a second on
+// first use, for six modules totalling under half a megabyte.
+import { admin_directory_v1 } from "googleapis/build/src/apis/admin/directory_v1";
+import { admin_reports_v1 } from "googleapis/build/src/apis/admin/reports_v1";
+import { admin_datatransfer_v1 } from "googleapis/build/src/apis/admin/datatransfer_v1";
+import { gmail_v1 } from "googleapis/build/src/apis/gmail/v1";
+import { drive_v3 } from "googleapis/build/src/apis/drive/v3";
+import { calendar_v3 } from "googleapis/build/src/apis/calendar/v3";
+import { JWT } from "google-auth-library";
+import { readFileSync, statSync, type Stats } from "fs";
 import type { Tenant } from "./tenant-types";
 import {
   isValidEmail,
@@ -14,28 +18,29 @@ import {
   emailDomain,
 } from "./validate";
 
+const ADMIN_API_TIMEOUT_MS = 30_000;
+
+// Every client below is constructed with a default per-request timeout.
+// gaxios ships with no default, so a stalled TLS connection to Google
+// (mid-handshake blackhole, dropped keepalive) would otherwise hang a handler
+// forever — the failure mode that lets an offboarding step spin indefinitely.
+// Calls that need longer (mailbox raw fetches) pass an explicit per-call
+// `timeout`, which overrides this floor. (This used to be a single
+// `google.options(...)` on the catalogue object; with deep imports there is no
+// catalogue, so each constructor carries it.)
+const CLIENT_DEFAULTS = { timeout: ADMIN_API_TIMEOUT_MS } as const;
+
 export function buildGmailClient(tenant: Tenant | null, impersonateEmail: string, scopes: string[]) {
   const auth = buildAuth(tenant, impersonateEmail, scopes);
-  return google.gmail({ version: "v1", auth });
+  return new gmail_v1.Gmail({ ...CLIENT_DEFAULTS, auth });
 }
 
 export function buildCalendarClient(tenant: Tenant | null, impersonateEmail: string) {
   const auth = buildAuth(tenant, impersonateEmail, [
     "https://www.googleapis.com/auth/calendar",
   ]);
-  return google.calendar({ version: "v3", auth });
+  return new calendar_v3.Calendar({ ...CLIENT_DEFAULTS, auth });
 }
-
-const ADMIN_API_TIMEOUT_MS = 30_000;
-
-// Set a default per-request timeout on EVERY googleapis call. gaxios ships with
-// no default, so a stalled TLS connection to Google (mid-handshake blackhole,
-// dropped keepalive) would otherwise hang a handler forever — the failure mode
-// that lets an offboarding step spin indefinitely. Calls that need longer
-// (mailbox raw fetches) pass an explicit per-call `timeout`, which overrides
-// this floor. This covers the Gmail/Calendar settings + ACL calls that route
-// handlers make directly, which previously had no timeout at all.
-google.options({ timeout: ADMIN_API_TIMEOUT_MS });
 
 const SCOPES = {
   USER: "https://www.googleapis.com/auth/admin.directory.user",
@@ -86,8 +91,26 @@ interface CredsCacheEntry {
 
 const credsCache = new Map<string, CredsCacheEntry>();
 
+// Fixed messages for key-file problems. The underlying error text names the
+// path and, for a parse failure, quotes the file's first bytes — and route
+// handlers return error messages to the browser verbatim. The operator knows
+// which path the tenant points at; the file's contents are not theirs to see
+// through an error string.
+const CREDS_UNREADABLE = "Service account key file could not be read";
+const CREDS_NOT_JSON = "Service account key file is not valid JSON";
+const CREDS_NOT_A_KEY =
+  "Service account key file is not a service-account key (missing client_email or private_key)";
+
+function statCredentialsFile(credFile: string): Stats {
+  try {
+    return statSync(credFile);
+  } catch {
+    throw new Error(CREDS_UNREADABLE);
+  }
+}
+
 function loadCredentials(credFile: string): ServiceAccountCreds {
-  const stat = statSync(credFile);
+  const stat = statCredentialsFile(credFile);
   const cached = credsCache.get(credFile);
   if (
     cached &&
@@ -97,7 +120,26 @@ function loadCredentials(credFile: string): ServiceAccountCreds {
   ) {
     return cached.creds;
   }
-  const creds = JSON.parse(readFileSync(credFile, "utf-8")) as ServiceAccountCreds;
+  let raw: string;
+  try {
+    raw = readFileSync(credFile, "utf-8");
+  } catch {
+    throw new Error(CREDS_UNREADABLE);
+  }
+  let creds: ServiceAccountCreds;
+  try {
+    creds = JSON.parse(raw) as ServiceAccountCreds;
+  } catch {
+    throw new Error(CREDS_NOT_JSON);
+  }
+  if (
+    !creds ||
+    typeof creds !== "object" ||
+    typeof creds.client_email !== "string" ||
+    typeof creds.private_key !== "string"
+  ) {
+    throw new Error(CREDS_NOT_A_KEY);
+  }
   credsCache.set(credFile, {
     mtimeMs: stat.mtimeMs,
     size: stat.size,
@@ -127,7 +169,7 @@ function loadCredentials(credFile: string): ServiceAccountCreds {
  * serving a stale (possibly revoked) token for the life of the process.
  */
 const JWT_CACHE_MAX = 100;
-const jwtCache = new Map<string, InstanceType<typeof google.auth.JWT>>();
+const jwtCache = new Map<string, JWT>();
 
 function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
   const credFile =
@@ -141,7 +183,7 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     );
   }
 
-  const stat = statSync(credFile);
+  const stat = statCredentialsFile(credFile);
   const cacheKey = `${credFile}|${subject.toLowerCase()}|${[...scopes]
     .sort()
     .join(",")}|${stat.mtimeMs}|${stat.size}`;
@@ -157,7 +199,7 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
   }
 
   const creds = loadCredentials(credFile);
-  const jwt = new google.auth.JWT({
+  const jwt = new JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes,
@@ -199,7 +241,7 @@ function getAdminClient(
     SCOPES.DOMAIN_READONLY,
   ]);
   return {
-    client: google.admin({ version: "directory_v1", auth }),
+    client: new admin_directory_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -219,7 +261,7 @@ function getGroupsClient(
   const subject = impersonatedAdminFor(tenant, adminEmail);
   const auth = buildAuth(tenant, subject, [SCOPES.GROUP]);
   return {
-    client: google.admin({ version: "directory_v1", auth }),
+    client: new admin_directory_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -237,7 +279,7 @@ function getReportsClient(
   const subject = impersonatedAdminFor(tenant, adminEmail);
   const auth = buildAuth(tenant, subject, [SCOPES.REPORTS_AUDIT_READONLY]);
   return {
-    client: google.admin({ version: "reports_v1", auth }),
+    client: new admin_reports_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -248,7 +290,7 @@ function getDataTransferClient(
 ): admin_datatransfer_v1.Admin {
   const subject = impersonatedAdminFor(tenant);
   const auth = buildAuth(tenant, subject, [SCOPES.DATA_TRANSFER]);
-  return google.admin({ version: "datatransfer_v1", auth });
+  return new admin_datatransfer_v1.Admin({ ...CLIENT_DEFAULTS, auth });
 }
 
 /**
@@ -264,7 +306,7 @@ function getDriveClient(tenant: Tenant | null, asUser: string): drive_v3.Drive {
     throw new Error("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_METADATA_READONLY]);
-  return google.drive({ version: "v3", auth });
+  return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
 }
 
 /**
@@ -280,7 +322,7 @@ function getDriveClientWritable(
     throw new Error("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_FULL]);
-  return google.drive({ version: "v3", auth });
+  return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
 }
 
 /**
@@ -294,7 +336,7 @@ function getDriveClientWritable(
 function getDriveClientAsAdmin(tenant: Tenant | null): drive_v3.Drive {
   const subject = impersonatedAdminFor(tenant);
   const auth = buildAuth(tenant, subject, [SCOPES.DRIVE_FULL]);
-  return google.drive({ version: "v3", auth });
+  return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
 }
 
 export interface UserInfo {
@@ -1843,6 +1885,12 @@ export interface RevokeFileOutcome {
 export interface RevokeBatchResult {
   user: string;
   results: RevokeFileOutcome[];
+  /**
+   * The caller went away mid-batch (operator cancelled, or a proxy hung up) and
+   * the remaining files were never touched. `results` holds only the files we
+   * actually processed, so a re-run can safely repeat the whole batch.
+   */
+  aborted?: true;
 }
 
 export type RevokeCategory = "anyone" | "domain" | "user" | "group";
@@ -1853,6 +1901,8 @@ export interface RevokeOptions {
    * externally-classified permission is stripped (historical default).
    */
   categories?: RevokeCategory[];
+  /** The route's `request.signal`: stop revoking once the caller is gone. */
+  signal?: AbortSignal;
 }
 
 /** Per-batch cap — protects the request handler from a runaway client. */
@@ -1945,8 +1995,17 @@ export async function revokeExternalPermissions(
   const trimmed = fileIds.map((f) => String(f || "").trim());
   const results: RevokeFileOutcome[] = new Array(trimmed.length);
   let cursor = 0;
+  let aborted = false;
   const worker = async () => {
     while (cursor < trimmed.length) {
+      // Between files only: a cancelled operator (or a proxy timeout) shouldn't
+      // have the rest of the batch un-shared on their tenant's Drive quota for
+      // a response nobody is reading. The file in flight finishes so its
+      // outcome is reported rather than left unknown.
+      if (options.signal?.aborted) {
+        aborted = true;
+        return;
+      }
       const idx = cursor++;
       const fileId = trimmed[idx];
       if (!fileId) continue;
@@ -1955,7 +2014,8 @@ export async function revokeExternalPermissions(
         getAdminDrive,
         fileId,
         verifiedDomains,
-        allowedCategories
+        allowedCategories,
+        options.signal
       );
     }
   };
@@ -1968,8 +2028,10 @@ export async function revokeExternalPermissions(
 
   return {
     user: userEmail.toLowerCase(),
-    // Drop holes left by blank ids (skipped above) so the shape is unchanged.
+    // Drop holes left by blank ids (skipped above), and by files a cancellation
+    // never reached, so the shape is unchanged.
     results: results.filter((r): r is RevokeFileOutcome => r !== undefined),
+    ...(aborted ? { aborted: true as const } : {}),
   };
 }
 
@@ -1978,7 +2040,8 @@ async function revokeForOneFile(
   getAdminDrive: () => drive_v3.Drive,
   fileId: string,
   verifiedDomains: Set<string>,
-  allowedCategories: Set<RevokeCategory> | null
+  allowedCategories: Set<RevokeCategory> | null,
+  signal?: AbortSignal
 ): Promise<RevokeFileOutcome> {
   const outcome: RevokeFileOutcome = {
     fileId,
@@ -2047,6 +2110,11 @@ async function revokeForOneFile(
   outcome.permissionsTargeted = externalPerms.length;
 
   for (const p of externalPerms) {
+    // Between deletes only: what we already removed is reported, and a
+    // cancelled operator's request stops rather than spending more Drive quota.
+    // The delete in flight is left alone — it is a write, so dropping it would
+    // leave the permission's fate unknown.
+    if (signal?.aborted) break;
     const target =
       p.type === "anyone"
         ? "anyone"
@@ -2283,6 +2351,13 @@ export interface DriveTransferProgress {
   errors: DriveTransferErrorEntry[];
   /** Cursor to pass into the next call. Null when the entire selection is done. */
   nextCursor: DriveTransferCursor | null;
+  /**
+   * The caller went away mid-chunk (operator cancelled, or a proxy hung up) and
+   * we stopped early. The counters describe what really moved and `nextCursor`
+   * still carries the remaining queue, so a re-run resumes rather than
+   * restarting the walk.
+   */
+  aborted?: true;
 }
 
 /** Per-request work budget. Bounded so each call stays well under request timeouts. */
@@ -2428,7 +2503,11 @@ export async function transferDriveFoldersOwnership(
   tenant: Tenant | null,
   fromUser: string,
   toUser: string,
-  cursor: DriveTransferCursor
+  cursor: DriveTransferCursor,
+  opts: {
+    /** The route's `request.signal`: stop walking once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<DriveTransferProgress> {
   if (!isValidEmail(fromUser) || !isValidEmail(toUser)) {
     throw new Error("fromUser and toUser must be valid email addresses");
@@ -2493,6 +2572,13 @@ export async function transferDriveFoldersOwnership(
   let listPagesFetched = 0;
 
   while (budget > 0 && listPagesFetched < TRANSFER_MAX_LIST_PAGES) {
+    // A cancelled operator (or a proxy that timed out) must not keep moving
+    // files: stop between items and hand the untouched remainder back as
+    // nextCursor, so a re-run resumes here instead of re-walking from the top.
+    if (opts.signal?.aborted) {
+      out.aborted = true;
+      break;
+    }
     if (!local.current) {
       const next = local.queue.shift();
       if (!next) break;
@@ -2543,11 +2629,18 @@ export async function transferDriveFoldersOwnership(
               pageToken: local.current!.pageToken ?? undefined,
               corpora: "user",
             },
-            { timeout: ADMIN_API_TIMEOUT_MS }
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
           ),
-        { retryServerErrors: true }
+        { retryServerErrors: true, signal: opts.signal }
       );
     } catch (e) {
+      // A listing dropped by the cancellation is not a bad branch: leave
+      // `current` (folder + page token) untouched so the cursor resumes here,
+      // and never record it as a per-item failure.
+      if (isAbortError(e)) {
+        out.aborted = true;
+        break;
+      }
       // Record the listing failure against the folder itself and move on so
       // the rest of the selection isn't held up by one bad branch.
       out.errors.push({
@@ -2571,8 +2664,16 @@ export async function transferDriveFoldersOwnership(
     // enqueued serially afterwards so the queue hard-cap check can't race.
     const discoveredFolders: Array<{ id: string; name: string | null }> = [];
     let childCursor = 0;
+    let childAborted = false;
     const childWorker = async () => {
       while (childCursor < children.length) {
+        // Between items only: the transfer already in flight finishes so its
+        // outcome is counted honestly, but a cancelled operator's chunk stops
+        // instead of moving up to 500 more files on their tenant's quota.
+        if (opts.signal?.aborted) {
+          childAborted = true;
+          return;
+        }
         const child = children[childCursor++];
         const childId = child.id;
         if (!childId) continue;
@@ -2619,6 +2720,14 @@ export async function transferDriveFoldersOwnership(
         enqueuedFolders.add(f.id);
         local.queue.push(f.id);
       }
+    }
+    if (childAborted) {
+      // Deliberately leave `current.pageToken` pointing at THIS page: a re-run
+      // re-checks the items we already moved (transferring an item that is
+      // already owned by the target is a no-op) rather than skipping the ones
+      // we never claimed.
+      out.aborted = true;
+      break;
     }
     budget -= children.length;
 
@@ -2845,11 +2954,11 @@ const MAILBOX_API_TIMEOUT_MS = 60_000;
 const MAILBOX_EXPORT_DEFAULT_PAGE = 25;
 const MAILBOX_EXPORT_MAX_PAGE = 50;
 // Fetch raw messages in parallel per page. messages.get costs 5 quota units,
-// so 6 in flight peaks at ~30 units/sec — several times faster than a serial
-// walk while staying well under Gmail's 250 units/user/sec budget, with the
-// retry layer absorbing the occasional 429. The count also bounds the byte
-// budget's overshoot (see below), so it cannot be raised independently.
-const MAILBOX_EXPORT_FETCH_CONCURRENCY = 6;
+// so 3 in flight peaks at ~15 units/sec — faster than a serial walk while
+// staying well under Gmail's 250 units/user/sec budget, with the retry layer
+// absorbing the occasional 429. The count also bounds the byte budget's
+// overshoot (see below), so it cannot be raised independently.
+const MAILBOX_EXPORT_FETCH_CONCURRENCY = 3;
 // Cumulative raw-byte budget per returned page. A single Gmail message can be
 // ~67 MB base64url, so a page capped only by message count (up to 50) could
 // hold multiple GB and throw `RangeError: Invalid string length` when
@@ -2859,11 +2968,13 @@ const MAILBOX_EXPORT_FETCH_CONCURRENCY = 6;
 //
 // The budget check happens when a worker CLAIMS the next id, so in-flight
 // fetches can overshoot it by up to (concurrency - 1) × max-message: with
-// 6 workers that's 48 MB + 5 × 67 MB ≈ 383 MB. V8's real string cap is
-// 2^29 - 24 chars (~512 MiB, not 1 GB), so the worst case clears it with
-// margin — raising either the budget or the concurrency erodes that margin.
-// Always fetch at least one id so a lone oversized message still progresses.
-const MAILBOX_EXPORT_PAGE_BYTE_BUDGET = 48 * 1024 * 1024;
+// 3 workers that's 16 MB + 2 × 67 MB ≈ 150 MB of base64 strings, and the
+// response serialisation roughly triples that transiently. V8's real string
+// cap is 2^29 - 24 chars (~512 MiB), so the worst case clears it with wide
+// margin — raising either the budget or the concurrency erodes that margin
+// and the RAM a small host needs. Always fetch at least one id so a lone
+// oversized message still progresses.
+const MAILBOX_EXPORT_PAGE_BYTE_BUDGET = 16 * 1024 * 1024;
 
 /** Hard cap on messages accepted in a single import batch. */
 export const MAILBOX_IMPORT_BATCH_CAP = 25;
@@ -2961,6 +3072,12 @@ export interface MailboxExportPage {
    * header.
    */
   labels?: GmailLabelInfo[];
+  /**
+   * The caller went away mid-page (operator cancelled, or a proxy hung up) and
+   * we stopped early. Whatever was fetched is still returned; `pendingIds`
+   * carries the ids we abandoned so a re-run resumes instead of losing them.
+   */
+  aborted?: true;
 }
 
 /** Best-effort extraction of an HTTP status from a googleapis error. */
@@ -3092,23 +3209,65 @@ function isRetriableGoogleError(
 }
 
 /**
+ * The caller's request went away — the operator clicked Cancel, or a reverse
+ * proxy hung up — and a long-running helper stopped on purpose. Kept distinct
+ * from a Google rejection so routes can answer with a cancellation instead of
+ * reporting an upstream failure that never happened.
+ */
+export class RequestAbortedError extends Error {
+  constructor(message = "Request cancelled by the client") {
+    super(message);
+    this.name = "RequestAbortedError";
+  }
+}
+
+/**
+ * True for our own cancellation and for the shapes an aborted fetch reaches us
+ * as through gaxios (which copies the DOMException name into `code`).
+ * Deliberately does NOT match "TimeoutError": that is our own per-call timeout
+ * firing, which is a real upstream failure and stays retriable.
+ */
+export function isAbortError(e: unknown): boolean {
+  if (e instanceof RequestAbortedError) return true;
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { name?: unknown; code?: unknown };
+  return (
+    err.name === "AbortError" ||
+    err.code === "AbortError" ||
+    err.code === "ABORT_ERR" ||
+    err.code === "ERR_CANCELED"
+  );
+}
+
+/**
  * Retry a Google API call with exponential backoff + jitter on transient errors.
  *
  * Exported so API routes that talk to Gmail / Calendar directly get the same
  * rate-limit handling as the Admin SDK helpers here: use
  * `retryServerErrors: false` for non-idempotent writes (create, insert) and
- * `true` for reads and idempotent settings updates.
+ * `true` for reads and idempotent settings updates. Pass `signal` (a route's
+ * `request.signal`) to stop as soon as the caller goes away; forward the same
+ * signal in the per-call options to drop an in-flight request too, but only
+ * where a dropped call can't leave a half-done write behind.
  */
 export async function withGoogleRetry<T>(
   fn: () => Promise<T>,
-  opts: { retries?: number; retryServerErrors: boolean }
+  opts: { retries?: number; retryServerErrors: boolean; signal?: AbortSignal }
 ): Promise<T> {
   const retries = opts.retries ?? 5;
   let attempt = 0;
   while (true) {
+    // Before every attempt, not just the first: once the operator has cancelled
+    // (or a proxy has timed out) another call only spends the tenant's API quota
+    // on a response nobody will read.
+    if (opts.signal?.aborted) throw new RequestAbortedError();
     try {
       return await fn();
     } catch (e) {
+      // A cancellation is not a transient Google failure: never retry it, and
+      // never sleep out a backoff for a caller that is already gone.
+      if (opts.signal?.aborted) throw new RequestAbortedError();
+      if (isAbortError(e)) throw e;
       attempt++;
       if (attempt > retries || !isRetriableGoogleError(e, opts)) throw e;
       const backoff = Math.min(8000, 300 * 2 ** (attempt - 1));
@@ -3162,6 +3321,8 @@ export async function exportMailboxPage(
     includeSpamTrash?: boolean;
     /** Unfetched ids from a prior page whose byte budget was reached. */
     pendingIds?: string[];
+    /** The route's `request.signal`: stop fetching once the caller is gone. */
+    signal?: AbortSignal;
   } = {}
 ): Promise<MailboxExportPage> {
   if (!isValidEmail(userEmail)) {
@@ -3196,9 +3357,9 @@ export async function exportMailboxPage(
             pageToken: opts.pageToken,
             includeSpamTrash: opts.includeSpamTrash ?? false,
           },
-          { timeout: MAILBOX_API_TIMEOUT_MS }
+          { timeout: MAILBOX_API_TIMEOUT_MS, signal: opts.signal }
         ),
-      { retryServerErrors: true }
+      { retryServerErrors: true, signal: opts.signal }
     );
     ids = (listRes.data.messages || [])
       .map((m) => m.id)
@@ -3213,13 +3374,26 @@ export async function exportMailboxPage(
   const skipped: Array<{ id: string; error: string }> = [];
   // Cumulative raw bytes fetched this page. Once it reaches the budget we stop
   // claiming new ids; workers claim sequentially, so the fetched set is always a
-  // prefix [0, cursor) and the tail is returned as pendingIds. The `?? 0` and
+  // prefix [0, cursor) and the unclaimed tail rolls over as pendingIds. The `?? 0` and
   // `budgetReached` flag guarantee at least one message is fetched.
   let accumulatedBytes = 0;
   let budgetReached = false;
   let cursor = 0;
+  // Ids that reached a final state this call (fetched, or recorded as skipped).
+  // Everything else rolls over to `pendingIds` — including a fetch a
+  // cancellation abandoned, so a resumed export can never silently drop a
+  // message it claimed but never wrote.
+  const settled = new Array<boolean>(ids.length).fill(false);
+  let aborted = false;
   const worker = async () => {
     while (cursor < ids.length && !budgetReached) {
+      // A cancelled operator (or a proxy that gave up) must not keep pulling
+      // raw messages for a socket nobody is reading — each one costs Gmail
+      // quota and up to tens of MB of heap.
+      if (opts.signal?.aborted) {
+        aborted = true;
+        break;
+      }
       const idx = cursor++;
       const id = ids[idx];
       try {
@@ -3227,15 +3401,16 @@ export async function exportMailboxPage(
           () =>
             gmail.users.messages.get(
               { userId: "me", id, format: "raw" },
-              { timeout: MAILBOX_API_TIMEOUT_MS }
+              { timeout: MAILBOX_API_TIMEOUT_MS, signal: opts.signal }
             ),
-          { retryServerErrors: true }
+          { retryServerErrors: true, signal: opts.signal }
         );
         // A message with no raw body (e.g. a Chat / structured item) can't be
         // re-imported, so record it as skipped rather than writing an empty,
         // unimportable line that the importer would later count as a failure.
         if (!r.data.raw) {
           skipped.push({ id, error: "Message has no exportable raw content" });
+          settled[idx] = true;
           continue;
         }
         messages[idx] = {
@@ -3246,6 +3421,7 @@ export async function exportMailboxPage(
           sizeEstimate: r.data.sizeEstimate ?? 0,
           raw: r.data.raw,
         };
+        settled[idx] = true;
         accumulatedBytes += r.data.raw.length;
         if (accumulatedBytes >= MAILBOX_EXPORT_PAGE_BYTE_BUDGET) {
           // Stop starting new fetches; in-flight ones finish and fill their
@@ -3253,9 +3429,17 @@ export async function exportMailboxPage(
           budgetReached = true;
         }
       } catch (e) {
+        // A fetch dropped by the cancellation is not an unfetchable message:
+        // leave the id unsettled so it rolls over to pendingIds instead of
+        // being reported as a permanent gap in the backup.
+        if (isAbortError(e)) {
+          aborted = true;
+          break;
+        }
         // Don't let one unfetchable message abort the whole mailbox export —
         // record it and move on.
         skipped.push({ id, error: e instanceof Error ? e.message : String(e) });
+        settled[idx] = true;
       }
     }
   };
@@ -3266,10 +3450,13 @@ export async function exportMailboxPage(
     )
   );
 
-  // Ids never claimed (cursor points past the last claimed index) roll over to
-  // the next call. Claims are sequential, so this tail is exactly the unfetched
-  // remainder of the current list page.
-  const pendingIds = cursor < ids.length ? ids.slice(cursor) : null;
+  // Ids that never reached a final state roll over to the next call: the tail
+  // the byte budget stopped us claiming plus, after a cancellation, the fetch
+  // we abandoned. With no cancellation this is exactly `ids.slice(cursor)`,
+  // since claims are sequential and every claimed id settles.
+  const unsettled = ids.filter((_, i) => !settled[i]);
+  const pendingIds = unsettled.length > 0 ? unsettled : null;
+  const wasAborted = aborted || opts.signal?.aborted === true;
 
   const page: MailboxExportPage = {
     user: userEmail.toLowerCase(),
@@ -3279,8 +3466,11 @@ export async function exportMailboxPage(
     resultSizeEstimate,
     pendingIds,
   };
-  // Labels belong on the first call only (no pageToken and not a continuation).
-  if (!opts.pageToken && !continuing) {
+  if (wasAborted) page.aborted = true;
+  // Labels belong on the first call only (no pageToken and not a continuation),
+  // and are pointless once the caller has gone — one more Gmail call for an
+  // export header nobody will write.
+  if (!opts.pageToken && !continuing && !wasAborted) {
     page.labels = await listGmailLabels(tenant, userEmail);
   }
   return page;
@@ -3447,6 +3637,17 @@ export interface ImportBatchResult {
   inserted: number;
   failed: number;
   errors: Array<{ index: number; message: string }>;
+  /**
+   * The caller went away mid-batch (operator cancelled, or a proxy hung up) and
+   * the remaining messages were never attempted.
+   */
+  aborted?: true;
+  /**
+   * Indexes into the request's `messages` array that were actually inserted.
+   * Reported on a cancelled batch only: messages.insert has no dedup key, so a
+   * re-run that re-sends one of these stores a duplicate copy.
+   */
+  insertedIndexes?: number[];
 }
 
 // A real message carries a handful of labels; cap the array so a crafted
@@ -3480,7 +3681,11 @@ function sanitizeImportLabelIds(labelIds: unknown): string[] {
 export async function importMessageBatch(
   tenant: Tenant | null,
   userEmail: string,
-  messages: ImportMessageInput[]
+  messages: ImportMessageInput[],
+  opts: {
+    /** The route's `request.signal`: stop inserting once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<ImportBatchResult> {
   if (!isValidEmail(userEmail)) {
     throw new Error("userEmail must be a valid email address");
@@ -3496,6 +3701,9 @@ export async function importMessageBatch(
 
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_INSERT_SCOPES);
   const out: ImportBatchResult = { inserted: 0, failed: 0, errors: [] };
+  // Tracked for the cancelled case: the operator's re-run has to know exactly
+  // which messages already landed, because insert cannot dedup them.
+  const insertedIndexes: number[] = [];
 
   const insertOne = async (i: number): Promise<void> => {
     const raw = typeof messages[i]?.raw === "string" ? messages[i].raw : "";
@@ -3532,6 +3740,7 @@ export async function importMessageBatch(
         { retryServerErrors: false }
       );
       out.inserted++;
+      insertedIndexes.push(i);
     } catch (e) {
       // Retry once with no labels — the most common insert rejection is an
       // unapplicable label. But ONLY when the first attempt definitely did not
@@ -3562,6 +3771,7 @@ export async function importMessageBatch(
             { retryServerErrors: false }
           );
           out.inserted++;
+          insertedIndexes.push(i);
           return;
         } catch (e2) {
           out.failed++;
@@ -3587,8 +3797,17 @@ export async function importMessageBatch(
   // isolation and no-blind-retry duplicate protection above are unchanged, and
   // the synchronous counter/array mutations can't interleave mid-statement.
   let cursor = 0;
+  let aborted = false;
   const worker = async () => {
     while (cursor < messages.length) {
+      // Between messages only: a cancelled operator re-runs this batch, and
+      // every further insert here becomes a duplicate they have to hunt down.
+      // The insert already in flight is deliberately left to finish — dropping
+      // it mid-write would leave us unable to say whether Gmail stored it.
+      if (opts.signal?.aborted) {
+        aborted = true;
+        break;
+      }
       await insertOne(cursor++);
     }
   };
@@ -3598,6 +3817,13 @@ export async function importMessageBatch(
       worker
     )
   );
+
+  if (aborted) {
+    out.aborted = true;
+    // Sorted so the log and a resumed run read in message order (inserts
+    // complete out of order under the worker pool).
+    out.insertedIndexes = insertedIndexes.sort((a, b) => a - b);
+  }
 
   return out;
 }

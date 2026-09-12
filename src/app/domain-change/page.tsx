@@ -22,6 +22,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import {
   Globe,
   Loader2,
@@ -214,28 +215,12 @@ export default function DomainChange() {
         badge="Admin SDK"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${
-            message.type === "error"
-              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
-              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-          }`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Globe className="h-5 w-5" />
               Change User Domain
             </CardTitle>
@@ -274,8 +259,8 @@ export default function DomainChange() {
               <>
                 <div className="p-4 rounded-lg border bg-muted/30 space-y-3">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
-                      <User className="h-5 w-5 text-blue-600" />
+                    <div className="h-10 w-10 rounded-full bg-info/10 flex items-center justify-center">
+                      <User className="h-5 w-5 text-info" />
                     </div>
                     <div>
                       <p className="font-medium">{user.name.fullName}</p>
@@ -287,7 +272,7 @@ export default function DomainChange() {
                       {user.isAdmin && (
                         <Badge
                           variant="outline"
-                          className="bg-violet-50 text-violet-700 border-violet-200"
+                          className="border-primary/20 bg-primary/10 text-primary"
                         >
                           Admin
                         </Badge>
@@ -295,7 +280,7 @@ export default function DomainChange() {
                       {user.suspended && (
                         <Badge
                           variant="outline"
-                          className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
+                          className="border-danger/25 bg-danger/10 text-danger-fg"
                         >
                           Suspended
                         </Badge>
@@ -316,7 +301,7 @@ export default function DomainChange() {
                             variant="outline"
                             className={
                               e.primary
-                                ? "bg-blue-50 text-blue-700 border-blue-200"
+                                ? "border-info/25 bg-info/10 text-info-fg"
                                 : ""
                             }
                           >
@@ -394,9 +379,9 @@ export default function DomainChange() {
                     </div>
                   )}
 
-                  <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-                    <AlertTriangle className="h-4 w-4 text-amber-600" />
-                    <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
+                  <Alert variant="warning">
+                    <AlertTriangle className="h-4 w-4 text-warning" />
+                    <AlertDescription>
                       The user&apos;s old email address will automatically
                       become an alias, so they&apos;ll still receive mail at
                       their previous address. They&apos;ll need to sign in with
@@ -426,7 +411,7 @@ export default function DomainChange() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Your Domains</CardTitle>
+            <CardTitle>Your Domains</CardTitle>
             <CardDescription>
               {loadingDomains
                 ? "Loading..."
@@ -460,7 +445,7 @@ export default function DomainChange() {
                       {d.isPrimary && (
                         <Badge
                           variant="outline"
-                          className="bg-blue-50 text-blue-700 border-blue-200 text-xs"
+                          className="border-info/25 bg-info/10 text-info-fg text-xs"
                         >
                           Primary
                         </Badge>
@@ -469,8 +454,8 @@ export default function DomainChange() {
                         variant="outline"
                         className={
                           d.verified
-                            ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50 text-xs"
-                            : "bg-zinc-100 text-zinc-600 border-zinc-200 text-xs"
+                            ? "border-success/25 bg-success/10 text-success-fg text-xs"
+                            : "border-border bg-muted text-muted-foreground text-xs"
                         }
                       >
                         {d.verified ? "Verified" : "Unverified"}

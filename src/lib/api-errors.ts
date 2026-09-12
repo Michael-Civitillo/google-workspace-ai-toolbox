@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ValidationError } from "./validate";
 import { TenantNotFoundError } from "./tenants-server";
-import { googleHttpStatus } from "./admin-sdk";
+import { googleHttpStatus, isAbortError } from "./admin-sdk";
 
 /**
  * Map a thrown error to the HTTP status an API route should answer with.
@@ -12,11 +12,14 @@ import { googleHttpStatus } from "./admin-sdk";
  *     already exists) and is otherwise reported as 502: the failure happened
  *     upstream, and monitors keying on 5xx should be able to tell an
  *     application bug (500) from Google saying no.
+ *   - a cancelled request → 499 (nginx's "client closed request"): the caller
+ *     hung up, so this is not a failure of ours and should not page anyone.
  *   - anything else       → 500
  */
 export function errorStatusFor(e: unknown): number {
   if (e instanceof TenantNotFoundError) return 404;
   if (e instanceof ValidationError) return 400;
+  if (isAbortError(e)) return 499;
   const upstream = googleHttpStatus(e);
   if (upstream !== null) {
     return upstream === 404 || upstream === 409 ? upstream : 502;

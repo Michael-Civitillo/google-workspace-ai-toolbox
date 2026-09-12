@@ -99,9 +99,9 @@ export default function SettingsPage() {
         )}
 
         {ssoDisabledByEnv && (
-          <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30">
-            <AlertCircle className="h-4 w-4 text-amber-600" />
-            <AlertDescription className="text-sm text-amber-800 dark:text-amber-300">
+          <Alert variant="warning">
+            <AlertCircle className="h-4 w-4 text-warning" />
+            <AlertDescription>
               <code className="font-mono bg-muted px-1 rounded">APP_SSO_DISABLED=true</code>{" "}
               is set in the server environment — single sign-on is switched off
               and password login is available regardless of the configuration.
@@ -112,7 +112,7 @@ export default function SettingsPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <KeyRound className="h-5 w-5" />
               Single sign-on
             </CardTitle>
@@ -150,7 +150,7 @@ export default function SettingsPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Archive className="h-5 w-5" />
               Configuration backup
             </CardTitle>

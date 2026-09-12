@@ -237,19 +237,134 @@ function parseUrl(value: string, field: string): URL {
 }
 
 /**
- * Issuer identifiers must be https: the token exchange carries the client
- * secret and the ID token. Plain http is tolerated only for loopback hosts so
- * a local development provider can be used.
+ * Local-provider opt-in. The server is the one that fetches the issuer, so
+ * allowing a private target by default would let any signed-in admin use the
+ * issuer check to learn which ports answer on the server's own network.
+ */
+export function privateIssuerAllowed(): boolean {
+  return process.env.APP_SSO_ALLOW_PRIVATE_ISSUER === "true";
+}
+
+/** Refusal text shared with the discovery path; names the opt-in deliberately. */
+export const PRIVATE_ISSUER_REFUSED =
+  "issuer must be a public host: private, loopback and link-local addresses are refused. Set APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server to use a local development provider.";
+
+/** Dotted-quad octets, or null when the host is not a literal IPv4 address. */
+function ipv4Octets(host: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return null;
+  const octets = m.slice(1, 5).map(Number);
+  return octets.every((o) => o <= 255) ? octets : null;
+}
+
+function isPrivateIpv4([a, b]: number[]): boolean {
+  return (
+    a === 0 || // 0.0.0.0/8: "this network", which the stack dials locally
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+  );
+}
+
+/**
+ * Expand an IPv6 literal to its 16 bytes, or null when the host is not one.
+ * Hand-rolled because the classification below has to see the address the
+ * stack will really dial, including the IPv4 hiding inside "::ffff:7f00:1".
+ */
+function ipv6Bytes(host: string): number[] | null {
+  if (!host.includes(":") || !/^[0-9a-f:.]+$/.test(host)) return null;
+  const halves = host.split("::");
+  if (halves.length > 2) return null;
+  const bytesOf = (text: string): number[] | null => {
+    if (!text) return [];
+    const out: number[] = [];
+    const groups = text.split(":");
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      if (group.includes(".")) {
+        // A trailing dotted quad ("::ffff:127.0.0.1") is the last group.
+        const quad = i === groups.length - 1 ? ipv4Octets(group) : null;
+        if (!quad) return null;
+        out.push(...quad);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      const value = parseInt(group, 16);
+      out.push(value >> 8, value & 0xff);
+    }
+    return out;
+  };
+  const head = bytesOf(halves[0]);
+  const tail = halves.length === 2 ? bytesOf(halves[1]) : [];
+  if (!head || !tail) return null;
+  if (halves.length === 1) return head.length === 16 ? head : null;
+  const gap = 16 - head.length - tail.length;
+  if (gap < 1) return null;
+  return [...head, ...new Array<number>(gap).fill(0), ...tail];
+}
+
+function isPrivateIpv6(bytes: number[]): boolean {
+  if ((bytes[0] & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
+  if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return true; // fe80::/10
+  if (!bytes.slice(0, 10).every((x) => x === 0)) return false;
+  // An IPv4-mapped ("::ffff:7f00:1") or -compatible ("::7f00:1") address ends
+  // up dialling that IPv4 host, so judge the embedded address instead.
+  const mapped = bytes[10] === 0xff && bytes[11] === 0xff;
+  const compatible = bytes[10] === 0 && bytes[11] === 0;
+  if (!mapped && !compatible) return false;
+  const v4 = bytes.slice(12);
+  // :: (unspecified) and ::1 (loopback) live in the compatible range too.
+  if (compatible && v4[0] === 0 && v4[1] === 0 && v4[2] === 0) return true;
+  return isPrivateIpv4(v4);
+}
+
+/**
+ * True for hosts that only exist on the server's own network. Judged from the
+ * URL text alone — no DNS lookup, so a public name pointing into a private
+ * range still gets through; this closes the port-scan oracle, it is not a
+ * general SSRF firewall (discovery follows no redirects and returns nothing
+ * but metadata for the same issuer).
+ */
+export function isPrivateIssuerHost(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return true;
+  }
+  const v4 = ipv4Octets(host);
+  if (v4) return isPrivateIpv4(v4);
+  const v6 = ipv6Bytes(host);
+  return v6 ? isPrivateIpv6(v6) : false;
+}
+
+/**
+ * Issuer identifiers must be https on a public host: the token exchange
+ * carries the client secret and the ID token, and the server fetches whatever
+ * is typed here. Plain http (loopback only) and private targets need the
+ * APP_SSO_ALLOW_PRIVATE_ISSUER opt-in.
  */
 export function validateIssuer(value: unknown): string {
   const s = requireString(value, "issuer", MAX_URL_CHARS);
   const url = parseUrl(s, "issuer");
+  const allowPrivate = privateIssuerAllowed();
+  if (!allowPrivate && isPrivateIssuerHost(url.hostname)) {
+    throw new ValidationError(PRIVATE_ISSUER_REFUSED);
+  }
   const secure =
     url.protocol === "https:" ||
-    (url.protocol === "http:" && isLoopbackHost(url.hostname));
+    (url.protocol === "http:" && allowPrivate && isLoopbackHost(url.hostname));
   if (!secure) {
     throw new ValidationError(
-      "issuer must use https (plain http is only allowed for localhost)"
+      "issuer must use https (plain http needs a loopback host and APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server)"
     );
   }
   // Discovery compares the document's `issuer` byte-for-byte with what was

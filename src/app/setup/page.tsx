@@ -70,35 +70,32 @@ export default function Setup() {
 
       <div className="max-w-3xl space-y-6">
         {/* Guided onboarding banner */}
-        <Link href="/onboarding" className="block group">
-          <Card className="border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent transition-all hover:border-primary/50 hover:shadow-md">
-            <CardContent className="pt-6">
-              <div className="flex items-start gap-4">
-                <div className="h-9 w-9 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
-                  <Sparkles className="h-4.5 w-4.5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-semibold">
-                    Prefer a guided walkthrough?
-                  </h3>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    The 5-step onboarding wizard handles install, service account
-                    setup, and your first tenant in one flow.
-                  </p>
-                </div>
-                <span className="text-xs font-medium text-primary shrink-0 inline-flex items-center gap-1 self-center group-hover:translate-x-0.5 transition-transform">
-                  Open
-                  <ArrowRight className="h-3.5 w-3.5" />
-                </span>
-              </div>
-            </CardContent>
-          </Card>
+        <Link
+          href="/onboarding"
+          className="rgb-ring rgb-ring-hover group flex items-center gap-4 rounded-xl border border-primary/25 bg-primary/5 p-4 outline-none transition-colors hover:bg-primary/8 focus-visible:ring-3 focus-visible:ring-ring/40"
+        >
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Sparkles className="size-4" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold tracking-tight">
+              Prefer a guided walkthrough?
+            </span>
+            <span className="mt-0.5 block text-[13px] leading-relaxed text-muted-foreground">
+              The 5-step onboarding wizard handles install, service account
+              setup, and your first tenant in one flow.
+            </span>
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary">
+            Open
+            <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+          </span>
         </Link>
 
         {/* Status Check */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
               Connection Status
             </CardTitle>
@@ -114,11 +111,11 @@ export default function Setup() {
                 <div className="flex items-center justify-between p-3 rounded-lg border">
                   <div className="flex items-center gap-3">
                     {status?.installed ? (
-                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                      <CheckCircle2 className="h-5 w-5 text-success" />
                     ) : (
                       <XCircle
                         className={`h-5 w-5 ${
-                          cliOptional ? "text-muted-foreground" : "text-red-500"
+                          cliOptional ? "text-muted-foreground" : "text-danger"
                         }`}
                       />
                     )}
@@ -139,10 +136,10 @@ export default function Setup() {
                     variant="outline"
                     className={
                       status?.installed
-                        ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
+                        ? "border-success/25 bg-success/10 text-success-fg"
                         : cliOptional
                         ? "text-muted-foreground"
-                        : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
+                        : "border-danger/25 bg-danger/10 text-danger-fg"
                     }
                   >
                     {status?.installed
@@ -154,12 +151,12 @@ export default function Setup() {
                 </div>
 
                 {!status?.installed && !cliOptional && (status?.bin || status?.error) && (
-                  <div className="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs space-y-1">
-                    <p className="font-semibold text-amber-900 dark:text-amber-200">
+                  <div className="rounded-lg border border-warning/30 bg-warning/8 p-3 text-xs space-y-1">
+                    <p className="font-semibold text-warning-fg">
                       Diagnostic info
                     </p>
                     {status.bin && (
-                      <p className="text-amber-800 dark:text-amber-300">
+                      <p className="text-warning-fg">
                         Tried to run:{" "}
                         <code className="font-mono">{status.bin}</code>
                         {status.bin !== "gws" &&
@@ -168,12 +165,12 @@ export default function Setup() {
                       </p>
                     )}
                     {status.error && (
-                      <p className="text-amber-800 dark:text-amber-300 break-all">
+                      <p className="text-warning-fg break-all">
                         Error:{" "}
                         <code className="font-mono">{status.error}</code>
                       </p>
                     )}
-                    <p className="text-amber-800 dark:text-amber-300 pt-1">
+                    <p className="text-warning-fg pt-1">
                       Make sure <code className="font-mono">gws --version</code>{" "}
                       works in the same terminal you started{" "}
                       <code className="font-mono">npm run dev</code> from. On
@@ -188,11 +185,11 @@ export default function Setup() {
                 <div className="flex items-center justify-between p-3 rounded-lg border">
                   <div className="flex items-center gap-3">
                     {status?.authenticated ? (
-                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                      <CheckCircle2 className="h-5 w-5 text-success" />
                     ) : (
                       <XCircle
                         className={`h-5 w-5 ${
-                          cliOptional ? "text-muted-foreground" : "text-red-500"
+                          cliOptional ? "text-muted-foreground" : "text-danger"
                         }`}
                       />
                     )}
@@ -211,10 +208,10 @@ export default function Setup() {
                     variant="outline"
                     className={
                       status?.authenticated
-                        ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
+                        ? "border-success/25 bg-success/10 text-success-fg"
                         : cliOptional
                         ? "text-muted-foreground"
-                        : "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
+                        : "border-danger/25 bg-danger/10 text-danger-fg"
                     }
                   >
                     {status?.authenticated
@@ -228,9 +225,9 @@ export default function Setup() {
                 <div className="flex items-center justify-between p-3 rounded-lg border">
                   <div className="flex items-center gap-3">
                     {(tenantCount ?? 0) > 0 ? (
-                      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                      <CheckCircle2 className="h-5 w-5 text-success" />
                     ) : (
-                      <XCircle className="h-5 w-5 text-red-500" />
+                      <XCircle className="h-5 w-5 text-danger" />
                     )}
                     <div>
                       <p className="text-sm font-medium">Open Admin tenants</p>
@@ -255,7 +252,7 @@ export default function Setup() {
                   ) : (
                     <Badge
                       variant="outline"
-                      className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
+                      className="border-success/25 bg-success/10 text-success-fg"
                     >
                       Ready
                     </Badge>
@@ -288,7 +285,7 @@ export default function Setup() {
         {/* Installation Steps */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Terminal className="h-5 w-5" />
               Installation Guide
             </CardTitle>
@@ -444,9 +441,9 @@ export default function Setup() {
 
             <Separator />
 
-            <Alert className="border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/40">
-              <ExternalLink className="h-4 w-4 text-blue-600" />
-              <AlertDescription className="text-blue-800 dark:text-blue-300 text-sm">
+            <Alert variant="info">
+              <ExternalLink className="h-4 w-4 text-info" />
+              <AlertDescription>
                 For service account setup (recommended for admin use), see the{" "}
                 <a
                   href="https://github.com/googleworkspace/cli#authentication"

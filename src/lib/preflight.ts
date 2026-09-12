@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { JWT } from "google-auth-library";
 import { readFileSync } from "fs";
 import type { Tenant } from "./tenant-types";
 
@@ -133,31 +133,30 @@ export async function preflightTenantScopes(
     throw new Error("Tenant has no credentialsFile configured");
   }
 
+  // Fixed messages only: the raw error would name the path and, for a parse
+  // failure, quote the file's first bytes — and this text goes to the browser.
   let raw: string;
   try {
     raw = readFileSync(tenant.credentialsFile, "utf-8");
-  } catch (e) {
-    throw new Error(
-      `Failed to read service account JSON at ${tenant.credentialsFile}: ${
-        e instanceof Error ? e.message : String(e)
-      }`
-    );
+  } catch {
+    throw new Error("Service account key file could not be read");
   }
 
   let creds: ServiceAccountCreds;
   try {
     creds = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(
-      `Service account file is not valid JSON: ${
-        e instanceof Error ? e.message : String(e)
-      }`
-    );
+  } catch {
+    throw new Error("Service account key file is not valid JSON");
   }
 
-  if (!creds.client_email || !creds.private_key) {
+  if (
+    !creds ||
+    typeof creds !== "object" ||
+    typeof creds.client_email !== "string" ||
+    typeof creds.private_key !== "string"
+  ) {
     throw new Error(
-      "Service account JSON is missing client_email or private_key"
+      "Service account key file is not a service-account key (missing client_email or private_key)"
     );
   }
 
@@ -189,7 +188,7 @@ export async function preflightTenantScopes(
   const results = await Promise.all(
     REQUIRED_SCOPES.map(async ({ scope, label, feature }) => {
       try {
-        const auth = new google.auth.JWT({
+        const auth = new JWT({
           email: creds.client_email,
           key: creds.private_key,
           scopes: [scope],
@@ -221,4 +220,62 @@ export async function preflightTenantScopes(
     serviceAccountClientId: creds.client_id ?? null,
     results,
   };
+}
+
+/**
+ * Cached wrapper around preflightTenantScopes, keyed by tenant id.
+ *
+ * One preflight fans out a JWT token exchange per scope (14 handshakes with
+ * Google's OAuth endpoint, each with its own JWT client). The tenants and
+ * onboarding pages ask for it on visit, so a few reloads would multiply into
+ * dozens of outbound handshakes. Cache the answer briefly and coalesce
+ * concurrent probes; `fresh` (the "Re-check" button) forces a real probe.
+ */
+const PREFLIGHT_CACHE_TTL_MS = 10_000;
+const preflightCache = new Map<string, { at: number; value: PreflightResult }>();
+const preflightInFlight = new Map<string, Promise<PreflightResult>>();
+
+export interface CachedPreflight {
+  result: PreflightResult;
+  /** True when no token exchange was issued for this call — callers must not audit it as a DWD check. */
+  cached: boolean;
+}
+
+// Keep the cache bounded: it is keyed by tenant id, so a long-lived server that
+// sees tenants added and removed would otherwise retain an entry per tenant
+// forever. Anything past its TTL is already unusable, so drop it on write.
+function rememberPreflight(key: string, value: PreflightResult): void {
+  const now = Date.now();
+  for (const [k, entry] of preflightCache) {
+    if (now - entry.at >= PREFLIGHT_CACHE_TTL_MS) preflightCache.delete(k);
+  }
+  preflightCache.set(key, { at: now, value });
+}
+
+export async function preflightTenantScopesCached(
+  tenant: Tenant,
+  opts: { fresh?: boolean } = {}
+): Promise<CachedPreflight> {
+  const key = tenant.id;
+  if (!opts.fresh) {
+    const hit = preflightCache.get(key);
+    if (hit && Date.now() - hit.at < PREFLIGHT_CACHE_TTL_MS) {
+      return { result: hit.value, cached: true };
+    }
+    // A coalesced caller rides along on a probe someone else started, which
+    // that caller already audits — report it as cached so one fan-out to
+    // Google never shows up as several DWD checks in the log.
+    const inFlight = preflightInFlight.get(key);
+    if (inFlight) return { result: await inFlight, cached: true };
+  }
+  const probe = preflightTenantScopes(tenant)
+    .then((value) => {
+      rememberPreflight(key, value);
+      return value;
+    })
+    .finally(() => {
+      if (preflightInFlight.get(key) === probe) preflightInFlight.delete(key);
+    });
+  preflightInFlight.set(key, probe);
+  return { result: await probe, cached: false };
 }

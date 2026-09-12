@@ -1,11 +1,25 @@
 /**
  * Auth helpers for Open Admin.
  *
- * Uses Web Crypto (globalThis.crypto.subtle) so the same module works in
- * both Edge Middleware and Node API routes — `node:crypto` would crash the
- * edge runtime build.
+ * Uses Web Crypto (globalThis.crypto.subtle) for the MACs; the only Node
+ * dependency is the session-secret resolver, which is why the request gate
+ * runs as a Node.js proxy (src/proxy.ts) rather than edge middleware.
+ *
+ * Every signed value carries a purpose tag inside the signed payload
+ * (`v2.` for sessions, `hs1.` for the single sign-on handshake) so a token
+ * minted for one purpose can never verify as another. The untagged legacy
+ * session format is no longer accepted: it shared a key and a shape with the
+ * handshake cookie, which the public sign-in start route hands to anyone.
  */
 
+import { resolveSessionSecret } from "./session-secret";
+
+// Deliberately NOT a `__Host-` prefixed name. That prefix requires the Secure
+// attribute, which browsers refuse over plain http, and this tool is built to be
+// reached that way: http://localhost for `next dev`, the packaged desktop build,
+// a container on a LAN. Being able to sign in at all beats the prefix's
+// guarantee (no other host on the registrable domain can overwrite the cookie),
+// which SameSite=Strict plus the proxy's Origin check already largely cover.
 const COOKIE_NAME = "gws_toolbox_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 const TEXT_ENCODER = new TextEncoder();
@@ -16,32 +30,14 @@ export function authConfigured(): boolean {
 }
 
 /**
- * Secret used to sign session tokens. Prefer a dedicated, high-entropy
- * APP_SESSION_SECRET: it decouples the token signature from the login
- * password, so a stolen session cookie can no longer be used to brute-force
- * APP_PASSWORD offline. Falls back to APP_PASSWORD when no session secret is
- * set, preserving the single-env-var deployment model.
+ * Secret used to sign session tokens: APP_SESSION_SECRET when set, otherwise
+ * a random secret generated once and persisted in the data directory. The
+ * login password is never used as a MAC key by default — with single sign-on
+ * enabled the public start route hands a signed value to anyone, which would
+ * be a free offline brute-force sample. See session-secret.ts.
  */
-let warnedSecretFallback = false;
-
 function sessionSecret(): string {
-  const explicit = process.env.APP_SESSION_SECRET;
-  if (explicit && explicit.length > 0) return explicit;
-  const s = process.env.APP_PASSWORD;
-  if (!s) throw new Error("APP_PASSWORD is not set");
-  // Falling back to APP_PASSWORD as the HMAC key means a captured session
-  // cookie can be used to brute-force the login password offline. Warn once so
-  // operators know to set a dedicated high-entropy APP_SESSION_SECRET, without
-  // breaking the intentional single-env-var deployment path.
-  if (!warnedSecretFallback) {
-    warnedSecretFallback = true;
-    console.warn(
-      "[auth] APP_SESSION_SECRET is not set — signing sessions with APP_PASSWORD. " +
-        "Set a dedicated high-entropy APP_SESSION_SECRET so a leaked session cookie " +
-        "can't be used to brute-force the login password offline."
-    );
-  }
-  return s;
+  return resolveSessionSecret();
 }
 
 async function importHmacKey(secret: string): Promise<CryptoKey> {
@@ -172,9 +168,57 @@ export interface SessionIdentity {
 }
 
 const TOKEN_V2 = "v2";
+// Purpose tag for short-lived signed values (the single sign-on handshake).
+// Distinct from the session tag and part of the signed payload, so neither
+// kind of token can be replayed as the other.
+const SIGNED_VALUE_TAG = "hs1";
 // Bound every embedded claim so a hostile or misconfigured identity provider
 // can't bloat the cookie past browser limits and lock the operator out.
 const MAX_CLAIM_CHARS = 254;
+
+/**
+ * Sessions revoked before their expiry (sign-out), keyed by the token's nonce
+ * and kept only until the token would have expired anyway. Lives on
+ * globalThis so the proxy bundle and the route bundles — separate module
+ * graphs in the same process — share one list.
+ */
+const REVOKED_KEY = "__openAdminRevokedSessions";
+const MAX_REVOKED = 10_000;
+
+function revokedSessions(): Map<string, number> {
+  const g = globalThis as unknown as Record<string, Map<string, number> | undefined>;
+  if (!g[REVOKED_KEY]) g[REVOKED_KEY] = new Map();
+  return g[REVOKED_KEY] as Map<string, number>;
+}
+
+function pruneRevoked(map: Map<string, number>): void {
+  const now = Math.floor(Date.now() / 1000);
+  for (const [nonce, exp] of map) {
+    if (exp < now) map.delete(nonce);
+  }
+  while (map.size > MAX_REVOKED) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+/**
+ * Mark a session token as signed out. Only a well-formed v2 token is
+ * recorded; there is no need to verify it here, because a forged nonce can
+ * only ever revoke a session that does not exist.
+ */
+export function revokeSessionToken(token: string | undefined | null): void {
+  if (!token) return;
+  const parts = token.split(".");
+  if (parts.length !== 5 || parts[0] !== TOKEN_V2) return;
+  const exp = Number(parts[1]);
+  const nonce = parts[2];
+  if (!Number.isFinite(exp) || !/^[0-9a-f]{32}$/.test(nonce)) return;
+  const map = revokedSessions();
+  map.set(nonce, exp);
+  pruneRevoked(map);
+}
 
 function encodeIdentity(identity: SessionIdentity): string {
   const compact: Record<string, string> = { m: identity.method };
@@ -214,35 +258,26 @@ export async function createSessionToken(
 
 /**
  * Verify a session token and return the identity embedded in it, or null
- * when the token is missing, malformed, tampered with, or expired.
+ * when the token is missing, malformed, tampered with, expired, or revoked
+ * by a sign-out.
  *
- * Two formats are accepted: the current `v2.<exp>.<nonce>.<identity>.<sig>`
- * and the legacy `<exp>.<nonce>.<sig>` issued before identities were
- * embedded. Honouring the legacy shape means sessions minted by a previous
- * build survive an upgrade instead of every operator being logged out.
+ * Only the tagged `v2.<exp>.<nonce>.<identity>.<sig>` format is accepted.
+ * The untagged three-part format from before identities were embedded is
+ * deliberately gone: it was byte-for-byte the shape of a handshake cookie.
  */
 export async function readSessionIdentity(
   token: string | undefined | null
 ): Promise<SessionIdentity | null> {
   if (!token) return null;
   const parts = token.split(".");
+  if (parts.length !== 5 || parts[0] !== TOKEN_V2) return null;
 
-  if (parts.length === 5 && parts[0] === TOKEN_V2) {
-    const [, expiresAt, nonce, encoded, sigHex] = parts;
-    const payload = `${TOKEN_V2}.${expiresAt}.${nonce}.${encoded}`;
-    if (!(await hmacMatches(payload, sigHex))) return null;
-    if (!notExpired(expiresAt)) return null;
-    return decodeIdentity(encoded);
-  }
-
-  if (parts.length === 3) {
-    const [expiresAt, nonce, sigHex] = parts;
-    if (!(await hmacMatches(`${expiresAt}.${nonce}`, sigHex))) return null;
-    if (!notExpired(expiresAt)) return null;
-    return { method: "password" };
-  }
-
-  return null;
+  const [, expiresAt, nonce, encoded, sigHex] = parts;
+  const payload = `${TOKEN_V2}.${expiresAt}.${nonce}.${encoded}`;
+  if (!(await hmacMatches(payload, sigHex))) return null;
+  if (!notExpired(expiresAt)) return null;
+  if (revokedSessions().has(nonce)) return null;
+  return decodeIdentity(encoded);
 }
 
 export async function verifySessionToken(token: string | undefined | null): Promise<boolean> {
@@ -252,11 +287,15 @@ export async function verifySessionToken(token: string | undefined | null): Prom
 /**
  * Sign a short opaque string with the session secret and a TTL. Used for the
  * single sign-on handshake cookie (state, nonce, PKCE verifier), so those
- * values can't be swapped between the redirect out and the callback.
+ * values can't be swapped between the redirect out and the callback. The
+ * purpose tag is inside the signed payload: this value is not a session and
+ * can never be presented as one.
  */
 export async function createSignedValue(data: string, ttlSeconds: number): Promise<string> {
   const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const payload = `${expiresAt}.${bytesToBase64Url(TEXT_ENCODER.encode(data))}`;
+  const payload = `${SIGNED_VALUE_TAG}.${expiresAt}.${bytesToBase64Url(
+    TEXT_ENCODER.encode(data)
+  )}`;
   return `${payload}.${await hmacHex(payload)}`;
 }
 
@@ -266,9 +305,11 @@ export async function readSignedValue(
 ): Promise<string | null> {
   if (!token) return null;
   const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [expiresAt, encoded, sigHex] = parts;
-  if (!(await hmacMatches(`${expiresAt}.${encoded}`, sigHex))) return null;
+  if (parts.length !== 4 || parts[0] !== SIGNED_VALUE_TAG) return null;
+  const [, expiresAt, encoded, sigHex] = parts;
+  if (!(await hmacMatches(`${SIGNED_VALUE_TAG}.${expiresAt}.${encoded}`, sigHex))) {
+    return null;
+  }
   if (!notExpired(expiresAt)) return null;
   const bytes = base64UrlToBytes(encoded);
   if (!bytes) return null;
@@ -289,6 +330,35 @@ export async function passwordMatches(input: string): Promise<boolean> {
 }
 
 /**
+ * Whether a cookie issued for this request may carry `Secure`.
+ *
+ * Keyed on the scheme the browser actually used rather than NODE_ENV: the
+ * packaged desktop build and a LAN container both run with NODE_ENV=production
+ * over plain http, where the browser drops a Secure cookie and nobody can sign
+ * in, while a development server behind TLS would issue a cookie a network
+ * attacker can strip.
+ *
+ * Behind a TLS-terminating proxy the scheme survives only in
+ * `X-Forwarded-Proto`, which any client can send, so that header is read under
+ * the same `TRUSTED_PROXY=true` opt-in the login rate limiter uses for
+ * `X-Forwarded-For` (see rate-limit.ts); proxies put the scheme the browser
+ * used in the leftmost entry. Callers with no request in hand fall back to
+ * NODE_ENV, which is what every caller did before.
+ */
+export function requestIsSecure(req?: Request): boolean {
+  if (!req) return process.env.NODE_ENV === "production";
+  if (process.env.TRUSTED_PROXY === "true") {
+    const proto = req.headers.get("x-forwarded-proto");
+    if (proto) return proto.split(",")[0].trim().toLowerCase() === "https";
+  }
+  try {
+    return new URL(req.url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Cookie attributes shared by every code path that issues a session.
  *
  * `strict` blocks the cookie on any cross-site navigation, top-level or
@@ -296,12 +366,14 @@ export async function passwordMatches(input: string): Promise<boolean> {
  * links (the single sign-on callback lands on a same-origin interstitial
  * before navigating on), so this gives belt-and-braces CSRF protection on top
  * of the Origin/Referer check enforced by the middleware.
+ *
+ * Pass the request wherever one is at hand: `Secure` follows its scheme.
  */
-export function sessionCookieOptions() {
+export function sessionCookieOptions(req?: Request) {
   return {
     httpOnly: true,
     sameSite: "strict" as const,
-    secure: process.env.NODE_ENV === "production",
+    secure: requestIsSecure(req),
     path: "/",
     maxAge: SESSION_TTL_SECONDS,
   };

@@ -4,6 +4,7 @@ import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 // Label lists are small, but a mailbox near Gmail's ~10k-label ceiling with
 // long names can still approach a few MB of JSON — give it headroom.
@@ -22,6 +23,9 @@ const MAX_LABELS = 10_000;
  * batches so label resolution stays out of the per-message insert loop.
  */
 export async function POST(request: NextRequest) {
+  // Resolved before the try so the error path can attribute the failure too.
+  const actor = await actorFromRequest(request);
+
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -61,6 +65,7 @@ export async function POST(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { user, sourceLabels: labels.length, mapped: Object.keys(map).length },
       outcome: "success",
+      actor,
     });
 
     return NextResponse.json({ success: true, data: { map } });
@@ -73,6 +78,7 @@ export async function POST(request: NextRequest) {
       params: { user: typeof body.user === "string" ? body.user : null },
       outcome: "error",
       error: message,
+      actor,
     });
     const status = e instanceof ValidationError ? 400 : 500;
     return NextResponse.json({ success: false, error: message }, { status });

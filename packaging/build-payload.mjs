@@ -13,6 +13,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { zipSync } from "fflate";
+import {
+  pruneLocalState,
+  collectFiles,
+  findLocalState,
+} from "../scripts/local-state.mjs";
 
 const packagingDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(packagingDir, "..");
@@ -56,15 +61,6 @@ function copyTree(from, to) {
   });
 }
 
-/** Every file under `dir`, as archive-relative POSIX paths. */
-function collectFiles(dir, base = dir, out = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) collectFiles(full, base, out);
-    else if (entry.isFile()) out.push(path.relative(base, full).split(path.sep).join("/"));
-  }
-  return out;
-}
 
 function main() {
   const [major] = process.versions.node.split(".").map(Number);
@@ -95,9 +91,27 @@ function main() {
   for (const relative of PRUNE_RELATIVE) {
     fs.rmSync(path.join(stageDir, relative), { recursive: true, force: true });
   }
+  // Local state the file tracer swept up from the working directory. `npm run
+  // build` already prunes the standalone output itself (scripts/prune-standalone.mjs);
+  // this repeats it on the staged copy so `npm run package:payload` on an
+  // unpruned build can't ship it either.
+  const prunedState = pruneLocalState(stageDir);
+  if (prunedState.length > 0) {
+    console.log(
+      `build-payload: removed local state from the staged copy: ${prunedState.join(", ")}`
+    );
+  }
 
   console.log("build-payload: compressing ...");
   const relativePaths = collectFiles(stageDir).sort();
+  const leaked = findLocalState(relativePaths);
+  if (leaked.length > 0) {
+    fail(
+      `refusing to package local state: ${leaked.join(", ")}.\n` +
+        `             These came from the working directory via Next's file tracer ` +
+        `and must never ship inside the executable.`
+    );
+  }
   const entries = {};
   let rawBytes = 0;
   for (const relative of relativePaths) {

@@ -124,7 +124,7 @@ export async function GET(req: NextRequest) {
     res.cookies.set(
       HANDSHAKE_COOKIE_NAME,
       await serializeHandshake(handshake),
-      handshakeCookieOptions()
+      handshakeCookieOptions(req)
     );
     res.headers.set("cache-control", "no-store");
     return res;

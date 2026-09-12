@@ -31,7 +31,10 @@ export function collectCredentialFiles(
     try {
       const raw = readFileSync(p, "utf-8");
       if (Buffer.byteLength(raw, "utf-8") > MAX_CREDENTIAL_FILE_BYTES) continue;
-      JSON.parse(raw);
+      // Only a service-account key is worth embedding. Anything else that
+      // happens to be JSON at that path (a tenant pointed at the wrong file,
+      // or at a file it should not be reading) stays out of the bundle.
+      if (!looksLikeServiceAccountKey(raw)) continue;
       out[p] = raw;
     } catch {
       // Missing or unreadable — nothing to embed for this tenant.
@@ -40,16 +43,36 @@ export function collectCredentialFiles(
   return out;
 }
 
+function looksLikeServiceAccountKey(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+    return (
+      !!parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.client_email === "string" &&
+      typeof parsed.private_key === "string"
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Where relocated key files land when a bundle's original path is unusable on
- * this machine: the operator's allowlisted directory when one is configured,
- * otherwise a `credentials/` directory next to the app (gitignored).
+ * The one directory a restore is allowed to write into: the operator's
+ * allowlisted directory when one is configured, otherwise a `credentials/`
+ * directory in the data directory (gitignored).
  */
 export function credentialFallbackDir(): string {
   const allowed = process.env.GWS_CREDENTIALS_DIR;
   return allowed
     ? path.resolve(allowed)
     : dataPath("credentials");
+}
+
+/** True when `candidate` resolves to a path strictly inside `dir`. */
+function isInside(dir: string, candidate: string): boolean {
+  const rel = path.relative(path.resolve(dir), path.resolve(candidate));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 /**
@@ -107,20 +130,22 @@ export interface CredentialPlacement {
 /**
  * Put one embedded key file from a bundle onto this machine.
  *
- * Preference order:
- *   1. The original path (`validatedPath`), when it passed validation here —
- *      restore lands files exactly where the source server had them.
- *   2. The fallback directory, when the original path is invalid on this
- *      machine (different OS, outside GWS_CREDENTIALS_DIR) or not writable.
- *      Name collisions with different content get a stable per-source-path
- *      suffix, so re-importing the same bundle is idempotent.
+ * A bundle's path is data, not an instruction: the only place a restore ever
+ * writes is the credentials directory (see credentialFallbackDir). The
+ * original path is honoured when it already points inside that directory,
+ * so restoring onto the same layout is exact; anything else — a different
+ * OS, a path elsewhere on the disk, a path that merely ends in `.json` — is
+ * relocated into the directory and the tenant re-pointed automatically.
+ * Name collisions with different content get a stable per-source-path
+ * suffix, so re-importing the same bundle is idempotent.
  */
 export async function placeCredentialFile(
   originalPath: string,
   validatedPath: string | null,
   content: string
 ): Promise<CredentialPlacement> {
-  if (validatedPath) {
+  const dir = credentialFallbackDir();
+  if (validatedPath && isInside(dir, validatedPath)) {
     try {
       const action = await writeKeyFile(validatedPath, content);
       return {
@@ -136,7 +161,6 @@ export async function placeCredentialFile(
     }
   }
 
-  const dir = credentialFallbackDir();
   const base = safeBaseName(originalPath);
   let candidate = path.join(dir, base);
   try {
@@ -168,7 +192,7 @@ export async function placeCredentialFile(
     return {
       path: finalPath,
       restored: true,
-      note: `Key file from ${originalPath} restored to ${finalPath} (original path not usable on this server).`,
+      note: `Key file from ${originalPath} restored to ${finalPath} (restores only write inside the credentials directory).`,
     };
   } catch (e) {
     return {

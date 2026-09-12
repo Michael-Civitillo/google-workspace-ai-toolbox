@@ -65,9 +65,22 @@ export function ensureExtracted(payload: Uint8Array, appDir: string): ExtractRes
   let fileCount = 0;
   try {
     const files = unzipSync(payload);
+    const root = path.resolve(tmpDir);
     for (const [name, bytes] of Object.entries(files)) {
       if (name.endsWith("/")) continue;
-      const destination = path.join(tmpDir, name);
+      // Zip-slip guard. Entry names are data as far as this code is concerned,
+      // so refuse anything that would land outside the extraction directory:
+      // absolute paths, drive letters, NUL bytes, or `..` segments that climb
+      // back out after resolution.
+      if (name.includes("\0") || path.isAbsolute(name)) {
+        throw new Error(`refusing to extract unsafe archive entry "${name}"`);
+      }
+      const destination = path.resolve(root, name);
+      if (destination === root || !destination.startsWith(root + path.sep)) {
+        throw new Error(
+          `refusing to extract archive entry "${name}" outside the target directory`
+        );
+      }
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       withRetry(() => fs.writeFileSync(destination, bytes));
       fileCount++;

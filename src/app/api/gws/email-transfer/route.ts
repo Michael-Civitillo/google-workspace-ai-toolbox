@@ -7,10 +7,11 @@ import {
   withGoogleRetry,
 } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
 import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 const GMAIL_SETTINGS_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.sharing",
@@ -37,6 +38,7 @@ const DISPOSITION_MAP: Record<string, string> = {
  * caller must explicitly opt in with `confirmExternal: "<target email>"`.
  */
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -121,6 +123,7 @@ export async function POST(request: NextRequest) {
           tenantId: tenant?.id ?? null,
           tenantName: tenant?.name ?? null,
           params: { sourceUser, targetUser, isExternal },
+          actor,
           outcome: "error",
           error: msg,
         });
@@ -148,6 +151,7 @@ export async function POST(request: NextRequest) {
         tenantId: tenant?.id ?? null,
         tenantName: tenant?.name ?? null,
         params: { sourceUser, targetUser, action, isExternal },
+        actor,
         outcome: "success",
       });
       return NextResponse.json({
@@ -188,6 +192,7 @@ export async function POST(request: NextRequest) {
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
       params: { sourceUser, targetUser, action, isExternal },
+      actor,
       outcome: autoForwardError ? "error" : "success",
       error: autoForwardError,
     });
@@ -207,7 +212,8 @@ export async function POST(request: NextRequest) {
       action: "email_transfer",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
+      actor,
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
     });

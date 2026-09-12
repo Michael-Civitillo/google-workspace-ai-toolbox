@@ -1,5 +1,6 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import Image from "next/image";
@@ -27,10 +28,20 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
-import { LogoutButton } from "./logout-button";
-import { SessionIdentity } from "./session-identity";
+import { SidebarFooter } from "./sidebar-footer";
 
-const navigation = [
+interface NavItem {
+  name: string;
+  href: string;
+  icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
+}
+
+interface NavGroup {
+  label: string | null;
+  items: NavItem[];
+}
+
+const navigation: NavGroup[] = [
   {
     label: null,
     items: [
@@ -39,7 +50,7 @@ const navigation = [
     ],
   },
   {
-    label: "Delegation",
+    label: "Access",
     items: [
       { name: "Email Delegation", href: "/email-delegation", icon: Mail },
       {
@@ -47,6 +58,7 @@ const navigation = [
         href: "/calendar-delegation",
         icon: CalendarDays,
       },
+      { name: "Groups", href: "/groups", icon: Users },
     ],
   },
   {
@@ -62,14 +74,11 @@ const navigation = [
     ],
   },
   {
-    label: "Directory",
-    items: [{ name: "Groups", href: "/groups", icon: Users }],
-  },
-  {
     label: "Lifecycle",
     items: [
       { name: "Domain Change", href: "/domain-change", icon: Globe },
       { name: "Offboarding", href: "/offboarding", icon: UserMinus },
+      { name: "Bulk Operations", href: "/bulk", icon: Layers },
     ],
   },
   {
@@ -78,10 +87,6 @@ const navigation = [
       { name: "Mailbox Export", href: "/mailbox-export", icon: Download },
       { name: "Mailbox Import", href: "/mailbox-import", icon: Upload },
     ],
-  },
-  {
-    label: "Bulk",
-    items: [{ name: "Bulk Operations", href: "/bulk", icon: Layers }],
   },
   {
     label: "Audits",
@@ -93,7 +98,7 @@ const navigation = [
     ],
   },
   {
-    label: "Workspace",
+    label: "Settings",
     items: [
       { name: "Setup", href: "/setup", icon: Settings },
       { name: "Tenants", href: "/tenants", icon: Building2 },
@@ -103,79 +108,102 @@ const navigation = [
   },
 ];
 
+const logoGlow = {
+  "--rgb-glow-spread": "2px",
+  "--rgb-glow-blur": "9px",
+  "--rgb-speed": "10s",
+} as CSSProperties;
+
 export function Sidebar() {
   const pathname = usePathname();
 
   if (pathname === "/login") return null;
 
   return (
-    <aside className="fixed inset-y-0 left-0 w-64 bg-card border-r border-border flex flex-col z-50">
-      <div className="p-6 border-b border-border">
-        <div className="flex items-center gap-3">
+    <aside className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
+      {/* Brand */}
+      <Link
+        href="/"
+        className="flex items-center gap-3 px-5 pt-5 pb-4 outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+      >
+        <span className="rgb-glow shrink-0 rounded-[10px]" style={logoGlow}>
           <Image
             src="/logo.svg"
-            alt="Google Workspace Open Admin"
-            width={36}
-            height={36}
-            className="rounded-lg"
+            alt=""
+            width={32}
+            height={32}
+            className="relative block rounded-[10px]"
+            priority
           />
-          <div>
-            <h1 className="text-sm font-semibold tracking-tight">
-              Open Admin
-            </h1>
-            <p className="text-xs text-muted-foreground">Google Workspace</p>
-          </div>
-        </div>
-      </div>
+        </span>
+        <span className="min-w-0 leading-tight">
+          <span className="block truncate text-[13px] font-semibold tracking-tight">
+            Open Admin
+          </span>
+          <span className="block truncate text-[11px] text-muted-foreground">
+            Google Workspace
+          </span>
+        </span>
+      </Link>
 
-      <div className="px-3 py-2 border-b border-border">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 px-1">
-          Tenant
-        </p>
+      <div className="px-3 pb-3">
         <TenantSwitcher />
       </div>
 
-      <nav className="flex-1 min-h-0 overflow-y-auto p-3">
+      <nav
+        aria-label="Primary"
+        className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-3 pb-3"
+      >
         {navigation.map((group) => (
-          <div key={group.label ?? "main"} className="mb-1">
+          <div key={group.label ?? "main"} className="mb-4 last:mb-0">
             {group.label && (
-              <p className="px-3 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+              <p className="px-3 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
                 {group.label}
               </p>
             )}
-            <div className="space-y-0.5">
+            <ul className="space-y-px">
               {group.items.map((item) => {
                 const isActive =
                   pathname === item.href ||
                   (item.href !== "/" && pathname.startsWith(item.href + "/"));
                 return (
-                  <Link
-                    key={item.name}
-                    href={item.href}
-                    aria-current={isActive ? "page" : undefined}
-                    className={cn(
-                      "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-                      isActive
-                        ? "bg-primary/10 text-primary dark:bg-primary/15 dark:text-primary-foreground"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                    )}
-                  >
-                    <item.icon
-                      className={cn("h-4 w-4", isActive && "text-primary dark:text-primary-foreground")}
-                    />
-                    {item.name}
-                  </Link>
+                  <li key={item.href}>
+                    <Link
+                      href={item.href}
+                      aria-current={isActive ? "page" : undefined}
+                      className={cn(
+                        "group/nav relative flex items-center gap-2.5 rounded-lg px-3 py-[7px] text-[13px] font-medium outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/40",
+                        isActive
+                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                          : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                      )}
+                    >
+                      {isActive && (
+                        <span
+                          aria-hidden
+                          className="rgb-bar absolute top-1/2 -left-3 h-5 w-[3px] -translate-y-1/2 rounded-r-full"
+                        />
+                      )}
+                      <item.icon
+                        className={cn(
+                          "size-4 shrink-0 transition-colors",
+                          isActive
+                            ? "text-primary"
+                            : "text-muted-foreground/80 group-hover/nav:text-foreground"
+                        )}
+                        strokeWidth={isActive ? 2.25 : 2}
+                      />
+                      <span className="truncate">{item.name}</span>
+                    </Link>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
           </div>
         ))}
       </nav>
 
-      <div className="p-3 border-t border-border">
-        <SessionIdentity />
-        <LogoutButton />
-      </div>
+      <SidebarFooter />
     </aside>
   );
 }

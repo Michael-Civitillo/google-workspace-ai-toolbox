@@ -11,7 +11,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -21,6 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import { ScrollText, Loader2, Search, Download, X } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 
@@ -258,25 +258,11 @@ export default function AuditLog() {
         badge="Local"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${message.type === "error" ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40" : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"}`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error"
-                ? "text-red-800 dark:text-red-300"
-                : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <Card className="mb-6">
         <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
+          <CardTitle className="flex items-center gap-2">
             <ScrollText className="h-5 w-5" />
             Filters
           </CardTitle>
@@ -376,7 +362,7 @@ export default function AuditLog() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">Entries</CardTitle>
+          <CardTitle>Entries</CardTitle>
           <CardDescription>
             {entries.length > 0
               ? `${entries.length.toLocaleString()} entr${entries.length === 1 ? "y" : "ies"} loaded${done ? " — end of log reached" : ""}${skippedLines > 0 ? ` · ${skippedLines} unreadable line${skippedLines === 1 ? "" : "s"} skipped` : ""}`
@@ -408,8 +394,8 @@ export default function AuditLog() {
                           variant="outline"
                           className={
                             entry.outcome === "success"
-                              ? "border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400"
-                              : "border-red-300 dark:border-red-800 text-red-700 dark:text-red-400"
+                              ? "border-success/40 text-success-fg"
+                              : "border-danger/40 text-danger-fg"
                           }
                         >
                           {entry.outcome ?? "unknown"}
@@ -423,7 +409,7 @@ export default function AuditLog() {
                       <p className="text-xs text-muted-foreground mt-0.5">
                         {entry.ts ? new Date(entry.ts).toLocaleString() : "—"}
                         {entry.error && (
-                          <span className="text-red-600 dark:text-red-400">
+                          <span className="text-danger">
                             {" "}
                             · {String(entry.error).slice(0, 140)}
                           </span>

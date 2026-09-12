@@ -408,10 +408,17 @@ export default function DriveTransfer() {
           break;
         }
         chunkIndex++;
+        // The server re-checks the typed confirmation on every chunk, not just
+        // the first, so each continuation has to carry it too.
         const body =
           cursor === null
-            ? { fromUser: from, toUser: to, folderIds: initialFolderIds }
-            : { fromUser: from, toUser: to, cursor };
+            ? {
+                fromUser: from,
+                toUser: to,
+                confirm: to,
+                folderIds: initialFolderIds,
+              }
+            : { fromUser: from, toUser: to, confirm: to, cursor };
         let res: Response;
         try {
           res = await tfetch(
@@ -517,9 +524,9 @@ export default function DriveTransfer() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-          <XCircle className="h-4 w-4 text-red-600" />
-          <AlertDescription className="text-red-800 dark:text-red-300">
+        <Alert variant="destructive" className="mb-6">
+          <XCircle className="h-4 w-4 text-danger" />
+          <AlertDescription>
             {error}
           </AlertDescription>
         </Alert>
@@ -527,33 +534,18 @@ export default function DriveTransfer() {
 
       {completion && (
         <Alert
-          className={`mb-6 ${
-            completion.tone === "success"
-              ? "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-              : "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
-          }`}
+          variant={completion.tone === "success" ? "success" : "warning"}
+          className="mb-6"
         >
-          {completion.tone === "success" ? (
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-          ) : (
-            <AlertTriangle className="h-4 w-4 text-amber-600" />
-          )}
-          <AlertDescription
-            className={
-              completion.tone === "success"
-                ? "text-emerald-800 dark:text-emerald-300"
-                : "text-amber-800 dark:text-amber-300"
-            }
-          >
-            {completion.message}
-          </AlertDescription>
+          {completion.tone === "success" ? <CheckCircle2 /> : <AlertTriangle />}
+          <AlertDescription>{completion.message}</AlertDescription>
         </Alert>
       )}
 
       <div className="max-w-4xl space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <ArrowRightLeft className="h-5 w-5" />
               Users
             </CardTitle>
@@ -617,7 +609,7 @@ export default function DriveTransfer() {
         {rootIds !== null && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">
+              <CardTitle>
                 Pick folders to transfer
               </CardTitle>
               <CardDescription>
@@ -671,9 +663,9 @@ export default function DriveTransfer() {
                 </div>
               )}
 
-              <Alert className="mt-4 border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-                <AlertTriangle className="h-4 w-4 text-amber-600" />
-                <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
+              <Alert variant="warning" className="mt-4">
+                <AlertTriangle className="h-4 w-4 text-warning" />
+                <AlertDescription>
                   Drive does not inherit ownership: each file and subfolder is
                   transferred individually. After the transfer, the source
                   user keeps writer (edit) access to every item — Drive demotes
@@ -682,9 +674,9 @@ export default function DriveTransfer() {
               </Alert>
 
               {overSelectionCap && (
-                <Alert className="mt-4 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-                  <AlertTriangle className="h-4 w-4 text-red-600" />
-                  <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+                <Alert variant="destructive" className="mt-4">
+                  <AlertTriangle className="h-4 w-4 text-danger" />
+                  <AlertDescription>
                     You&apos;ve selected {selected.size} folders — the maximum
                     per run is {FOLDER_SELECTION_CAP}. Unselect{" "}
                     {selected.size - FOLDER_SELECTION_CAP} before transferring
@@ -724,13 +716,13 @@ export default function DriveTransfer() {
         {progress && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
+              <CardTitle className="flex items-center gap-2">
                 {busy ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : progress.errors.length > 0 ? (
-                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                  <AlertTriangle className="h-4 w-4 text-warning" />
                 ) : (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  <CheckCircle2 className="h-4 w-4 text-success" />
                 )}
                 Transfer progress
                 {busy && (
@@ -778,7 +770,7 @@ export default function DriveTransfer() {
                         <p className="text-muted-foreground font-mono text-[10px] truncate">
                           {err.id}
                         </p>
-                        <p className="text-red-700 dark:text-red-300 mt-0.5">
+                        <p className="text-danger-fg mt-0.5">
                           {err.message}
                         </p>
                       </div>
@@ -828,9 +820,9 @@ function StatTile({
 }) {
   const toneClass =
     tone === "success"
-      ? "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300"
+      ? "border-success/25 bg-success/8 text-success-fg"
       : tone === "error"
-        ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-300"
+        ? "border-danger/25 bg-danger/8 text-danger-fg"
         : "bg-muted/40";
   return (
     <div className={`rounded-md border px-3 py-2 ${toneClass}`}>

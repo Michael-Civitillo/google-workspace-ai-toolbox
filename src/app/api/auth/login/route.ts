@@ -6,16 +6,24 @@ import {
   sessionCookieOptions,
   SESSION_COOKIE_NAME,
 } from "@/lib/auth";
-import { rateLimit, clearRateLimit, clientKey } from "@/lib/rate-limit";
+import {
+  rateLimit,
+  peekRateLimit,
+  clearRateLimit,
+  clientKey,
+} from "@/lib/rate-limit";
 import { passwordLoginEnabled, readSsoConfig } from "@/lib/sso-server";
 import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const MAX_BODY_BYTES = 4 * 1024; // login bodies are tiny — cap aggressively
 // Cap FAILED attempts, not all attempts. 5 wrong guesses per 15 minutes is
-// generous enough for typos and tight enough to make online brute-forcing a
-// strong password infeasible.
+// generous enough for typos and, because an exhausted bucket refuses every
+// attempt, tight enough to make online brute-forcing infeasible.
 const MAX_FAILED_ATTEMPTS = 5;
 const FAIL_WINDOW_MS = 15 * 60 * 1000;
+// Every wrong guess also pays a fixed delay, so even the free attempts inside
+// the window can't be streamed.
+const FAILED_ATTEMPT_DELAY_MS = 400;
 
 export async function POST(req: NextRequest) {
   if (!authConfigured()) {
@@ -67,20 +75,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Check the password BEFORE consulting the rate limiter, and only count
-  // FAILED attempts. A correct password is therefore never blocked — critical
-  // because, without a trusted proxy, every client shares one "anon" bucket, so
-  // gating all attempts would let anyone lock the real admin out by burning the
-  // shared quota. Here a flood of wrong guesses only ever throttles further
-  // wrong guesses; the operator's correct password always gets through.
+  // Consult the limiter BEFORE comparing, and fail closed: once the bucket
+  // holds MAX_FAILED_ATTEMPTS wrong guesses, every attempt in the window is
+  // refused, including a correct one. The alternative — always letting a
+  // correct password through — meant the limiter only chose between a 401
+  // and a 429 for wrong guesses and never slowed a brute force at all.
+  //
+  // Without a trusted proxy every client shares one bucket, so a flood of
+  // wrong guesses can hold the door shut for the real operator for a window.
+  // That is the intended trade: a short outage is recoverable, a guessed
+  // password is not.
+  const gate = peekRateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
+  if (!gate.allowed) {
+    return NextResponse.json(
+      { error: `Too many failed attempts. Try again in ${gate.retryAfter}s.` },
+      { status: 429, headers: { "Retry-After": String(gate.retryAfter) } }
+    );
+  }
+
   if (!(await passwordMatches(body.password))) {
-    const limit = rateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
-    if (!limit.allowed) {
-      return NextResponse.json(
-        { error: `Too many failed attempts. Try again in ${limit.retryAfter}s.` },
-        { status: 429, headers: { "Retry-After": String(limit.retryAfter) } }
-      );
-    }
+    rateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
+    await new Promise((r) => setTimeout(r, FAILED_ATTEMPT_DELAY_MS));
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }
 
@@ -92,6 +107,6 @@ export async function POST(req: NextRequest) {
   const res = NextResponse.json({ success: true });
   // Cookie attributes (including SameSite=Strict) are shared with the single
   // sign-on callback so both login paths issue identical sessions.
-  res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions(req));
   return res;
 }

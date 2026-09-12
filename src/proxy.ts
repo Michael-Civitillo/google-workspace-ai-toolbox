@@ -15,7 +15,8 @@ const PUBLIC_PATHS = new Set([
 ]);
 
 /**
- * Edge middleware that enforces:
+ * Request gate (Next.js "proxy", the Node.js successor of edge middleware)
+ * that enforces:
  *
  *   1. APP_PASSWORD must be set. If it isn't, the entire app refuses to serve
  *      anything except /login (which itself will tell the operator to set it).
@@ -29,9 +30,24 @@ const PUBLIC_PATHS = new Set([
  *      a forged Host header to bypass the same-origin check.
  *
  *   4. HSTS in production responses, so browsers refuse to fall back to HTTP.
+ *
+ *   5. A per-request nonce Content-Security-Policy on everything it decorates.
  */
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
+
+  // One fresh nonce per request, on both the response policy and the request
+  // headers: Next stamps the nonce it finds in the incoming CSP onto every
+  // script it renders, and the root layout reads x-nonce for its inline theme
+  // script. Both are set (never appended), so a client can't smuggle its own.
+  const nonce = newNonce();
+  const csp = contentSecurityPolicy(nonce);
+  const withSecurityHeaders = (res: NextResponse) => applySecurityHeaders(res, csp);
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("content-security-policy", csp);
+  requestHeaders.set("x-nonce", nonce);
+  const passThrough = () =>
+    NextResponse.next({ request: { headers: requestHeaders } });
 
   // Static assets and Next internals: let through.
   if (
@@ -39,7 +55,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith("/favicon") ||
     pathname === "/logo.svg"
   ) {
-    return withSecurityHeaders(NextResponse.next());
+    return withSecurityHeaders(passThrough());
   }
 
   const isApi = pathname.startsWith("/api/");
@@ -54,7 +70,7 @@ export async function middleware(req: NextRequest) {
   // The login page itself remains accessible so the operator can see why.
   if (!authConfigured()) {
     if (PUBLIC_PATHS.has(pathname)) {
-      return withSecurityHeaders(NextResponse.next());
+      return withSecurityHeaders(passThrough());
     }
     if (isApi) {
       return withSecurityHeaders(
@@ -164,7 +180,7 @@ export async function middleware(req: NextRequest) {
     }
   }
 
-  return withSecurityHeaders(NextResponse.next());
+  return withSecurityHeaders(passThrough());
 }
 
 const LOOPBACK_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i;
@@ -247,7 +263,7 @@ function sameOriginHost(expected: string, actual: string): boolean {
   );
 }
 
-function withSecurityHeaders(res: NextResponse): NextResponse {
+function applySecurityHeaders(res: NextResponse, csp: string): NextResponse {
   // HSTS: force HTTPS for a year on production. Browsers ignore this on
   // non-HTTPS responses, so it's safe to set unconditionally.
   if (process.env.NODE_ENV === "production") {
@@ -259,7 +275,57 @@ function withSecurityHeaders(res: NextResponse): NextResponse {
   res.headers.set("X-Content-Type-Options", "nosniff");
   res.headers.set("Referrer-Policy", "same-origin");
   res.headers.set("X-Frame-Options", "DENY");
+  // Nothing in the app needs a sensor, camera or payment API; say so.
+  res.headers.set(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+  );
+  res.headers.set("Content-Security-Policy", csp);
   return res;
+}
+
+/** 16 random bytes, base64 — a fresh script nonce for one response. */
+function newNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+/**
+ * The response policy. Scripts are allowed by nonce only — 'strict-dynamic'
+ * lets the nonced Next bootstrap load the chunks it needs, and makes 'self'
+ * irrelevant for script, so an injected <script src> on our own origin is dead
+ * too. Styles deliberately keep 'unsafe-inline': Tailwind and React both write
+ * style attributes at runtime, and the risk worth a policy here is script
+ * execution, not CSS. Nothing in the browser talks to a third-party origin —
+ * every Google API call happens server-side and next/font self-hosts the fonts
+ * — so connect-src stays on 'self'; img-src and font-src add only the inline
+ * data:/blob: forms the UI builds for itself (CSV and export downloads).
+ */
+function contentSecurityPolicy(nonce: string): string {
+  // Every page this app serves gets the same policy, the single sign-on
+  // interstitials included: they read the nonce off the forwarded request
+  // (x-nonce) and stamp it on their inline script, so none of them needs an
+  // 'unsafe-inline' carve-out.
+  const scriptSrc = `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`;
+  // `next dev` compiles modules with eval and pushes updates over a websocket.
+  // Neither exists in a production build, and without them the dev console is
+  // nothing but violations.
+  const dev = process.env.NODE_ENV !== "production";
+  return [
+    "default-src 'self'",
+    dev ? `${scriptSrc} 'unsafe-eval'` : scriptSrc,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    dev ? "connect-src 'self' ws:" : "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join("; ");
 }
 
 export const config = {

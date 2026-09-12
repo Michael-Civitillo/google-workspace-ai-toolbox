@@ -4,29 +4,25 @@ import { usePathname } from "next/navigation";
 import { ThemeToggle } from "./theme-toggle";
 
 /**
- * Wraps page content with the standard sidebar offset/padding, except on the
- * login page where the layout is a centered card. Renders a floating theme
- * toggle in the top-right of every page so it's always one click away
- * regardless of viewport size or sidebar scroll.
+ * Wraps page content with the sidebar offset and page gutter. The login page
+ * has no sidebar, so it gets a floating theme toggle instead of the one in
+ * the sidebar footer.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   if (pathname === "/login") {
     return (
-      <main className="flex-1 min-h-screen">
+      <main className="min-h-screen flex-1">
         <div className="fixed top-4 right-4 z-40">
-          <ThemeToggle />
+          <ThemeToggle variant="floating" />
         </div>
         {children}
       </main>
     );
   }
   return (
-    <main className="flex-1 ml-64 bg-muted/30 min-h-screen">
-      <div className="fixed top-4 right-4 z-40">
-        <ThemeToggle />
-      </div>
-      <div className="p-8">
+    <main className="ml-64 min-h-screen flex-1 bg-background">
+      <div className="px-8 py-8 lg:px-10 lg:py-9">
         <div className="mx-auto w-full max-w-6xl">{children}</div>
       </div>
     </main>

@@ -7,8 +7,9 @@ import {
   requireUsername,
   ValidationError,
 } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 /**
  * Change a user's primary domain.
@@ -26,6 +27,7 @@ import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 const MAX_BODY_BYTES = 16 * 1024;
 
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -72,6 +74,7 @@ export async function POST(request: NextRequest) {
         verifiedNewPrimary: result.verifiedNewPrimary,
       },
       outcome: "success",
+      actor,
     });
 
     return NextResponse.json({ success: true, data: result });
@@ -82,9 +85,12 @@ export async function POST(request: NextRequest) {
       action: "domain_change",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      // Bound the rejected body: an unvalidated payload logged verbatim lets a
+      // looping client bloat audit.log and push real entries out of view.
+      params: boundedParams(body),
       outcome: "error",
       error: message,
+      actor,
     });
     const status = error instanceof ValidationError ? 400 : 500;
     return NextResponse.json({ success: false, error: message }, { status });

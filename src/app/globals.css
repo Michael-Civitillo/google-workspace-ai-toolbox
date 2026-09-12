@@ -39,6 +39,27 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+
+  /* Semantic status colours. `-fg` is the text shade that stays readable on
+   * the tinted `bg-<status>/10` surfaces in both themes; the bare token is
+   * for icons, borders and dots. */
+  --color-success: var(--success);
+  --color-success-fg: var(--success-fg);
+  --color-warning: var(--warning);
+  --color-warning-fg: var(--warning-fg);
+  --color-info: var(--info);
+  --color-info-fg: var(--info-fg);
+  --color-danger: var(--danger);
+  --color-danger-fg: var(--danger-fg);
+
+  /* The RGB spectrum, exposed so one-off accents can pick a single stop. */
+  --color-rgb-1: var(--rgb-1);
+  --color-rgb-2: var(--rgb-2);
+  --color-rgb-3: var(--rgb-3);
+  --color-rgb-4: var(--rgb-4);
+  --color-rgb-5: var(--rgb-5);
+  --color-rgb-6: var(--rgb-6);
+
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -50,86 +71,315 @@
 
 /*
  * Indigo-anchored palette derived from the app logo (violet → indigo → blue
- * gradient). Surfaces carry a faint cool tint so the chrome reads as part of
- * the same brand instead of generic gray.
+ * gradient). Surfaces are near-neutral with a faint cool cast; contrast comes
+ * from hairline borders and type, not from boxes and shadows.
  */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.155 0.012 285);
+  --background: oklch(0.984 0.003 286);
+  --foreground: oklch(0.17 0.014 285);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.155 0.012 285);
+  --card-foreground: oklch(0.17 0.014 285);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.155 0.012 285);
-  --primary: oklch(0.51 0.23 277);
+  --popover-foreground: oklch(0.17 0.014 285);
+  --primary: oklch(0.52 0.22 277);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.962 0.01 277);
-  --secondary-foreground: oklch(0.3 0.06 277);
-  --muted: oklch(0.967 0.004 286);
-  --muted-foreground: oklch(0.54 0.02 285);
-  --accent: oklch(0.955 0.015 277);
+  --secondary: oklch(0.955 0.008 280);
+  --secondary-foreground: oklch(0.3 0.05 277);
+  --muted: oklch(0.962 0.005 286);
+  --muted-foreground: oklch(0.52 0.02 285);
+  --accent: oklch(0.95 0.015 277);
   --accent-foreground: oklch(0.3 0.06 277);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.006 286);
-  --input: oklch(0.92 0.006 286);
+  --destructive: oklch(0.58 0.235 27);
+  --border: oklch(0.905 0.006 286);
+  --input: oklch(0.88 0.007 286);
   --ring: oklch(0.6 0.18 277);
-  --chart-1: oklch(0.51 0.23 277);
+  --chart-1: oklch(0.52 0.22 277);
   --chart-2: oklch(0.55 0.25 295);
   --chart-3: oklch(0.62 0.19 255);
   --chart-4: oklch(0.77 0.16 70);
   --chart-5: oklch(0.66 0.21 354);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.988 0.002 286);
-  --sidebar-foreground: oklch(0.155 0.012 285);
-  --sidebar-primary: oklch(0.51 0.23 277);
+  --radius: 0.7rem;
+  --sidebar: oklch(0.975 0.004 286);
+  --sidebar-foreground: oklch(0.17 0.014 285);
+  --sidebar-primary: oklch(0.52 0.22 277);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.955 0.015 277);
-  --sidebar-accent-foreground: oklch(0.3 0.06 277);
-  --sidebar-border: oklch(0.92 0.006 286);
+  --sidebar-accent: oklch(0.93 0.012 280);
+  --sidebar-accent-foreground: oklch(0.2 0.03 277);
+  --sidebar-border: oklch(0.905 0.006 286);
   --sidebar-ring: oklch(0.6 0.18 277);
+
+  --success: oklch(0.63 0.17 155);
+  --success-fg: oklch(0.4 0.12 155);
+  --warning: oklch(0.72 0.16 70);
+  --warning-fg: oklch(0.46 0.12 60);
+  --info: oklch(0.6 0.17 245);
+  --info-fg: oklch(0.42 0.13 250);
+  --danger: var(--destructive);
+  --danger-fg: oklch(0.46 0.19 27);
+
+  /* RGB "lighting" spectrum. Kept perceptually even in OKLCH so the ring
+   * reads as one light source, not six clashing swatches. */
+  --rgb-1: oklch(0.64 0.21 300);
+  --rgb-2: oklch(0.64 0.18 255);
+  --rgb-3: oklch(0.74 0.15 200);
+  --rgb-4: oklch(0.74 0.19 150);
+  --rgb-5: oklch(0.8 0.17 90);
+  --rgb-6: oklch(0.66 0.22 350);
+  --rgb-ring-opacity: 0.9;
+  --rgb-glow-opacity: 0.35;
 }
 
 .dark {
-  --background: oklch(0.155 0.014 285);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0.016 285);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0.016 285);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.63 0.21 277);
+  --background: oklch(0.15 0.012 285);
+  --foreground: oklch(0.955 0.004 286);
+  --card: oklch(0.19 0.013 285);
+  --card-foreground: oklch(0.955 0.004 286);
+  --popover: oklch(0.205 0.014 285);
+  --popover-foreground: oklch(0.955 0.004 286);
+  --primary: oklch(0.62 0.2 277);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.27 0.016 285);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.27 0.016 285);
-  --muted-foreground: oklch(0.712 0.012 286);
-  --accent: oklch(0.28 0.035 277);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.63 0.21 277);
+  --secondary: oklch(0.25 0.015 285);
+  --secondary-foreground: oklch(0.955 0.004 286);
+  --muted: oklch(0.24 0.014 285);
+  --muted-foreground: oklch(0.7 0.014 286);
+  --accent: oklch(0.27 0.03 277);
+  --accent-foreground: oklch(0.955 0.004 286);
+  --destructive: oklch(0.7 0.19 22);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 13%);
+  --ring: oklch(0.66 0.19 277);
   --chart-1: oklch(0.63 0.21 277);
   --chart-2: oklch(0.65 0.22 295);
   --chart-3: oklch(0.68 0.16 255);
   --chart-4: oklch(0.8 0.15 75);
   --chart-5: oklch(0.7 0.19 354);
-  --sidebar: oklch(0.185 0.015 285);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.63 0.21 277);
+  --sidebar: oklch(0.165 0.013 285);
+  --sidebar-foreground: oklch(0.955 0.004 286);
+  --sidebar-primary: oklch(0.62 0.2 277);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.28 0.035 277);
+  --sidebar-accent: oklch(0.245 0.02 280);
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.63 0.21 277);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.66 0.19 277);
+
+  --success: oklch(0.75 0.16 155);
+  --success-fg: oklch(0.85 0.13 155);
+  --warning: oklch(0.8 0.15 75);
+  --warning-fg: oklch(0.87 0.13 80);
+  --info: oklch(0.72 0.14 245);
+  --info-fg: oklch(0.85 0.1 245);
+  --danger: var(--destructive);
+  --danger-fg: oklch(0.83 0.12 22);
+
+  --rgb-1: oklch(0.74 0.19 300);
+  --rgb-2: oklch(0.74 0.16 255);
+  --rgb-3: oklch(0.84 0.13 200);
+  --rgb-4: oklch(0.84 0.18 150);
+  --rgb-5: oklch(0.87 0.16 90);
+  --rgb-6: oklch(0.76 0.2 350);
+  --rgb-ring-opacity: 1;
+  --rgb-glow-opacity: 0.5;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
-  }
   html {
     @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 22%, transparent);
+  }
+}
+
+/* ------------------------------------------------------------------------
+ * RGB lighting
+ *
+ * A registered <angle> property drives a rotating conic gradient, so the
+ * spectrum sweeps around an element like a light strip instead of the
+ * gradient itself being repainted every frame. Every effect honours
+ * prefers-reduced-motion by freezing on its first frame.
+ *
+ * The gradients are written out inline in each rule on purpose: a var()
+ * inside a custom property is resolved where that property is declared, so a
+ * shared --rgb-spectrum token would never see the animated angle.
+ * ---------------------------------------------------------------------- */
+@property --rgb-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes rgb-rotate {
+  to {
+    --rgb-angle: 360deg;
+  }
+}
+
+@keyframes rgb-flow-x {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes rgb-flow-y {
+  from {
+    background-position: 0 0%;
+  }
+  to {
+    background-position: 0 200%;
+  }
+}
+
+@layer components {
+  /* A hairline spectrum ring hugging the element's own border radius. */
+  .rgb-ring {
+    position: relative;
+  }
+  .rgb-ring::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    border-radius: inherit;
+    padding: var(--rgb-ring-width, 1px);
+    background: conic-gradient(
+      from var(--rgb-angle, 0deg),
+      var(--rgb-1),
+      var(--rgb-2),
+      var(--rgb-3),
+      var(--rgb-4),
+      var(--rgb-5),
+      var(--rgb-6),
+      var(--rgb-1)
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    opacity: var(--rgb-ring-opacity, 1);
+    pointer-events: none;
+    transition: opacity 320ms ease;
+    animation: rgb-rotate var(--rgb-speed, 6s) linear infinite;
+  }
+  /* Only light up on hover / keyboard focus. */
+  .rgb-ring-hover::before {
+    opacity: 0;
+  }
+  .rgb-ring-hover:hover::before,
+  .rgb-ring-hover:focus-visible::before {
+    opacity: var(--rgb-ring-opacity, 1);
+  }
+  /* Only light up while something inside has focus (inputs, search bars). */
+  .rgb-ring-focus::before {
+    opacity: 0;
+  }
+  .rgb-ring-focus:focus-within::before {
+    opacity: var(--rgb-ring-opacity, 1);
+  }
+
+  /* A soft spectrum aura behind an element (logo tile, hero icon). */
+  .rgb-glow {
+    position: relative;
+    isolation: isolate;
+  }
+  .rgb-glow::after {
+    content: "";
+    position: absolute;
+    inset: calc(var(--rgb-glow-spread, 3px) * -1);
+    z-index: -1;
+    border-radius: inherit;
+    background: conic-gradient(
+      from var(--rgb-angle, 0deg),
+      var(--rgb-1),
+      var(--rgb-2),
+      var(--rgb-3),
+      var(--rgb-4),
+      var(--rgb-5),
+      var(--rgb-6),
+      var(--rgb-1)
+    );
+    filter: blur(var(--rgb-glow-blur, 10px));
+    opacity: var(--rgb-glow-opacity, 0.45);
+    pointer-events: none;
+    animation: rgb-rotate var(--rgb-speed, 9s) linear infinite;
+  }
+
+  /* A thin vertical light bar — the active nav indicator. */
+  .rgb-bar {
+    background: linear-gradient(
+      180deg,
+      var(--rgb-1),
+      var(--rgb-2),
+      var(--rgb-3),
+      var(--rgb-4),
+      var(--rgb-5),
+      var(--rgb-6),
+      var(--rgb-1)
+    );
+    background-size: 100% 200%;
+    animation: rgb-flow-y var(--rgb-speed, 6s) linear infinite;
+  }
+
+  /* A thin horizontal light line. */
+  .rgb-line {
+    background: linear-gradient(
+      90deg,
+      var(--rgb-1),
+      var(--rgb-2),
+      var(--rgb-3),
+      var(--rgb-4),
+      var(--rgb-5),
+      var(--rgb-6),
+      var(--rgb-1)
+    );
+    background-size: 200% 100%;
+    animation: rgb-flow-x var(--rgb-speed, 8s) linear infinite;
+  }
+
+  /* Spectrum-filled text for a single word of emphasis. */
+  .rgb-text {
+    background: linear-gradient(
+      90deg,
+      var(--rgb-1),
+      var(--rgb-2),
+      var(--rgb-3),
+      var(--rgb-6),
+      var(--rgb-1)
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: rgb-flow-x var(--rgb-speed, 8s) linear infinite;
+  }
+
+  /* Quiet scrollbars for the sidebar and long panels. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent)
+      transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rgb-ring::before,
+  .rgb-glow::after,
+  .rgb-bar,
+  .rgb-line,
+  .rgb-text {
+    animation: none;
   }
 }

@@ -1,8 +1,9 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import type { NextRequest } from "next/server";
-import { resolveTenant } from "./tenants-server";
+import { getTenants, resolveTenant } from "./tenants-server";
 import type { Tenant } from "./tenant-types";
+import { ValidationError } from "./validate";
 
 const execFileAsync = promisify(execFile);
 
@@ -55,25 +56,43 @@ function assertSafeArg(arg: string): void {
   }
 }
 
+// The CLI inherits the environment it needs (PATH, HOME, proxy settings, its
+// own GOOGLE_WORKSPACE_* variables) but never this app's secrets.
+const SECRET_ENV_PREFIXES = ["APP_", "GOOGLE_GENERATIVE_AI_", "CLOUDFLARE_"];
+
+function childEnv(
+  overrides: Record<string, string | undefined> = {}
+): NodeJS.ProcessEnv {
+  const env: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (SECRET_ENV_PREFIXES.some((p) => k.startsWith(p))) continue;
+    env[k] = v;
+  }
+  return { ...env, ...overrides } as NodeJS.ProcessEnv;
+}
+
+/**
+ * The only CLI calls left are the two status probes below (`--version` and
+ * `auth export`), with fixed arguments. A general `gws(args, tenant)` wrapper
+ * used to live here unused: on the Windows `shell: true` path its arguments
+ * were re-parsed by cmd.exe with no `--` separator before caller-derived
+ * values, so it was a command-injection shape waiting to be wired up. It is
+ * gone; anything that needs the CLI again should take an explicit, fixed
+ * argument list and go through childEnv.
+ */
 function runGws(
   args: string[],
   options: { timeout: number; env?: NodeJS.ProcessEnv }
 ) {
+  const withEnv = { ...options, env: options.env ?? childEnv() };
   if (IS_WINDOWS) {
     for (const a of args) assertSafeArg(a);
     return execFileAsync(quoteForWindowsShell(GWS_BIN), args, {
-      ...options,
+      ...withEnv,
       shell: true,
     });
   }
-  return execFileAsync(GWS_BIN, args, options);
-}
-
-export interface GwsResult {
-  success: boolean;
-  data?: unknown;
-  error?: string;
-  raw?: string;
+  return execFileAsync(GWS_BIN, args, withEnv);
 }
 
 /**
@@ -98,42 +117,17 @@ export function tenantFromRequest(
   const bodyId =
     body && typeof body.tenantId === "string" ? body.tenantId : null;
   const id = headerId || queryId || bodyId || null;
+  if (!id && request.method !== "GET" && request.method !== "HEAD") {
+    // A mutation that names no tenant would run against whichever tenant was
+    // activated last — global state any tab or operator can flip. With a
+    // single tenant there is nothing to get wrong; with several, refuse.
+    if (getTenants().length > 1) {
+      throw new ValidationError(
+        "Select a tenant first — this request did not say which tenant it targets."
+      );
+    }
+  }
   return resolveTenant(id);
-}
-
-/**
- * Execute a gws CLI command using the supplied tenant's credentials.
- */
-export async function gws(
-  args: string[],
-  tenant: Tenant | null
-): Promise<GwsResult> {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (tenant?.credentialsFile) {
-    env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE = tenant.credentialsFile;
-  }
-
-  try {
-    const { stdout, stderr } = await runGws(args, {
-      timeout: 30000,
-      env,
-    });
-
-    if (stderr && !stdout) {
-      return { success: false, error: stderr.trim() };
-    }
-
-    try {
-      const data = JSON.parse(stdout);
-      return { success: true, data };
-    } catch {
-      return { success: true, raw: stdout.trim() };
-    }
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown error executing gws";
-    return { success: false, error: message };
-  }
 }
 
 /**

@@ -54,6 +54,30 @@ function sweep(cutoff: number): void {
 }
 
 /**
+ * Report whether `key` is within `limit` per sliding `windowMs` without
+ * recording anything. The login route consults this BEFORE checking a
+ * password so an exhausted bucket refuses every attempt, right or wrong —
+ * otherwise the limiter would only ever change the status code of a wrong
+ * guess and a brute force could stream candidates at full speed.
+ */
+export function peekRateLimit(
+  key: string,
+  limit: number,
+  windowMs: number
+): RateLimitResult {
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const bucket = buckets.get(key);
+  const hits = bucket ? bucket.hits.filter((t) => t > cutoff) : [];
+  if (hits.length >= limit) {
+    const oldest = hits[0];
+    const retryAfter = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+    return { allowed: false, retryAfter, remaining: 0 };
+  }
+  return { allowed: true, retryAfter: 0, remaining: limit - hits.length };
+}
+
+/**
  * Record an attempt against `key` and report whether it's within `limit` per
  * sliding `windowMs`. An attempt is only counted (pushed) while under the
  * limit, so the stored history — and thus memory — is bounded by `limit` per
@@ -104,9 +128,14 @@ export function clearRateLimit(key: string): void {
  * Reverse-proxy headers are client-controllable unless a trusted proxy
  * overwrites them, so we refuse to read them by default — that would let an
  * attacker rotate `X-Forwarded-For` per request and bypass per-IP login
- * limits. The operator must opt in with `TRUSTED_PROXY=true` once they've
- * confirmed their proxy strips/replaces inbound `X-Forwarded-For` and
- * `X-Real-IP` headers.
+ * limits. The operator must opt in with `TRUSTED_PROXY=true` once a single
+ * trusted proxy is the only thing that can reach the app.
+ *
+ * Behind that proxy the RIGHTMOST `X-Forwarded-For` entry is used: proxies
+ * (Cloudflare, nginx's `$proxy_add_x_forwarded_for`, most load balancers)
+ * APPEND the address they saw rather than replace the header, so anything to
+ * the left of it was supplied by the client. `CF-Connecting-IP` is preferred
+ * when present because Cloudflare always sets it to the real client.
  *
  * When direct clients reach the app, this returns a fixed string so the
  * limiter degrades to a single global bucket. That throttles everyone in
@@ -116,8 +145,16 @@ const TRUSTED_PROXY = process.env.TRUSTED_PROXY === "true";
 
 export function clientKey(req: Request): string {
   if (!TRUSTED_PROXY) return "anon";
+  const cf = req.headers.get("cf-connecting-ip");
+  if (cf && cf.trim()) return cf.trim();
   const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
+  if (xff) {
+    const hops = xff
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (hops.length > 0) return hops[hops.length - 1];
+  }
   const realIp = req.headers.get("x-real-ip");
   if (realIp) return realIp.trim();
   return "anon";

@@ -615,7 +615,7 @@ Release procedure: bump `version` in `package.json`, commit, `git tag v0.2.0`, p
 - **Windowless mode and tray icon.** Keep the console for v1: it is the stop button and the log. A later `--tray` mode needs a small native helper or a WebView shell (Tauri), and is the natural point to revisit the "desktop shell" option.
 - **Auto-update.** Optional `--check-updates` that reads the GitHub Releases API and prints a line; off by default so a desktop admin tool does not phone home unasked.
 - **macOS and Linux binaries** fall out of the same pipeline (`build-bin.sh`, `codesign --remove-signature` and ad-hoc re-sign on macOS). Not requested; the Linux build already exists as the CI smoke artifact.
-- **Middleware deprecation.** `next build` warns that `middleware.ts` should become `proxy.ts` in Next 16. Unrelated to packaging, but it will have to happen before the next Next major.
+- **Middleware deprecation.** ~~`next build` warns that `middleware.ts` should become `proxy.ts` in Next 16.~~ Done outside this project: the file is now `src/proxy.ts` exporting `proxy`, with the same matcher and behaviour. References to `src/middleware.ts` elsewhere in this document are historical.
 
 ---
 

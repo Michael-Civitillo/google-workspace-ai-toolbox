@@ -9,6 +9,7 @@ import {
   signOutAllSessions,
   suspendUser,
   transferDrive,
+  getUser,
   isAlreadyExistsError,
   isExternalTarget,
   withGoogleRetry,
@@ -20,8 +21,18 @@ import {
 } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 const MAX_BODY_BYTES = 16 * 1024;
+
+// Steps that impersonate the departing user rather than acting on them from
+// the admin's side. Google refuses to mint a token for a suspended account, so
+// these only work while the account is still active.
+const SETTINGS_STEPS: ReadonlySet<string> = new Set([
+  "vacation",
+  "forward",
+  "calendar",
+]);
 
 // Minimal Gmail scopes per operation, mirroring the email-transfer/-delegation
 // routes: creating a forwarding address needs the "sharing" scope, while the
@@ -43,6 +54,7 @@ const GMAIL_VACATION_SCOPES = [
  *   step: "vacation" | "forward" | "calendar" | "drive" | "groups"
  *       | "revokeTokens" | "signOut" | "suspend",
  *   user: string,                         // user being offboarded
+ *   confirm: string,                      // must equal `user` (typed confirmation)
  *   successor?: string,                   // for forward/calendar/drive
  *   vacationSubject?: string,             // for vacation
  *   vacationMessage?: string,             // for vacation
@@ -50,6 +62,7 @@ const GMAIL_VACATION_SCOPES = [
  * }
  */
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
@@ -60,6 +73,41 @@ export async function POST(request: NextRequest) {
   try {
     tenant = tenantFromRequest(request, body);
     const user = requireEmail(body.user, "user");
+
+    // Suspending, revoking or forwarding the impersonated admin's own account
+    // would cut the domain-wide delegation this tool runs on and lock every
+    // future operation out of the tenant — refuse before anything runs.
+    if (tenant?.adminEmail && user === tenant.adminEmail.toLowerCase()) {
+      throw new ValidationError(
+        `"${user}" is this tenant's domain-wide-delegation admin. Offboarding it would lock Open Admin out of the tenant — move delegation to another admin first.`
+      );
+    }
+
+    // Every step here is destructive or hard to undo (suspend, password/token
+    // revoke, mail forwarding, Drive transfer, group removal). The browser
+    // shows a typed-confirmation dialog, but this route accepts anything
+    // holding a session cookie, so require the same typed confirmation
+    // server-side before the first Google call.
+    const confirmedUser =
+      typeof body.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+    if (confirmedUser !== user) {
+      throw new ValidationError(
+        "Type the user's email address into the confirm field to proceed."
+      );
+    }
+
+    // Impersonation stops working the moment an account is suspended, so the
+    // settings steps have to run before "suspend". That order lived only in the
+    // page; check it here too, or an out-of-order call gets an opaque Google
+    // error instead of the reason.
+    if (SETTINGS_STEPS.has(step)) {
+      const target = await getUser(tenant, user);
+      if (target.suspended) {
+        throw new ValidationError(
+          `"${user}" is already suspended, and Google will not impersonate a suspended account. Un-suspend it to run this step, or skip to the steps that act on the admin's behalf (Drive transfer, groups, token revoke).`
+        );
+      }
+    }
 
     const userDomain = emailDomain(user);
     const auditBase = {
@@ -122,6 +170,7 @@ export async function POST(request: NextRequest) {
             params: { user, subject },
             outcome: "error",
             error: msg,
+            actor,
           });
           return NextResponse.json(
             {
@@ -136,6 +185,7 @@ export async function POST(request: NextRequest) {
           ...auditBase,
           params: { user, subject },
           outcome: "success",
+          actor,
         });
         return NextResponse.json({
           success: true,
@@ -196,6 +246,7 @@ export async function POST(request: NextRequest) {
               params: { user, successor },
               outcome: "error",
               error: msg,
+              actor,
             });
             return NextResponse.json(
               {
@@ -213,6 +264,7 @@ export async function POST(request: NextRequest) {
             ...auditBase,
             params: { user, successor },
             outcome: "success",
+            actor,
           });
           return NextResponse.json({
             success: false,
@@ -247,6 +299,7 @@ export async function POST(request: NextRequest) {
             params: { user, successor },
             outcome: "error",
             error: msg,
+            actor,
           });
           return NextResponse.json(
             {
@@ -262,6 +315,7 @@ export async function POST(request: NextRequest) {
           ...auditBase,
           params: { user, successor },
           outcome: "success",
+          actor,
         });
         return NextResponse.json({
           success: true,
@@ -301,6 +355,7 @@ export async function POST(request: NextRequest) {
             params: { user, successor },
             outcome: "error",
             error: msg,
+            actor,
           });
           return NextResponse.json(
             {
@@ -316,6 +371,7 @@ export async function POST(request: NextRequest) {
           ...auditBase,
           params: { user, successor },
           outcome: "success",
+          actor,
         });
         return NextResponse.json({
           success: true,
@@ -328,12 +384,16 @@ export async function POST(request: NextRequest) {
         if (successor.toLowerCase() === user.toLowerCase()) {
           throw new ValidationError("successor must differ from user");
         }
+        // Handing an entire Drive to an address outside the verified domains is
+        // the largest data egress of any step — gate it like forward/calendar.
+        await requireInternalOrConfirmed(successor);
         const result = await transferDrive(tenant, user, successor);
         audit({
           action: "offboarding.drive",
           ...auditBase,
           params: { user, successor, transferId: result.transferId },
           outcome: "success",
+          actor,
         });
         return NextResponse.json({
           success: true,
@@ -368,6 +428,7 @@ export async function POST(request: NextRequest) {
           params: { user, ...result },
           outcome: complete ? "success" : "error",
           error: errorParts.length > 0 ? errorParts.join("; ") : undefined,
+          actor,
         });
         return NextResponse.json(
           {
@@ -392,6 +453,7 @@ export async function POST(request: NextRequest) {
           error: result.failed > 0
             ? `${result.failed} token(s) failed to revoke`
             : undefined,
+          actor,
         });
         return NextResponse.json(
           {
@@ -412,6 +474,7 @@ export async function POST(request: NextRequest) {
           ...auditBase,
           params: { user },
           outcome: "success",
+          actor,
         });
         return NextResponse.json({
           success: true,
@@ -426,6 +489,7 @@ export async function POST(request: NextRequest) {
           ...auditBase,
           params: { user },
           outcome: "success",
+          actor,
         });
         return NextResponse.json({
           success: true,
@@ -453,6 +517,7 @@ export async function POST(request: NextRequest) {
       },
       outcome: "error",
       error: message,
+      actor,
     });
     const status = e instanceof ValidationError ? 400 : 500;
     return NextResponse.json({ success: false, error: message }, { status });

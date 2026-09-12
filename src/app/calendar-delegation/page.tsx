@@ -18,10 +18,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import { CalendarDays, Loader2, Trash2, UserPlus, Search } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
@@ -43,10 +43,10 @@ const roleDescriptions: Record<string, string> = {
 };
 
 const roleBadgeColors: Record<string, string> = {
-  freeBusyReader: "bg-zinc-100 text-zinc-700 border-zinc-200",
-  reader: "bg-blue-100 text-blue-700 border-blue-200",
-  writer: "bg-amber-100 text-amber-700 border-amber-200",
-  owner: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
+  freeBusyReader: "border-border bg-muted text-muted-foreground",
+  reader: "border-info/25 bg-info/10 text-info-fg",
+  writer: "border-warning/30 bg-warning/10 text-warning-fg",
+  owner: "border-primary/20 bg-primary/10 text-primary",
 };
 
 export default function CalendarDelegation() {
@@ -227,25 +227,13 @@ export default function CalendarDelegation() {
         badge="Calendar"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${message.type === "error" ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40" : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"}`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Manage */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <CalendarDays className="h-5 w-5" />
               Manage Calendar Access
             </CardTitle>
@@ -330,7 +318,7 @@ export default function CalendarDelegation() {
         {/* Current ACL */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Current Access Rules</CardTitle>
+            <CardTitle>Current Access Rules</CardTitle>
             <CardDescription>
               {aclRules.length > 0
                 ? `${aclRules.length} rule${aclRules.length > 1 ? "s" : ""} found`
@@ -350,8 +338,8 @@ export default function CalendarDelegation() {
                     className="flex items-center justify-between p-3 rounded-lg border bg-muted/30"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="h-8 w-8 rounded-full bg-emerald-100 flex items-center justify-center">
-                        <CalendarDays className="h-4 w-4 text-emerald-600" />
+                      <div className="h-8 w-8 rounded-full bg-success/10 flex items-center justify-center">
+                        <CalendarDays className="h-4 w-4 text-success" />
                       </div>
                       <div>
                         <p className="text-sm font-medium">
@@ -361,7 +349,7 @@ export default function CalendarDelegation() {
                           variant="outline"
                           className={
                             roleBadgeColors[rule.role] ||
-                            "bg-zinc-100 text-zinc-700"
+                            "bg-muted text-muted-foreground"
                           }
                         >
                           {rule.role}
@@ -381,7 +369,7 @@ export default function CalendarDelegation() {
                         {removing === rule.id ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
-                          <Trash2 className="h-4 w-4 text-red-500" />
+                          <Trash2 className="h-4 w-4 text-danger" />
                         )}
                       </Button>
                     )}
