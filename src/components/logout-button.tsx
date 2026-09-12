@@ -3,8 +3,9 @@
 import { useState } from "react";
 import { LogOut, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { cn } from "@/lib/utils";
 
-export function LogoutButton() {
+export function LogoutButton({ className }: { className?: string }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
 
@@ -20,16 +21,22 @@ export function LogoutButton() {
 
   return (
     <button
+      type="button"
       onClick={logout}
       disabled={busy}
-      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors disabled:opacity-50"
+      title="Sign out"
+      aria-label="Sign out"
+      className={cn(
+        "inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors",
+        "hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/40 disabled:opacity-50",
+        className
+      )}
     >
       {busy ? (
-        <Loader2 className="h-4 w-4 animate-spin" />
+        <Loader2 className="size-4 animate-spin" />
       ) : (
-        <LogOut className="h-4 w-4" />
+        <LogOut className="size-4" />
       )}
-      Sign out
     </button>
   );
 }

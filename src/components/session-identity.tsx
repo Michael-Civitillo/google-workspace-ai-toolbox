@@ -34,27 +34,37 @@ export function SessionIdentity() {
     };
   }, []);
 
-  if (!session) return null;
-
-  const isSso = session.method === "oidc";
-  const primary = isSso ? session.email ?? session.name ?? "Signed in" : "Signed in";
-  const secondary = isSso
-    ? session.name && session.email
-      ? session.name
-      : "Single sign-on"
-    : "Shared password session";
+  const isSso = session?.method === "oidc";
+  const primary = isSso
+    ? session?.email ?? session?.name ?? "Signed in"
+    : "Signed in";
+  const secondary = !session
+    ? "Open Admin"
+    : isSso
+      ? session.name && session.email
+        ? session.name
+        : "Single sign-on"
+      : "Password session";
 
   return (
     <div
-      className="flex items-center gap-2.5 px-3 py-2 mb-1 rounded-lg text-xs min-w-0"
+      className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-xs"
       title={isSso ? `${primary} via single sign-on` : secondary}
     >
-      <span className="h-7 w-7 shrink-0 rounded-full bg-muted flex items-center justify-center text-muted-foreground">
-        {isSso ? <KeyRound className="h-3.5 w-3.5" /> : <UserRound className="h-3.5 w-3.5" />}
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        {isSso ? (
+          <KeyRound className="size-3.5" />
+        ) : (
+          <UserRound className="size-3.5" />
+        )}
       </span>
-      <span className="min-w-0">
-        <span className="block truncate font-medium text-foreground/90">{primary}</span>
-        <span className="block truncate text-muted-foreground">{secondary}</span>
+      <span className="min-w-0 leading-tight">
+        <span className="block truncate font-medium text-foreground/90">
+          {primary}
+        </span>
+        <span className="block truncate text-[11px] text-muted-foreground">
+          {secondary}
+        </span>
       </span>
     </div>
   );

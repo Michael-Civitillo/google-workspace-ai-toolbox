@@ -1,28 +1,31 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
+import { AICommandPanel } from "@/components/ai-command-panel";
+import { cn } from "@/lib/utils";
 import {
   Mail,
   CalendarDays,
   ArrowRightLeft,
   Globe,
   Shield,
-  CheckCircle2,
-  XCircle,
   Loader2,
   UserMinus,
   Share2,
   Sparkles,
   ArrowRight,
+  ArrowUpRight,
+  ChevronRight,
   FolderTree,
   Download,
   Upload,
+  Users,
+  Layers,
+  Activity,
+  ScrollText,
 } from "lucide-react";
-import Link from "next/link";
-import { AICommandPanel } from "@/components/ai-command-panel";
 
 interface GwsStatus {
   installed: boolean;
@@ -36,96 +39,188 @@ interface TenantsListPayload {
   tenants?: { id: string }[];
 }
 
-const tasks = [
+interface Task {
+  title: string;
+  description: string;
+  href: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+interface TaskGroup {
+  label: string;
+  tasks: Task[];
+}
+
+const taskGroups: TaskGroup[] = [
   {
-    title: "Email Delegation",
-    description: "Grant mailbox access to another user without sharing passwords",
-    href: "/email-delegation",
-    icon: Mail,
-    color: "text-blue-600 dark:text-blue-400",
-    bg: "bg-blue-50 dark:bg-blue-950/30",
+    label: "Access",
+    tasks: [
+      {
+        title: "Email Delegation",
+        description: "Grant mailbox access to another user without sharing passwords.",
+        href: "/email-delegation",
+        icon: Mail,
+      },
+      {
+        title: "Calendar Delegation",
+        description: "Share calendar access with configurable permission levels.",
+        href: "/calendar-delegation",
+        icon: CalendarDays,
+      },
+      {
+        title: "Groups",
+        description: "Browse groups, manage members, and see every group a user belongs to.",
+        href: "/groups",
+        icon: Users,
+      },
+    ],
   },
   {
-    title: "Calendar Delegation",
-    description: "Share calendar access with configurable permission levels",
-    href: "/calendar-delegation",
-    icon: CalendarDays,
-    color: "text-emerald-600 dark:text-emerald-400",
-    bg: "bg-emerald-50 dark:bg-emerald-950/30",
+    label: "Transfers",
+    tasks: [
+      {
+        title: "Email Transfer",
+        description: "Forward incoming mail from one mailbox to another.",
+        href: "/email-transfer",
+        icon: ArrowRightLeft,
+      },
+      {
+        title: "Calendar Transfer",
+        description: "Hand calendar ownership from one user to another.",
+        href: "/calendar-transfer",
+        icon: ArrowRightLeft,
+      },
+      {
+        title: "Drive Transfer",
+        description: "Move ownership of chosen Drive folders and everything inside them.",
+        href: "/drive-transfer",
+        icon: FolderTree,
+      },
+    ],
   },
   {
-    title: "Calendar Transfer",
-    description: "Transfer calendar ownership from one user to another",
-    href: "/calendar-transfer",
-    icon: ArrowRightLeft,
-    color: "text-violet-600 dark:text-violet-400",
-    bg: "bg-violet-50 dark:bg-violet-950/30",
+    label: "Lifecycle",
+    tasks: [
+      {
+        title: "Domain Change",
+        description: "Switch a user's primary email to another domain in your tenant.",
+        href: "/domain-change",
+        icon: Globe,
+      },
+      {
+        title: "Offboarding",
+        description: "Vacation responder, forwarding, transfers and suspension in one run.",
+        href: "/offboarding",
+        icon: UserMinus,
+      },
+      {
+        title: "Bulk Operations",
+        description: "Run one operation across many users from a CSV, with per-row validation.",
+        href: "/bulk",
+        icon: Layers,
+      },
+    ],
   },
   {
-    title: "Email Transfer",
-    description: "Set up email forwarding to transfer incoming mail between users",
-    href: "/email-transfer",
-    icon: ArrowRightLeft,
-    color: "text-amber-600 dark:text-amber-400",
-    bg: "bg-amber-50 dark:bg-amber-950/30",
-  },
-  {
-    title: "Domain Change",
-    description: "Switch a user's primary email to a different domain in your tenant",
-    href: "/domain-change",
-    icon: Globe,
-    color: "text-rose-600 dark:text-rose-400",
-    bg: "bg-rose-50 dark:bg-rose-950/30",
-  },
-  {
-    title: "Offboarding",
-    description: "Run the full offboarding sequence in one go — vacation, forwarding, transfers, suspend",
-    href: "/offboarding",
-    icon: UserMinus,
-    color: "text-orange-600 dark:text-orange-400",
-    bg: "bg-orange-50 dark:bg-orange-950/30",
-  },
-  {
-    title: "Drive Transfer",
-    description: "Pick a user's Drive folders and transfer ownership of each folder and everything inside",
-    href: "/drive-transfer",
-    icon: FolderTree,
-    color: "text-teal-600 dark:text-teal-400",
-    bg: "bg-teal-50 dark:bg-teal-950/30",
-  },
-  {
-    title: "Mailbox Export",
-    description: "Back up a user's entire Gmail mailbox to a portable file",
-    href: "/mailbox-export",
-    icon: Download,
-    color: "text-indigo-600 dark:text-indigo-400",
-    bg: "bg-indigo-50 dark:bg-indigo-950/30",
-  },
-  {
-    title: "Mailbox Import",
-    description: "Restore a mailbox export into another user, labels and dates intact",
-    href: "/mailbox-import",
-    icon: Upload,
-    color: "text-sky-600 dark:text-sky-400",
-    bg: "bg-sky-50 dark:bg-sky-950/30",
-  },
-  {
-    title: "Sharing Audit",
-    description: "Find Drive files a user has shared outside your tenant",
-    href: "/sharing-audit",
-    icon: Share2,
-    color: "text-cyan-600 dark:text-cyan-400",
-    bg: "bg-cyan-50 dark:bg-cyan-950/30",
-  },
-  {
-    title: "User Audit",
-    description: "Get a full access report for any user — email, calendar, forwarding",
-    href: "/audit",
-    icon: Shield,
-    color: "text-pink-600 dark:text-pink-400",
-    bg: "bg-pink-50 dark:bg-pink-950/30",
+    label: "Backup & audits",
+    tasks: [
+      {
+        title: "Mailbox Export",
+        description: "Back up an entire Gmail mailbox to a portable file.",
+        href: "/mailbox-export",
+        icon: Download,
+      },
+      {
+        title: "Mailbox Import",
+        description: "Restore a mailbox export into another user, labels and dates intact.",
+        href: "/mailbox-import",
+        icon: Upload,
+      },
+      {
+        title: "Sharing Audit",
+        description: "Find Drive files shared outside your tenant and revoke in one click.",
+        href: "/sharing-audit",
+        icon: Share2,
+      },
+      {
+        title: "User Audit",
+        description: "A full AI access report for any user: mail, calendar, forwarding.",
+        href: "/audit",
+        icon: Shield,
+      },
+      {
+        title: "Activity Reports",
+        description: "Login and admin activity across the tenant, with an AI security digest.",
+        href: "/activity-reports",
+        icon: Activity,
+      },
+      {
+        title: "Audit Log",
+        description: "Every change made through Open Admin, newest first, secrets redacted.",
+        href: "/audit-log",
+        icon: ScrollText,
+      },
+    ],
   },
 ];
+
+function CliStatusPill({
+  status,
+  loading,
+  cliOptional,
+}: {
+  status: GwsStatus | null;
+  loading: boolean;
+  cliOptional: boolean;
+}) {
+  if (loading) {
+    return (
+      <span className="inline-flex h-8 items-center gap-2 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" />
+        Checking CLI…
+      </span>
+    );
+  }
+
+  const installed = !!status?.installed;
+  const authenticated = !!status?.authenticated;
+  const ok = installed && authenticated;
+  const tone: "ok" | "muted" | "bad" = ok
+    ? "ok"
+    : cliOptional
+      ? "muted"
+      : "bad";
+  const label = installed
+    ? `gws ${status?.version ?? ""}`.trim() +
+      (authenticated ? " · authenticated" : " · not authenticated")
+    : cliOptional
+      ? "CLI optional in this build"
+      : "gws not installed";
+
+  return (
+    <Link
+      href="/setup"
+      title="Open Setup"
+      className="group inline-flex h-8 items-center gap-2 rounded-full border border-border bg-card pr-2.5 pl-3 text-xs font-medium text-foreground/80 shadow-xs transition-colors hover:border-foreground/20 hover:text-foreground"
+    >
+      <span className="relative flex size-2">
+        {tone === "ok" && (
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-success/60 motion-reduce:hidden" />
+        )}
+        <span
+          className={cn(
+            "relative inline-flex size-2 rounded-full",
+            tone === "ok" && "bg-success",
+            tone === "muted" && "bg-muted-foreground/50",
+            tone === "bad" && "bg-danger"
+          )}
+        />
+      </span>
+      <span className="font-mono text-[11.5px]">{label}</span>
+      <ChevronRight className="size-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+    </Link>
+  );
+}
 
 export default function Dashboard() {
   const [status, setStatus] = useState<GwsStatus | null>(null);
@@ -165,133 +260,78 @@ export default function Dashboard() {
       <PageHeader
         title="Dashboard"
         description="Manage your Google Workspace from a single place."
+        actions={
+          <CliStatusPill
+            status={status}
+            loading={loading}
+            cliOptional={cliOptional}
+          />
+        }
       />
 
       {/* First-run onboarding banner */}
       {showFirstRunBanner && (
-        <Link href="/onboarding" className="block mb-6 group">
-          <Card className="ring-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent transition-all hover:ring-primary/50 hover:shadow-md">
-            <CardContent className="pt-6">
-              <div className="flex items-start gap-4">
-                <div className="h-10 w-10 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
-                  <Sparkles className="h-5 w-5" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-base font-semibold">
-                    Let&apos;s get you set up
-                  </h3>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    No tenants configured yet. Walk through a 5-step guided onboarding
-                    to install the CLI, set up a service account, and connect your
-                    first Google Workspace tenant.
-                  </p>
-                </div>
-                <span className="text-sm font-medium text-primary shrink-0 inline-flex items-center gap-1 self-center group-hover:translate-x-0.5 transition-transform">
-                  Start
-                  <ArrowRight className="h-4 w-4" />
-                </span>
-              </div>
-            </CardContent>
-          </Card>
+        <Link
+          href="/onboarding"
+          className="rgb-ring rgb-ring-hover group mb-8 flex items-center gap-4 rounded-xl border border-primary/25 bg-primary/5 p-4 outline-none transition-colors hover:bg-primary/8 focus-visible:ring-3 focus-visible:ring-ring/40"
+        >
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Sparkles className="size-5" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold tracking-tight">
+              Let&apos;s get you set up
+            </span>
+            <span className="mt-0.5 block text-[13px] leading-relaxed text-muted-foreground">
+              No tenants configured yet. Walk through the guided setup: install
+              the CLI, add a service account and connect your first Google
+              Workspace tenant.
+            </span>
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary">
+            Start
+            <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+          </span>
         </Link>
       )}
 
-      {/* Status Banner */}
-      <Card className="mb-6">
-        <CardContent className="pt-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <h3 className="text-sm font-medium">
-                CLI Status{cliOptional ? " (optional)" : ""}
-              </h3>
-              {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-              ) : (
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-1.5">
-                    {status?.installed ? (
-                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                    ) : (
-                      <XCircle
-                        className={`h-4 w-4 ${
-                          cliOptional ? "text-muted-foreground" : "text-red-500"
-                        }`}
-                      />
-                    )}
-                    <span className="text-sm">
-                      {status?.installed
-                        ? `gws ${status.version || ""}`
-                        : cliOptional
-                        ? "gws not installed — not needed in this build"
-                        : "gws not installed"}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {status?.authenticated ? (
-                      <Badge
-                        variant="outline"
-                        className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
-                      >
-                        Authenticated
-                      </Badge>
-                    ) : cliOptional ? (
-                      <Badge variant="outline" className="text-muted-foreground">
-                        Optional
-                      </Badge>
-                    ) : (
-                      <Badge
-                        variant="outline"
-                        className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
-                      >
-                        Not Authenticated
-                      </Badge>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-            {!loading && !cliOptional && (!status?.installed || !status?.authenticated) && (
-              <Link
-                href="/setup"
-                className="text-sm font-medium text-primary underline underline-offset-4 hover:no-underline"
-              >
-                Go to Setup
-              </Link>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
       {/* AI Command */}
-      <div className="mb-8">
+      <section className="mb-10">
         <AICommandPanel />
-      </div>
+      </section>
 
-      {/* Admin Tasks */}
-      <h2 className="text-lg font-semibold mb-3">Admin Tasks</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {tasks.map((task) => (
-          <Link key={task.href} href={task.href}>
-            <Card className="h-full transition-all hover:shadow-md hover:ring-primary/30 cursor-pointer group">
-              <CardHeader className="pb-3">
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`h-10 w-10 rounded-lg ${task.bg} flex items-center justify-center`}
-                  >
-                    <task.icon className={`h-5 w-5 ${task.color}`} />
+      {/* Admin tasks */}
+      <div className="space-y-8">
+        {taskGroups.map((group) => (
+          <section key={group.label} aria-label={group.label}>
+            <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              {group.label}
+            </h2>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {group.tasks.map((task) => (
+                <Link
+                  key={task.href}
+                  href={task.href}
+                  className="rgb-ring rgb-ring-hover group relative flex flex-col gap-3 rounded-xl border border-border bg-card p-4 outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/40"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="flex size-9 items-center justify-center rounded-lg bg-muted text-foreground/70 transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+                      <task.icon className="size-[18px]" />
+                    </span>
+                    <ArrowUpRight className="size-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                   </div>
-                  <CardTitle className="text-base group-hover:text-primary transition-colors">
-                    {task.title}
-                  </CardTitle>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  {task.description}
-                </p>
-              </CardContent>
-            </Card>
-          </Link>
+                  <div>
+                    <p className="text-sm font-semibold tracking-tight">
+                      {task.title}
+                    </p>
+                    <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
+                      {task.description}
+                    </p>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </section>
         ))}
       </div>
     </>

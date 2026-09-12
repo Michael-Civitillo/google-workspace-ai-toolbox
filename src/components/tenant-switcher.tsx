@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, Building2, PlusCircle } from "lucide-react";
+import { Check, ChevronsUpDown, Building2, PlusCircle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TENANT_COLOR_CLASSES, type Tenant, type TenantColor } from "@/lib/tenants";
 import {
@@ -120,10 +120,10 @@ export function TenantSwitcher() {
     return (
       <button
         onClick={() => router.push("/tenants")}
-        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+        className="flex w-full items-center gap-2.5 rounded-lg border border-dashed border-sidebar-border px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:border-foreground/25 hover:bg-sidebar-accent/60 hover:text-foreground"
       >
-        <PlusCircle className="h-3.5 w-3.5 shrink-0" />
-        <span>Add a tenant</span>
+        <PlusCircle className="size-3.5 shrink-0" />
+        <span className="flex-1 truncate">Add a tenant</span>
       </button>
     );
   }
@@ -137,70 +137,77 @@ export function TenantSwitcher() {
         aria-expanded={open}
         aria-label={`Active tenant: ${activeTenant?.name ?? "none"}. Click to switch.`}
         className={cn(
-          "w-full flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors text-left",
-          colorClasses.bg,
-          colorClasses.text,
-          colorClasses.border,
-          "hover:opacity-90"
+          "flex w-full items-center gap-2.5 rounded-lg border border-sidebar-border bg-card px-2.5 py-1.5 text-left shadow-xs outline-none transition-colors",
+          "hover:border-foreground/20 focus-visible:ring-3 focus-visible:ring-ring/40 aria-expanded:border-foreground/20 disabled:opacity-70"
         )}
       >
         <span
-          className={cn("h-2 w-2 rounded-full shrink-0", colorClasses.dot)}
-        />
-        <span className="flex-1 text-xs font-medium truncate">
-          {activeTenant?.name ?? "No tenant selected"}
-        </span>
-        <ChevronDown
           className={cn(
-            "h-3.5 w-3.5 shrink-0 transition-transform",
-            open && "rotate-180"
+            "flex size-6 shrink-0 items-center justify-center rounded-md",
+            colorClasses.bg
           )}
-        />
+        >
+          {switching ? (
+            <Loader2 className="size-3 animate-spin text-muted-foreground" />
+          ) : (
+            <span className={cn("size-2 rounded-full", colorClasses.dot)} />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 leading-tight">
+          <span className="block truncate text-[12.5px] font-medium">
+            {activeTenant?.name ?? "No tenant selected"}
+          </span>
+          <span className="block truncate text-[10.5px] text-muted-foreground">
+            Active tenant
+          </span>
+        </span>
+        <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
       </button>
 
       {switchError && (
-        <p className="mt-1 px-1 text-[10px] leading-snug text-red-600 dark:text-red-400">
+        <p className="mt-1 px-1 text-[10px] leading-snug text-danger">
           {switchError}
         </p>
       )}
 
       {open && (
-        <div role="menu" className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-lg shadow-md overflow-hidden">
-          <div className="p-1 space-y-0.5">
+        <div
+          role="menu"
+          className="absolute top-full right-0 left-0 z-50 mt-1.5 overflow-hidden rounded-lg border border-border bg-popover shadow-lg shadow-black/10 dark:shadow-black/40"
+        >
+          <div className="space-y-0.5 p-1">
             {state.tenants.map((tenant) => {
               const tc = TENANT_COLOR_CLASSES[tenant.color as TenantColor];
               const isActive = tenant.id === state.activeTenantId;
               return (
                 <button
                   key={tenant.id}
+                  role="menuitem"
                   onClick={() => switchTenant(tenant.id)}
                   className={cn(
-                    "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs transition-colors text-left",
+                    "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
                     isActive
-                      ? cn(tc.bg, tc.text, "font-semibold")
+                      ? "bg-accent font-medium text-accent-foreground"
                       : "text-foreground hover:bg-muted"
                   )}
                 >
-                  <span
-                    className={cn("h-2 w-2 rounded-full shrink-0", tc.dot)}
-                  />
+                  <span className={cn("size-2 shrink-0 rounded-full", tc.dot)} />
                   <span className="flex-1 truncate">{tenant.name}</span>
-                  {isActive && (
-                    <span className="text-[10px] opacity-60">active</span>
-                  )}
+                  {isActive && <Check className="size-3.5 text-primary" />}
                 </button>
               );
             })}
           </div>
           <div className="border-t border-border p-1">
             <button
+              role="menuitem"
               onClick={() => {
                 setOpen(false);
                 router.push("/tenants");
               }}
-              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
-              <Building2 className="h-3.5 w-3.5" />
+              <Building2 className="size-3.5" />
               Manage tenants
             </button>
           </div>
