@@ -1,25 +1,15 @@
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
 
 type Status = "success" | "error" | "pending" | "idle";
 
-const statusConfig: Record<Status, { label: string; className: string }> = {
-  success: {
-    label: "Success",
-    className: "bg-emerald-100 text-emerald-800 dark:text-emerald-300 border-emerald-200",
-  },
-  error: {
-    label: "Error",
-    className: "bg-red-100 text-red-800 dark:text-red-300 border-red-200",
-  },
-  pending: {
-    label: "Running...",
-    className: "bg-amber-100 text-amber-800 dark:text-amber-300 border-amber-200",
-  },
-  idle: {
-    label: "Ready",
-    className: "bg-zinc-100 text-zinc-600 border-zinc-200",
-  },
+const statusConfig: Record<
+  Status,
+  { label: string; variant: "success" | "destructive" | "warning" | "outline" }
+> = {
+  success: { label: "Success", variant: "success" },
+  error: { label: "Error", variant: "destructive" },
+  pending: { label: "Running...", variant: "warning" },
+  idle: { label: "Ready", variant: "outline" },
 };
 
 export function StatusBadge({
@@ -30,9 +20,5 @@ export function StatusBadge({
   label?: string;
 }) {
   const config = statusConfig[status];
-  return (
-    <Badge variant="outline" className={cn("font-medium", config.className)}>
-      {label || config.label}
-    </Badge>
-  );
+  return <Badge variant={config.variant}>{label || config.label}</Badge>;
 }
