@@ -1,11 +1,15 @@
-import {
-  google,
-  type drive_v3,
-  type admin_directory_v1,
-  type admin_datatransfer_v1,
-  type admin_reports_v1,
-} from "googleapis";
-import { readFileSync, statSync } from "fs";
+// Deep-import exactly the API versions this file uses. `import { google } from
+// "googleapis"` drags all ~320 API definitions into the server bundle: an
+// 11 MB chunk that costs ~40 MB of resident memory and most of a second on
+// first use, for six modules totalling under half a megabyte.
+import { admin_directory_v1 } from "googleapis/build/src/apis/admin/directory_v1";
+import { admin_reports_v1 } from "googleapis/build/src/apis/admin/reports_v1";
+import { admin_datatransfer_v1 } from "googleapis/build/src/apis/admin/datatransfer_v1";
+import { gmail_v1 } from "googleapis/build/src/apis/gmail/v1";
+import { drive_v3 } from "googleapis/build/src/apis/drive/v3";
+import { calendar_v3 } from "googleapis/build/src/apis/calendar/v3";
+import { JWT } from "google-auth-library";
+import { readFileSync, statSync, type Stats } from "fs";
 import type { Tenant } from "./tenant-types";
 import {
   isValidEmail,
@@ -14,28 +18,29 @@ import {
   emailDomain,
 } from "./validate";
 
+const ADMIN_API_TIMEOUT_MS = 30_000;
+
+// Every client below is constructed with a default per-request timeout.
+// gaxios ships with no default, so a stalled TLS connection to Google
+// (mid-handshake blackhole, dropped keepalive) would otherwise hang a handler
+// forever — the failure mode that lets an offboarding step spin indefinitely.
+// Calls that need longer (mailbox raw fetches) pass an explicit per-call
+// `timeout`, which overrides this floor. (This used to be a single
+// `google.options(...)` on the catalogue object; with deep imports there is no
+// catalogue, so each constructor carries it.)
+const CLIENT_DEFAULTS = { timeout: ADMIN_API_TIMEOUT_MS } as const;
+
 export function buildGmailClient(tenant: Tenant | null, impersonateEmail: string, scopes: string[]) {
   const auth = buildAuth(tenant, impersonateEmail, scopes);
-  return google.gmail({ version: "v1", auth });
+  return new gmail_v1.Gmail({ ...CLIENT_DEFAULTS, auth });
 }
 
 export function buildCalendarClient(tenant: Tenant | null, impersonateEmail: string) {
   const auth = buildAuth(tenant, impersonateEmail, [
     "https://www.googleapis.com/auth/calendar",
   ]);
-  return google.calendar({ version: "v3", auth });
+  return new calendar_v3.Calendar({ ...CLIENT_DEFAULTS, auth });
 }
-
-const ADMIN_API_TIMEOUT_MS = 30_000;
-
-// Set a default per-request timeout on EVERY googleapis call. gaxios ships with
-// no default, so a stalled TLS connection to Google (mid-handshake blackhole,
-// dropped keepalive) would otherwise hang a handler forever — the failure mode
-// that lets an offboarding step spin indefinitely. Calls that need longer
-// (mailbox raw fetches) pass an explicit per-call `timeout`, which overrides
-// this floor. This covers the Gmail/Calendar settings + ACL calls that route
-// handlers make directly, which previously had no timeout at all.
-google.options({ timeout: ADMIN_API_TIMEOUT_MS });
 
 const SCOPES = {
   USER: "https://www.googleapis.com/auth/admin.directory.user",
@@ -86,8 +91,26 @@ interface CredsCacheEntry {
 
 const credsCache = new Map<string, CredsCacheEntry>();
 
+// Fixed messages for key-file problems. The underlying error text names the
+// path and, for a parse failure, quotes the file's first bytes — and route
+// handlers return error messages to the browser verbatim. The operator knows
+// which path the tenant points at; the file's contents are not theirs to see
+// through an error string.
+const CREDS_UNREADABLE = "Service account key file could not be read";
+const CREDS_NOT_JSON = "Service account key file is not valid JSON";
+const CREDS_NOT_A_KEY =
+  "Service account key file is not a service-account key (missing client_email or private_key)";
+
+function statCredentialsFile(credFile: string): Stats {
+  try {
+    return statSync(credFile);
+  } catch {
+    throw new Error(CREDS_UNREADABLE);
+  }
+}
+
 function loadCredentials(credFile: string): ServiceAccountCreds {
-  const stat = statSync(credFile);
+  const stat = statCredentialsFile(credFile);
   const cached = credsCache.get(credFile);
   if (
     cached &&
@@ -97,7 +120,26 @@ function loadCredentials(credFile: string): ServiceAccountCreds {
   ) {
     return cached.creds;
   }
-  const creds = JSON.parse(readFileSync(credFile, "utf-8")) as ServiceAccountCreds;
+  let raw: string;
+  try {
+    raw = readFileSync(credFile, "utf-8");
+  } catch {
+    throw new Error(CREDS_UNREADABLE);
+  }
+  let creds: ServiceAccountCreds;
+  try {
+    creds = JSON.parse(raw) as ServiceAccountCreds;
+  } catch {
+    throw new Error(CREDS_NOT_JSON);
+  }
+  if (
+    !creds ||
+    typeof creds !== "object" ||
+    typeof creds.client_email !== "string" ||
+    typeof creds.private_key !== "string"
+  ) {
+    throw new Error(CREDS_NOT_A_KEY);
+  }
   credsCache.set(credFile, {
     mtimeMs: stat.mtimeMs,
     size: stat.size,
@@ -127,7 +169,7 @@ function loadCredentials(credFile: string): ServiceAccountCreds {
  * serving a stale (possibly revoked) token for the life of the process.
  */
 const JWT_CACHE_MAX = 100;
-const jwtCache = new Map<string, InstanceType<typeof google.auth.JWT>>();
+const jwtCache = new Map<string, JWT>();
 
 function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
   const credFile =
@@ -141,7 +183,7 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     );
   }
 
-  const stat = statSync(credFile);
+  const stat = statCredentialsFile(credFile);
   const cacheKey = `${credFile}|${subject.toLowerCase()}|${[...scopes]
     .sort()
     .join(",")}|${stat.mtimeMs}|${stat.size}`;
@@ -157,7 +199,7 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
   }
 
   const creds = loadCredentials(credFile);
-  const jwt = new google.auth.JWT({
+  const jwt = new JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes,
@@ -199,7 +241,7 @@ function getAdminClient(
     SCOPES.DOMAIN_READONLY,
   ]);
   return {
-    client: google.admin({ version: "directory_v1", auth }),
+    client: new admin_directory_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -219,7 +261,7 @@ function getGroupsClient(
   const subject = impersonatedAdminFor(tenant, adminEmail);
   const auth = buildAuth(tenant, subject, [SCOPES.GROUP]);
   return {
-    client: google.admin({ version: "directory_v1", auth }),
+    client: new admin_directory_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -237,7 +279,7 @@ function getReportsClient(
   const subject = impersonatedAdminFor(tenant, adminEmail);
   const auth = buildAuth(tenant, subject, [SCOPES.REPORTS_AUDIT_READONLY]);
   return {
-    client: google.admin({ version: "reports_v1", auth }),
+    client: new admin_reports_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -248,7 +290,7 @@ function getDataTransferClient(
 ): admin_datatransfer_v1.Admin {
   const subject = impersonatedAdminFor(tenant);
   const auth = buildAuth(tenant, subject, [SCOPES.DATA_TRANSFER]);
-  return google.admin({ version: "datatransfer_v1", auth });
+  return new admin_datatransfer_v1.Admin({ ...CLIENT_DEFAULTS, auth });
 }
 
 /**
@@ -264,7 +306,7 @@ function getDriveClient(tenant: Tenant | null, asUser: string): drive_v3.Drive {
     throw new Error("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_METADATA_READONLY]);
-  return google.drive({ version: "v3", auth });
+  return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
 }
 
 /**
@@ -280,7 +322,7 @@ function getDriveClientWritable(
     throw new Error("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_FULL]);
-  return google.drive({ version: "v3", auth });
+  return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
 }
 
 /**
@@ -294,7 +336,7 @@ function getDriveClientWritable(
 function getDriveClientAsAdmin(tenant: Tenant | null): drive_v3.Drive {
   const subject = impersonatedAdminFor(tenant);
   const auth = buildAuth(tenant, subject, [SCOPES.DRIVE_FULL]);
-  return google.drive({ version: "v3", auth });
+  return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
 }
 
 export interface UserInfo {
@@ -2845,11 +2887,11 @@ const MAILBOX_API_TIMEOUT_MS = 60_000;
 const MAILBOX_EXPORT_DEFAULT_PAGE = 25;
 const MAILBOX_EXPORT_MAX_PAGE = 50;
 // Fetch raw messages in parallel per page. messages.get costs 5 quota units,
-// so 6 in flight peaks at ~30 units/sec — several times faster than a serial
-// walk while staying well under Gmail's 250 units/user/sec budget, with the
-// retry layer absorbing the occasional 429. The count also bounds the byte
-// budget's overshoot (see below), so it cannot be raised independently.
-const MAILBOX_EXPORT_FETCH_CONCURRENCY = 6;
+// so 3 in flight peaks at ~15 units/sec — faster than a serial walk while
+// staying well under Gmail's 250 units/user/sec budget, with the retry layer
+// absorbing the occasional 429. The count also bounds the byte budget's
+// overshoot (see below), so it cannot be raised independently.
+const MAILBOX_EXPORT_FETCH_CONCURRENCY = 3;
 // Cumulative raw-byte budget per returned page. A single Gmail message can be
 // ~67 MB base64url, so a page capped only by message count (up to 50) could
 // hold multiple GB and throw `RangeError: Invalid string length` when
@@ -2859,11 +2901,13 @@ const MAILBOX_EXPORT_FETCH_CONCURRENCY = 6;
 //
 // The budget check happens when a worker CLAIMS the next id, so in-flight
 // fetches can overshoot it by up to (concurrency - 1) × max-message: with
-// 6 workers that's 48 MB + 5 × 67 MB ≈ 383 MB. V8's real string cap is
-// 2^29 - 24 chars (~512 MiB, not 1 GB), so the worst case clears it with
-// margin — raising either the budget or the concurrency erodes that margin.
-// Always fetch at least one id so a lone oversized message still progresses.
-const MAILBOX_EXPORT_PAGE_BYTE_BUDGET = 48 * 1024 * 1024;
+// 3 workers that's 16 MB + 2 × 67 MB ≈ 150 MB of base64 strings, and the
+// response serialisation roughly triples that transiently. V8's real string
+// cap is 2^29 - 24 chars (~512 MiB), so the worst case clears it with wide
+// margin — raising either the budget or the concurrency erodes that margin
+// and the RAM a small host needs. Always fetch at least one id so a lone
+// oversized message still progresses.
+const MAILBOX_EXPORT_PAGE_BYTE_BUDGET = 16 * 1024 * 1024;
 
 /** Hard cap on messages accepted in a single import batch. */
 export const MAILBOX_IMPORT_BATCH_CAP = 25;

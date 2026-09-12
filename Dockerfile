@@ -35,7 +35,15 @@ ENV NODE_ENV=production \
     # a public hostname additionally needs APP_ALLOWED_ORIGINS.
     HOSTNAME=0.0.0.0 \
     PORT=3000 \
-    OPEN_ADMIN_DATA_DIR=/data
+    OPEN_ADMIN_DATA_DIR=/data \
+    # Cap V8's heap. Without a limit Node sizes its heap from the host's total
+    # memory and lets it grow long after a request is done, which on a 1-2 GB
+    # box reads as a slow leak. 768 MB sits well above the working set (~100 MB
+    # idle; a few hundred at the mailbox export/import caps) and low enough
+    # that a genuine leak trips a fast OOM instead of swapping the host. The
+    # small semi-space keeps scavenge copying - and so RSS - down for the
+    # short-lived objects a request cycle produces.
+    NODE_OPTIONS="--max-old-space-size=768 --max-semi-space-size=8"
 RUN mkdir -p /data && chown node:node /data
 COPY --from=build --chown=node:node /app/.next/standalone ./
 COPY --from=build --chown=node:node /app/.next/static ./.next/static
