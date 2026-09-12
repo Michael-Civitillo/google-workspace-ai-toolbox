@@ -21,6 +21,12 @@ on:
       - ".github/workflows/release.yml"
   workflow_dispatch:
 
+# Least privilege by default: every job gets a read-only GITHUB_TOKEN. The
+# publish job re-grants `contents: write` for itself, so a compromised build
+# step (a dependency's install script, say) cannot push tags or releases.
+permissions:
+  contents: read
+
 env:
   NEXT_TELEMETRY_DISABLED: "1"
   # Nothing here drives a browser; skip the ~150 MB Chromium download.

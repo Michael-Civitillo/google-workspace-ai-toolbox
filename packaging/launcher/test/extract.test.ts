@@ -79,6 +79,20 @@ describe("ensureExtracted", () => {
     assert.equal(fs.readFileSync(path.join(appDir, "server.js"), "utf-8"), "// hello\n");
   });
 
+  it("refuses an archive entry that would escape the target directory", () => {
+    const appDir = freshDir("zipslip");
+    const hostile = zipSync({
+      "server.js": encoder.encode("// ok\n"),
+      "../escape.txt": encoder.encode("outside"),
+    });
+    assert.throws(
+      () => ensureExtracted(hostile, appDir),
+      /outside the target directory|unsafe archive entry/
+    );
+    assert.equal(fs.existsSync(path.join(tmpRoot, "escape.txt")), false);
+    assert.equal(fs.existsSync(appDir), false);
+  });
+
   it("leaves nothing behind at the target path when extraction fails", () => {
     const appDir = freshDir("corrupt");
     const notAZip = encoder.encode("this is not a zip archive");

@@ -13,7 +13,13 @@ import {
   writeConfigFile,
   type LauncherConfig,
 } from "./config.ts";
-import { ensureExtracted, payloadHash, pruneOtherVersions } from "./extract.ts";
+import {
+  ensureExtracted,
+  isExtracted,
+  payloadHash,
+  pruneOtherVersions,
+  type ExtractResult,
+} from "./extract.ts";
 import {
   isPortFree,
   isProcessAlive,
@@ -37,6 +43,24 @@ import { error, info, initLogFile, plain, warn } from "./log.ts";
 /** Replaced at build time by packaging/build-launcher.mjs. */
 declare const __APP_VERSION__: string;
 declare const __PAYLOAD_SHA256__: string;
+
+/**
+ * Load the embedded archive, check it is the one this launcher was built
+ * with, and unpack it. Scoped to a function so the archive bytes are
+ * unreachable — and collectable — the moment extraction finishes.
+ */
+function extractVerifiedPayload(appDir: string): ExtractResult {
+  const payload = loadPayload();
+  const actual = payloadHash(payload);
+  if (actual !== __PAYLOAD_SHA256__) {
+    throw new Error(
+      `the application payload does not match this launcher ` +
+        `(expected ${__PAYLOAD_SHA256__.slice(0, 12)}, found ${actual.slice(0, 12)}). ` +
+        `Run "npm run package" to rebuild both together.`
+    );
+  }
+  return ensureExtracted(payload, appDir);
+}
 
 const APP_TITLE = "Google Workspace Open Admin";
 const DEFAULT_HOST = "127.0.0.1";
@@ -227,16 +251,20 @@ async function run(userArgs: string[]): Promise<number | null> {
     }
   }
 
-  // Unpack the bundled application.
-  const payload = loadPayload();
-  const appDir = appDirFor(paths.appRoot, __APP_VERSION__, payloadHash(payload));
+  // Unpack the bundled application. The app directory is keyed by the payload
+  // hash baked in at build time, so a launch that finds it already extracted
+  // never touches the embedded archive: no copy out of the executable, no
+  // hashing, nothing resident afterwards.
+  const appDir = appDirFor(paths.appRoot, __APP_VERSION__, __PAYLOAD_SHA256__);
   if (args.resetAppCache) {
     info("Clearing extracted application files (--reset-app-cache).");
     fs.rmSync(paths.appRoot, { recursive: true, force: true });
   }
   let extractedAppDir: string;
   try {
-    const result = ensureExtracted(payload, appDir);
+    const result: ExtractResult = isExtracted(appDir)
+      ? { appDir, extracted: false, fileCount: 0, elapsedMs: 0 }
+      : extractVerifiedPayload(appDir);
     extractedAppDir = result.appDir;
     if (result.extracted) {
       info(
