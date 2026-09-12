@@ -15,7 +15,8 @@ const PUBLIC_PATHS = new Set([
 ]);
 
 /**
- * Edge middleware that enforces:
+ * Request gate (Next.js "proxy", the Node.js successor of edge middleware)
+ * that enforces:
  *
  *   1. APP_PASSWORD must be set. If it isn't, the entire app refuses to serve
  *      anything except /login (which itself will tell the operator to set it).
@@ -30,7 +31,7 @@ const PUBLIC_PATHS = new Set([
  *
  *   4. HSTS in production responses, so browsers refuse to fall back to HTTP.
  */
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Static assets and Next internals: let through.
@@ -259,6 +260,11 @@ function withSecurityHeaders(res: NextResponse): NextResponse {
   res.headers.set("X-Content-Type-Options", "nosniff");
   res.headers.set("Referrer-Policy", "same-origin");
   res.headers.set("X-Frame-Options", "DENY");
+  // Nothing in the app needs a sensor, camera or payment API; say so.
+  res.headers.set(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+  );
   return res;
 }
 
