@@ -1,3 +1,5 @@
+import { warnPasswordOnCommandLine } from "./config.ts";
+
 /**
  * Command-line parsing for the packaged launcher.
  *
@@ -114,6 +116,10 @@ export function parseArgs(argv: string[]): ParseResult {
     else if (name === "password") args.password = value;
   }
 
+  // Only on a line that parsed: a run that dies on a bad flag prints usage and
+  // stops, and a second warning there is just noise.
+  if (args.password !== null) warnPasswordOnCommandLine();
+
   return { args, error: null };
 }
 
@@ -127,7 +133,7 @@ Usage: ${exeName} [options]
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
   --set-password       set a new admin password for the web UI
-  --password <pw>      admin password for this run only
+  --password <pw>      set the admin password (saved; visible in the process list)
   --no-browser         don't open a browser window on start
   --reset-app-cache    re-extract the bundled application files
   --version, -v        print version information

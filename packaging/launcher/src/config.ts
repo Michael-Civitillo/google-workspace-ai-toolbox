@@ -118,6 +118,26 @@ export function generatePassword(): string {
   return crypto.randomBytes(18).toString("base64url");
 }
 
+let warnedAboutCommandLinePassword = false;
+
+/**
+ * `--password` puts the value in the process argument list, where `ps` and Task
+ * Manager show it to every other user on the machine, and the shell keeps a copy
+ * in its history file. Written straight to stderr rather than through log.ts:
+ * launcher.log is the file people attach to a bug report, and the password path
+ * is kept out of it the same way the generated password is.
+ */
+export function warnPasswordOnCommandLine(): void {
+  if (warnedAboutCommandLinePassword) return;
+  warnedAboutCommandLinePassword = true;
+  process.stderr.write(
+    "Warning: --password is visible to every user on this machine (it shows up in\n" +
+      "  the process list) and stays in your shell history. On a shared machine, set\n" +
+      "  APP_PASSWORD in launcher.env or the environment, run --set-password to be\n" +
+      "  prompted without echo, or use the password saved in launcher.json.\n"
+  );
+}
+
 const CTRL_C = "\u0003";
 const DELETE = "\u007f";
 

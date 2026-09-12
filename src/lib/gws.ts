@@ -71,6 +71,15 @@ function childEnv(
   return { ...env, ...overrides } as NodeJS.ProcessEnv;
 }
 
+/**
+ * The only CLI calls left are the two status probes below (`--version` and
+ * `auth export`), with fixed arguments. A general `gws(args, tenant)` wrapper
+ * used to live here unused: on the Windows `shell: true` path its arguments
+ * were re-parsed by cmd.exe with no `--` separator before caller-derived
+ * values, so it was a command-injection shape waiting to be wired up. It is
+ * gone; anything that needs the CLI again should take an explicit, fixed
+ * argument list and go through childEnv.
+ */
 function runGws(
   args: string[],
   options: { timeout: number; env?: NodeJS.ProcessEnv }
@@ -84,13 +93,6 @@ function runGws(
     });
   }
   return execFileAsync(GWS_BIN, args, withEnv);
-}
-
-export interface GwsResult {
-  success: boolean;
-  data?: unknown;
-  error?: string;
-  raw?: string;
 }
 
 /**
@@ -126,42 +128,6 @@ export function tenantFromRequest(
     }
   }
   return resolveTenant(id);
-}
-
-/**
- * Execute a gws CLI command using the supplied tenant's credentials.
- */
-export async function gws(
-  args: string[],
-  tenant: Tenant | null
-): Promise<GwsResult> {
-  const env = childEnv(
-    tenant?.credentialsFile
-      ? { GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: tenant.credentialsFile }
-      : {}
-  );
-
-  try {
-    const { stdout, stderr } = await runGws(args, {
-      timeout: 30000,
-      env,
-    });
-
-    if (stderr && !stdout) {
-      return { success: false, error: stderr.trim() };
-    }
-
-    try {
-      const data = JSON.parse(stdout);
-      return { success: true, data };
-    } catch {
-      return { success: true, raw: stdout.trim() };
-    }
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown error executing gws";
-    return { success: false, error: message };
-  }
 }
 
 /**

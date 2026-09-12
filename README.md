@@ -43,7 +43,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 💼 **Portable configuration** — Export everything — single sign-on settings, tenants, and the service-account key files themselves — to one JSON bundle from **App Settings**, and restore it on another server in one click. Keys are written back to disk automatically (relocated if the original path doesn't exist there), with a preview first and a typed confirmation only when overwriting an already-configured server.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
 - ⚠️ **Confirmation dialogs, enforced server-side** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension, Drive transfer, mailbox import, bulk un-share) shows a before→after diff and requires you to type the target email or identifier. The API re-checks that typed value, so the guard holds for anything calling the routes directly, not just the browser.
-- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location).
+- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location). Rotates at 8 MB keeping three older files, so a long-running install stays bounded at ~32 MB.
 - 🧪 **Atomic config writes** — `tenants.json`, `sso.json` and `app-config.json` share one store implementation: tmp-file + fsync + rename with an in-process mutex, so a crash mid-write can't corrupt your config.
 
 ### Polish
@@ -158,7 +158,7 @@ open-admin [options]
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
   --set-password       set a new admin password for the web UI
-  --password <pw>      admin password for this run only
+  --password <pw>      set the admin password (saved; visible in the process list)
   --no-browser         don't open a browser window on start
   --reset-app-cache    re-extract the bundled application files
   --version, -v        print version information
@@ -304,10 +304,12 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | `APP_ALLOWED_ORIGINS` | ✅ behind a proxy | Comma-separated public origin(s) browsers use, e.g. `https://admin.example.com`. Behind Cloudflare Tunnel, nginx or Docker with a hostname the browser's `Origin` is the public URL while the server only knows the address it bound — without this every mutating request is refused (403). |
 | `TRUSTED_PROXY` | optional | Set to `true` when nothing but a trusted proxy can reach the app; per-address login rate limiting then reads `X-Forwarded-For`. |
 | `OPEN_ADMIN_DATA_DIR` | optional | Where `tenants.json`, `app-config.json`, `sso.json`, `audit.log` and imported keys are kept (defaults to the working directory). The packaged Windows build sets this to your user profile. |
-| `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). |
+| `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). At 8 MB it rotates to `audit.log.1`, shifting older files up to `.3` and dropping the rest — about 32 MB of history, all mode 0600. The in-app viewer reads the current file; the rotated ones are there for your own archive or log shipper. |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
 | `SSO_CONFIG_PATH` | optional | Override location of the single sign-on config (defaults to `./sso.json`). |
 | `APP_SSO_DISABLED` | optional | Set to `true` to switch single sign-on off and restore password login without editing `sso.json`. |
+| `APP_SSO_ALLOW_PRIVATE_ISSUER` | optional | Set to `true` to allow an OIDC issuer on a private, loopback or link-local host (a local development provider). Refused by default: the server performs the discovery fetch, so an unrestricted issuer check would tell any signed-in user which ports answer on the server's own network. |
+| `APP_SSO_TRUST_UNVERIFIED_EMAIL` | optional | Set to `true` to accept a sign-in whose ID token has no `email_verified: true` claim. Refused by default, except for Entra ID where the UPN is administrator-controlled. Only set this when the provider's directory is the source of truth for addresses. |
 | `NODE_OPTIONS` | optional | Memory caps for the Node process. The Docker image ships `--max-old-space-size=768 --max-semi-space-size=8`; pass the same when you run from source on a small host. Without a cap Node sizes its heap from the machine's total memory and holds on to it long after a request finishes. |
 
 State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600), `app-config.json` (onboarding state) and `session-secret` (the generated cookie-signing key, mode 0600) — all gitignored, all written atomically with 0600 permissions, and everything but `session-secret` is covered by the configuration export below.

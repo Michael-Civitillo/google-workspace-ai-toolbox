@@ -71,6 +71,14 @@ State lives in `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data`, separate from
 the versioned `app\` directory, so an upgrade replaces the application and
 keeps tenants, sign-on config, the audit log and imported keys.
 
+The admin password reaches the app as `APP_PASSWORD` in the environment (which
+`launcher.env` can set), from the no-echo prompt on first run or
+`--set-password`, or from the copy in `launcher.json`. `--password` works too —
+it is what the smoke test uses — but on a shared machine prefer any of the
+others: argv is readable by every other user through `ps` or Task Manager, and
+shells keep it in history. The launcher says so on stderr when you pass it, and
+deliberately not into `launcher.log`.
+
 ## Three things that will bite you
 
 **1. The bind address decides which URL works.** In a standalone build Next
