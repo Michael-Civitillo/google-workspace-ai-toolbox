@@ -11,6 +11,7 @@ import {
 } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { chargeAiBudget } from "@/lib/ai-budget";
 
 const ParsedCommandSchema = z.object({
   action: z.string().describe("The action ID from the available actions list"),
@@ -31,6 +32,10 @@ const MAX_BODY_BYTES = 16 * 1024; // commands are short — cap to keep AI bills
 const MAX_COMMAND_CHARS = 4_000;
 
 export async function POST(request: NextRequest) {
+  // Same budget as the two report routes — one Gemini bill, one allowance.
+  const overBudget = await chargeAiBudget(request);
+  if (overBudget) return overBudget;
+
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });

@@ -321,11 +321,8 @@ export default function ActivityReports() {
                       Security Digest — {digestMeta}
                     </p>
                   </div>
+                  {/* AiSummary carries the "advisory, verify it" callout itself. */}
                   <AiSummary text={digest} />
-                  <p className="text-xs text-muted-foreground mt-4">
-                    Gemini summary of Reports API data. Always verify critical
-                    findings manually.
-                  </p>
                 </div>
               </>
             )}
