@@ -33,12 +33,12 @@ export function ScopePreflightPanel({
 
   if (state.kind === "error") {
     return (
-      <div className="mt-2 rounded-md border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs">
-        <p className="font-medium text-red-800 dark:text-red-300 flex items-center gap-1.5">
+      <div className="mt-2 rounded-md border border-danger/25 bg-danger/8 px-3 py-2 text-xs">
+        <p className="font-medium text-danger-fg flex items-center gap-1.5">
           <XCircle className="h-3.5 w-3.5" />
           Preflight could not run
         </p>
-        <p className="text-red-700 dark:text-red-400 mt-1 break-words">
+        <p className="text-danger-fg mt-1 break-words">
           {state.message}
         </p>
         <Button
@@ -62,16 +62,16 @@ export function ScopePreflightPanel({
       className={cn(
         "mt-2 rounded-md border px-3 py-2 text-xs",
         failing.length === 0
-          ? "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-          : "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
+          ? "border-success/25 bg-success/8"
+          : "border-danger/25 bg-danger/8"
       )}
     >
       <p
         className={cn(
           "font-medium flex items-center gap-1.5",
           failing.length === 0
-            ? "text-emerald-800 dark:text-emerald-300"
-            : "text-red-800 dark:text-red-300"
+            ? "text-success-fg"
+            : "text-danger-fg"
         )}
       >
         {failing.length === 0 ? (
@@ -98,7 +98,7 @@ export function ScopePreflightPanel({
 
       {failing.length > 0 && (
         <div className="mt-2 space-y-2">
-          <p className="text-xs text-red-700 dark:text-red-400">
+          <p className="text-xs text-danger-fg">
             Fix this in <strong>admin.google.com → Security → Access and
             data control → API controls → Manage Domain Wide Delegation</strong>.
             Find the row matching the client ID above, click <strong>Edit</strong>,
@@ -108,20 +108,20 @@ export function ScopePreflightPanel({
             {failing.map((r) => (
               <li
                 key={r.scope}
-                className="rounded border border-red-200 dark:border-red-900/50 bg-white dark:bg-red-950/20 px-2 py-1.5"
+                className="rounded border border-danger/25 bg-card px-2 py-1.5"
               >
                 <div className="flex items-start gap-1.5">
-                  <XCircle className="h-3.5 w-3.5 text-red-500 mt-0.5 shrink-0" />
+                  <XCircle className="h-3.5 w-3.5 text-danger mt-0.5 shrink-0" />
                   <div className="min-w-0 flex-1">
-                    <p className="font-medium text-red-900 dark:text-red-300">
+                    <p className="font-medium text-danger-fg">
                       {r.label}
                     </p>
-                    <code className="font-mono text-[10px] text-red-700 dark:text-red-400 break-all block">
+                    <code className="font-mono text-[10px] text-danger-fg break-all block">
                       {r.scope}
                     </code>
                     <p className="text-muted-foreground mt-0.5">{r.feature}</p>
                     {r.error && (
-                      <p className="text-red-700 dark:text-red-400 mt-1 break-words">
+                      <p className="text-danger-fg mt-1 break-words">
                         <span className="font-medium">Google said:</span>{" "}
                         {r.error}
                       </p>
@@ -144,7 +144,7 @@ export function ScopePreflightPanel({
           <ul className="mt-1.5 space-y-1 pl-4">
             {passing.map((r) => (
               <li key={r.scope} className="flex items-center gap-1.5">
-                <CheckCircle2 className="h-3 w-3 text-emerald-600 shrink-0" />
+                <CheckCircle2 className="h-3 w-3 text-success shrink-0" />
                 <span className="font-mono text-[10px] break-all">
                   {r.scope}
                 </span>

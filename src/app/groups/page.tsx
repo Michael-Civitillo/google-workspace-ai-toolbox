@@ -11,7 +11,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -23,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import {
   Users,
   Loader2,
@@ -346,9 +346,9 @@ export default function Groups() {
 
   const roleBadgeClass = (role: string) =>
     role === "OWNER"
-      ? "border-red-300 dark:border-red-800 text-red-700 dark:text-red-400"
+      ? "border-danger/40 text-danger-fg"
       : role === "MANAGER"
-        ? "border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400"
+        ? "border-warning/40 text-warning-fg"
         : "";
 
   return (
@@ -359,21 +359,7 @@ export default function Groups() {
         badge="Directory"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${message.type === "error" ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40" : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"}`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error"
-                ? "text-red-800 dark:text-red-300"
-                : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <Tabs defaultValue="browse">
         <TabsList className="mb-4">
@@ -385,7 +371,7 @@ export default function Groups() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg flex items-center gap-2">
+                <CardTitle className="flex items-center gap-2">
                   <Users className="h-5 w-5" />
                   Groups
                 </CardTitle>
@@ -475,7 +461,7 @@ export default function Groups() {
 
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Members</CardTitle>
+                <CardTitle>Members</CardTitle>
                 <CardDescription>
                   {selectedGroup
                     ? `Direct members of ${selectedGroup}`
@@ -580,7 +566,7 @@ export default function Groups() {
                           {removing === `${selectedGroup}:${m.email}` ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                           ) : (
-                            <Trash2 className="h-4 w-4 text-red-500" />
+                            <Trash2 className="h-4 w-4 text-danger" />
                           )}
                         </Button>
                       </div>
@@ -608,7 +594,7 @@ export default function Groups() {
         <TabsContent value="memberships">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
+              <CardTitle className="flex items-center gap-2">
                 <Users className="h-5 w-5" />
                 User Memberships
               </CardTitle>
@@ -680,7 +666,7 @@ export default function Groups() {
                         {removing === `${g.email}:${listedMemberUser}` ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
-                          <Trash2 className="h-4 w-4 text-red-500" />
+                          <Trash2 className="h-4 w-4 text-danger" />
                         )}
                       </Button>
                     </div>

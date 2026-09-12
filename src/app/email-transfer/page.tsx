@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import {
   ArrowRightLeft,
   ArrowRight,
@@ -147,28 +148,12 @@ export default function EmailTransfer() {
         badge="Gmail"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${
-            message.type === "error"
-              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
-              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-          }`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <div className="max-w-2xl">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <ArrowRightLeft className="h-5 w-5" />
               Set Up Email Forwarding
             </CardTitle>
@@ -224,9 +209,9 @@ export default function EmailTransfer() {
             </div>
 
             {isExternal && (
-              <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-                <AlertTriangle className="h-4 w-4 text-red-600" />
-                <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+              <Alert variant="destructive">
+                <AlertTriangle className="h-4 w-4 text-danger" />
+                <AlertDescription>
                   <strong>{targetDomain}</strong> is NOT one of your tenant&apos;s
                   verified domains. Forwarding email outside your tenant can
                   leak data.
@@ -234,9 +219,9 @@ export default function EmailTransfer() {
               </Alert>
             )}
 
-            <Alert className="border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/40">
-              <Info className="h-4 w-4 text-blue-600" />
-              <AlertDescription className="text-blue-800 dark:text-blue-300 text-sm">
+            <Alert variant="info">
+              <Info className="h-4 w-4 text-info" />
+              <AlertDescription>
                 This sets up forwarding for <strong>new</strong> incoming email
                 only. Existing emails are not transferred. For existing mail
                 migration, use Google&apos;s Data Migration Service in the Admin

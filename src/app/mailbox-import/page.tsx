@@ -376,8 +376,8 @@ export default function MailboxImport() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-          <AlertDescription className="text-red-800 dark:text-red-300">
+        <Alert variant="destructive" className="mb-6">
+          <AlertDescription>
             {error}
           </AlertDescription>
         </Alert>
@@ -385,24 +385,11 @@ export default function MailboxImport() {
 
       {summary && (
         <Alert
-          className={`mb-6 ${
-            summary.aborted
-              ? "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
-              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-          }`}
+          variant={summary.aborted ? "warning" : "success"}
+          className="mb-6"
         >
-          <CheckCircle2
-            className={`h-4 w-4 ${
-              summary.aborted ? "text-amber-600" : "text-emerald-600"
-            }`}
-          />
-          <AlertDescription
-            className={`text-sm ${
-              summary.aborted
-                ? "text-amber-800 dark:text-amber-300"
-                : "text-emerald-800 dark:text-emerald-300"
-            }`}
-          >
+          <CheckCircle2 />
+          <AlertDescription>
             {summary.aborted
               ? "Import stopped on an error — "
               : summary.cancelled
@@ -429,7 +416,7 @@ export default function MailboxImport() {
       <div className="max-w-2xl space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Upload className="h-5 w-5" />
               Restore an export
             </CardTitle>
@@ -481,9 +468,9 @@ export default function MailboxImport() {
             </div>
 
             {parseError && (
-              <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-                <AlertTriangle className="h-4 w-4 text-red-600" />
-                <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+              <Alert variant="destructive">
+                <AlertTriangle className="h-4 w-4 text-danger" />
+                <AlertDescription>
                   {parseError}
                 </AlertDescription>
               </Alert>
@@ -508,9 +495,9 @@ export default function MailboxImport() {
               </div>
             )}
 
-            <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-              <AlertTriangle className="h-4 w-4 text-amber-600" />
-              <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
+            <Alert variant="warning">
+              <AlertTriangle className="h-4 w-4 text-warning" />
+              <AlertDescription>
                 Importing is not idempotent — running it twice inserts duplicate
                 copies of every message. Import into a fresh or intended mailbox,
                 and only once.
@@ -548,7 +535,7 @@ export default function MailboxImport() {
             </div>
 
             {errors.length > 0 && (
-              <div className="rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+              <div className="rounded-md border border-warning/30 bg-warning/8 p-3 text-xs text-warning-fg space-y-1">
                 <p className="font-medium">
                   {errors.length} message error
                   {errors.length === 1 ? "" : "s"} (first {Math.min(errors.length, 50)} shown):

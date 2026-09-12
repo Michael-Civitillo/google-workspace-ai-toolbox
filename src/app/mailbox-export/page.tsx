@@ -342,8 +342,8 @@ export default function MailboxExport() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-          <AlertDescription className="text-red-800 dark:text-red-300">
+        <Alert variant="destructive" className="mb-6">
+          <AlertDescription>
             {error}
           </AlertDescription>
         </Alert>
@@ -351,24 +351,11 @@ export default function MailboxExport() {
 
       {summary && (
         <Alert
-          className={`mb-6 ${
-            summary.skipped > 0
-              ? "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
-              : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-          }`}
+          variant={summary.skipped > 0 ? "warning" : "success"}
+          className="mb-6"
         >
-          {summary.skipped > 0 ? (
-            <AlertTriangle className="h-4 w-4 text-amber-600" />
-          ) : (
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-          )}
-          <AlertDescription
-            className={`text-sm ${
-              summary.skipped > 0
-                ? "text-amber-800 dark:text-amber-300"
-                : "text-emerald-800 dark:text-emerald-300"
-            }`}
-          >
+          {summary.skipped > 0 ? <AlertTriangle /> : <CheckCircle2 />}
+          <AlertDescription>
             {summary.cancelled ? "Export cancelled — " : "Export complete — "}
             saved {summary.exported.toLocaleString()} message
             {summary.exported === 1 ? "" : "s"} (≈{formatBytes(summary.bytes)})
@@ -385,7 +372,7 @@ export default function MailboxExport() {
       <div className="max-w-2xl space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Download className="h-5 w-5" />
               Export a mailbox
             </CardTitle>
@@ -448,9 +435,9 @@ export default function MailboxExport() {
               Include Spam &amp; Trash (recommended for a complete backup)
             </label>
 
-            <Alert className="border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/40">
-              <Info className="h-4 w-4 text-blue-600" />
-              <AlertDescription className="text-blue-800 dark:text-blue-300 text-sm">
+            <Alert variant="info">
+              <Info className="h-4 w-4 text-info" />
+              <AlertDescription>
                 The export contains the full content of every email. Store the
                 downloaded file somewhere secure. Large mailboxes are held in
                 browser memory until the download is assembled — for very large

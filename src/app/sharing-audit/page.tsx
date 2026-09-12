@@ -139,12 +139,12 @@ function fileMatchesFilter(
 const REVOKE_BATCH_SIZE = 200;
 
 const ROLE_BADGE: Record<string, string> = {
-  owner: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
-  organizer: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
-  fileOrganizer: "bg-violet-100 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-900/50",
-  writer: "bg-amber-100 text-amber-700 border-amber-200",
-  commenter: "bg-blue-100 text-blue-700 border-blue-200",
-  reader: "bg-zinc-100 text-zinc-700 border-zinc-200",
+  owner: "border-primary/20 bg-primary/10 text-primary",
+  organizer: "border-primary/20 bg-primary/10 text-primary",
+  fileOrganizer: "border-primary/20 bg-primary/10 text-primary",
+  writer: "border-warning/30 bg-warning/10 text-warning-fg",
+  commenter: "border-info/25 bg-info/10 text-info-fg",
+  reader: "border-border bg-muted text-muted-foreground",
 };
 
 function permissionIcon(type: ExternalPermission["type"]) {
@@ -1123,33 +1123,18 @@ export default function SharingAudit() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-          <AlertDescription className="text-red-800 dark:text-red-300">{error}</AlertDescription>
+        <Alert variant="destructive" className="mb-6">
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       {revokeNotice && (
         <Alert
-          className={`mb-6 ${
-            revokeNotice.tone === "success"
-              ? "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
-              : "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
-          }`}
+          variant={revokeNotice.tone === "success" ? "success" : "warning"}
+          className="mb-6"
         >
-          {revokeNotice.tone === "success" ? (
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-          ) : (
-            <AlertTriangle className="h-4 w-4 text-amber-600" />
-          )}
-          <AlertDescription
-            className={`text-sm ${
-              revokeNotice.tone === "success"
-                ? "text-emerald-800 dark:text-emerald-300"
-                : "text-amber-800 dark:text-amber-300"
-            }`}
-          >
-            {revokeNotice.message}
-          </AlertDescription>
+          {revokeNotice.tone === "success" ? <CheckCircle2 /> : <AlertTriangle />}
+          <AlertDescription>{revokeNotice.message}</AlertDescription>
         </Alert>
       )}
 
@@ -1157,7 +1142,7 @@ export default function SharingAudit() {
         {/* Single-user card */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Audit one user</CardTitle>
+            <CardTitle>Audit one user</CardTitle>
             <CardDescription>
               Walks every owned Drive file (1,000 per request, auto-continued
               up to 20,000 in a single run) and flags any permission outside
@@ -1203,7 +1188,7 @@ export default function SharingAudit() {
         {/* Tenant-wide card */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Audit every user (tenant-wide)</CardTitle>
+            <CardTitle>Audit every user (tenant-wide)</CardTitle>
             <CardDescription>
               Walks every user in your tenant and runs the same audit per
               mailbox. Sequential and read-only. Best for small tenants — for
@@ -1286,7 +1271,7 @@ export default function SharingAudit() {
         {(tenantLoading || perUser.length > 0) && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">
+              <CardTitle>
                 Tenant-wide results{" "}
                 {tenantUserCount !== null && (
                   <span className="text-sm font-normal text-muted-foreground">
@@ -1372,7 +1357,7 @@ export default function SharingAudit() {
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
                 <div>
-                  <CardTitle className="text-lg">
+                  <CardTitle>
                     Results — {singleResult.user}
                   </CardTitle>
                   <CardDescription>
@@ -1410,9 +1395,9 @@ export default function SharingAudit() {
             </CardHeader>
             <CardContent>
               {singleResult.truncated && !singleLoading && (
-                <Alert className="mb-4 border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-                  <AlertTriangle className="h-4 w-4 text-amber-600" />
-                  <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm flex items-center justify-between gap-3">
+                <Alert variant="warning" className="mb-4">
+                  <AlertTriangle className="h-4 w-4 text-warning" />
+                  <AlertDescription className="flex items-center justify-between gap-3">
                     <span>
                       Scanned {singleResult.scannedFiles.toLocaleString()} files
                       and hit the per-run page cap. More files in this Drive
@@ -1506,7 +1491,7 @@ export default function SharingAudit() {
                     </div>
                   </div>
                   {singleResult.truncated && (
-                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                    <p className="text-xs text-warning-fg">
                       The scan stopped at the per-run cap — use Continue scanning above to pick up where it left off.
                     </p>
                   )}
@@ -1676,7 +1661,7 @@ function _TenantUserCard({
               </p>
             )}
             {p.status === "error" && (
-              <p className="text-xs text-red-600">{p.error}</p>
+              <p className="text-xs text-danger">{p.error}</p>
             )}
             {p.status === "skipped" && (
               <p className="text-xs text-muted-foreground">
@@ -1692,7 +1677,7 @@ function _TenantUserCard({
           {isCollapsed && sel.size > 0 && (
             <Badge
               variant="outline"
-              className="bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-900/50 text-xs"
+              className="border-info/25 bg-info/10 text-info-fg text-xs"
             >
               {sel.size} selected
             </Badge>
@@ -1700,7 +1685,7 @@ function _TenantUserCard({
           {p.status === "done" && flagged.length > 0 && (
             <Badge
               variant="outline"
-              className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50 text-xs"
+              className="border-warning/30 bg-warning/10 text-warning-fg text-xs"
             >
               {flagged.length} flagged
             </Badge>
@@ -1709,7 +1694,7 @@ function _TenantUserCard({
       </div>
 
       {p.status === "done" && flagged.length > 0 && !isCollapsed && (
-        <div className="mt-2 space-y-2 pl-3 border-l-2 border-amber-200 dark:border-amber-900/50">
+        <div className="mt-2 space-y-2 pl-3 border-l-2 border-warning/40">
           <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
             <label className="text-xs flex items-center gap-1.5 text-muted-foreground">
               <input
@@ -1769,7 +1754,7 @@ function _TenantUserCard({
             </div>
           </div>
           {p.truncated && (
-            <p className="text-xs text-amber-700 dark:text-amber-300">
+            <p className="text-xs text-warning-fg">
               Audit was capped at 1,000 files for this user — run a single-user audit on them to scan the rest.
             </p>
           )}
@@ -1850,7 +1835,7 @@ function _FileRow({
                   href={file.webViewLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs flex items-center gap-1 text-blue-600 hover:underline"
+                  className="text-xs flex items-center gap-1 text-primary hover:underline"
                 >
                   Open <ExternalLink className="h-3 w-3" />
                 </a>
@@ -1873,8 +1858,8 @@ function _FileRow({
                 variant="outline"
                 className={`${
                   p.type === "anyone"
-                    ? "bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50"
-                    : "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50"
+                    ? "border-danger/25 bg-danger/10 text-danger-fg"
+                    : "border-warning/30 bg-warning/10 text-warning-fg"
                 } text-xs flex items-center gap-1`}
               >
                 {permissionIcon(p.type)}
@@ -1882,7 +1867,7 @@ function _FileRow({
                 <span
                   className={`ml-1 px-1 rounded ${
                     ROLE_BADGE[p.role] ??
-                    "bg-zinc-100 text-zinc-700 border-zinc-200"
+                    "border-border bg-muted text-muted-foreground"
                   }`}
                 >
                   {p.role}
@@ -1927,7 +1912,7 @@ function CategoryFilterRow({
         ))}
       </div>
       {noneSelected && (
-        <p className="text-xs text-red-600 mt-2">
+        <p className="text-xs text-danger mt-2">
           Pick at least one category — revoke is disabled until you do.
         </p>
       )}

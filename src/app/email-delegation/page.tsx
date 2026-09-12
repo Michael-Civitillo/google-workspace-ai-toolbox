@@ -11,9 +11,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import { StatusBadge } from "@/components/status-badge";
 import { Mail, Loader2, Trash2, UserPlus, Search } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
@@ -186,25 +186,13 @@ export default function EmailDelegation() {
         badge="Gmail"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${message.type === "error" ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40" : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"}`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error" ? "text-red-800 dark:text-red-300" : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Lookup & Add */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Mail className="h-5 w-5" />
               Manage Delegates
             </CardTitle>
@@ -271,7 +259,7 @@ export default function EmailDelegation() {
         {/* Current Delegates */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Current Delegates</CardTitle>
+            <CardTitle>Current Delegates</CardTitle>
             <CardDescription>
               {delegates.length > 0
                 ? `${delegates.length} delegate${delegates.length > 1 ? "s" : ""} found`
@@ -291,8 +279,8 @@ export default function EmailDelegation() {
                     className="flex items-center justify-between p-3 rounded-lg border bg-muted/30"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="h-8 w-8 rounded-full bg-blue-100 flex items-center justify-center">
-                        <Mail className="h-4 w-4 text-blue-600" />
+                      <div className="h-8 w-8 rounded-full bg-info/10 flex items-center justify-center">
+                        <Mail className="h-4 w-4 text-info" />
                       </div>
                       <div>
                         <p className="text-sm font-medium">
@@ -320,7 +308,7 @@ export default function EmailDelegation() {
                       {removing === d.delegateEmail ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
-                        <Trash2 className="h-4 w-4 text-red-500" />
+                        <Trash2 className="h-4 w-4 text-danger" />
                       )}
                     </Button>
                   </div>

@@ -30,21 +30,21 @@ const HINTS: Record<string, string> = {
 export function SsoTestResultPanel({ result }: { result: SsoTestResult }) {
   if (result.ok) {
     return (
-      <div className="rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40 p-3 text-xs space-y-1">
-        <p className="font-semibold text-emerald-900 dark:text-emerald-200 flex items-center gap-1.5">
+      <div className="rounded-lg border border-success/25 bg-success/8 p-3 text-xs space-y-1">
+        <p className="font-semibold text-success-fg flex items-center gap-1.5">
           <CheckCircle2 className="h-3.5 w-3.5" />
           Sign-in test passed
         </p>
-        <p className="text-emerald-800 dark:text-emerald-300">
+        <p className="text-success-fg">
           Signed in as <code className="font-mono">{result.email}</code>
           {result.name ? ` (${result.name})` : ""}.
         </p>
         {result.accessReason && (
-          <p className="text-emerald-800 dark:text-emerald-300">
+          <p className="text-success-fg">
             Access granted because {result.accessReason}.
           </p>
         )}
-        <p className="text-emerald-800/80 dark:text-emerald-300/80">
+        <p className="text-success-fg/80">
           No session was created by the test.
         </p>
       </div>
@@ -53,25 +53,25 @@ export function SsoTestResultPanel({ result }: { result: SsoTestResult }) {
 
   const hint = result.code ? HINTS[result.code] : undefined;
   return (
-    <div className="rounded-lg border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40 p-3 text-xs space-y-1">
-      <p className="font-semibold text-red-900 dark:text-red-200 flex items-center gap-1.5">
+    <div className="rounded-lg border border-danger/25 bg-danger/8 p-3 text-xs space-y-1">
+      <p className="font-semibold text-danger-fg flex items-center gap-1.5">
         <XCircle className="h-3.5 w-3.5" />
         Sign-in test failed
       </p>
-      <p className="text-red-800 dark:text-red-300">
+      <p className="text-danger-fg">
         {result.message ?? "The test did not complete."}
       </p>
       {result.email && (
-        <p className="text-red-800 dark:text-red-300">
+        <p className="text-danger-fg">
           Account: <code className="font-mono">{result.email}</code>
         </p>
       )}
       {result.detail && (
-        <p className="text-red-800/90 dark:text-red-300/90 break-all">
+        <p className="text-danger-fg/90 break-all">
           <code className="font-mono">{result.detail}</code>
         </p>
       )}
-      {hint && <p className="text-red-800 dark:text-red-300 pt-1">{hint}</p>}
+      {hint && <p className="text-danger-fg pt-1">{hint}</p>}
     </div>
   );
 }

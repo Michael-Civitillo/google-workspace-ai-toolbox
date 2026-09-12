@@ -305,9 +305,9 @@ export default function TenantsPage() {
 
       <div className="max-w-3xl space-y-6">
         {error && (
-          <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-            <AlertCircle className="h-4 w-4 text-red-600" />
-            <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4 text-danger" />
+            <AlertDescription>
               {error}
             </AlertDescription>
           </Alert>
@@ -318,7 +318,7 @@ export default function TenantsPage() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle className="text-lg flex items-center gap-2">
+                <CardTitle className="flex items-center gap-2">
                   <Building2 className="h-5 w-5" />
                   Configured Tenants
                 </CardTitle>
@@ -483,7 +483,7 @@ export default function TenantsPage() {
                             variant="ghost"
                             size="sm"
                             onClick={() => setDeleteTarget(tenant)}
-                            className="h-8 w-8 p-0 text-red-500 hover:text-red-600 hover:bg-red-50"
+                            className="h-8 w-8 p-0 text-danger hover:bg-danger/10 hover:text-danger"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             <span className="sr-only">Delete</span>
@@ -530,7 +530,7 @@ export default function TenantsPage() {
 
         {/* Info card */}
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <div className="space-y-3 text-sm text-muted-foreground">
               <p className="font-medium text-foreground">
                 How tenant switching works
@@ -600,7 +600,7 @@ function TenantFormFields({
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-1.5">
           <Label htmlFor="t-name" className="text-xs">
-            Display name <span className="text-red-500">*</span>
+            Display name <span className="text-danger">*</span>
           </Label>
           <Input
             id="t-name"
@@ -637,7 +637,7 @@ function TenantFormFields({
 
       <div className="space-y-1.5">
         <Label htmlFor="t-creds" className="text-xs">
-          Service account JSON path <span className="text-red-500">*</span>
+          Service account JSON path <span className="text-danger">*</span>
         </Label>
         <Input
           id="t-creds"
@@ -650,7 +650,7 @@ function TenantFormFields({
 
       <div className="space-y-1.5">
         <Label htmlFor="t-admin" className="text-xs">
-          Admin email <span className="text-red-500">*</span>
+          Admin email <span className="text-danger">*</span>
         </Label>
         <Input
           id="t-admin"

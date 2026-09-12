@@ -49,6 +49,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 ### Polish
 
 - 🌗 **Dark mode** — Auto-detects your system preference, persists across reloads, one-click toggle in the sidebar.
+- 🌈 **RGB accents** — A hint of spectrum lighting where it earns its place: a soft aura behind the logo, a light bar on the active nav item, a ring around the AI command bar while you type, and a glow on hovered cards. Everything freezes under `prefers-reduced-motion`.
 - 🪟 **Cross-platform** — Tested on macOS, Linux, and Windows 11 (handles `gws.cmd` shim, CRLF line endings, AV-related file lock retries).
 
 <details>

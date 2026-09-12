@@ -191,7 +191,7 @@ export function ConfigBackupPanel() {
           Include secrets (OIDC client secret, Gemini API keys, service-account key files)
         </label>
         {includeSecrets && (
-          <p className="text-xs text-amber-700 dark:text-amber-400">
+          <p className="text-xs text-warning-fg">
             The file will contain live secrets, including private keys — treat
             it like a password and store it somewhere access-controlled.
           </p>
@@ -228,9 +228,9 @@ export function ConfigBackupPanel() {
         />
 
         {parseError && (
-          <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30">
-            <AlertCircle className="h-4 w-4 text-red-600" />
-            <AlertDescription className="text-sm text-red-800 dark:text-red-300">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4 text-danger" />
+            <AlertDescription>
               {parseError}
             </AlertDescription>
           </Alert>
@@ -285,18 +285,18 @@ export function ConfigBackupPanel() {
         )}
 
         {importError && (
-          <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30">
-            <AlertCircle className="h-4 w-4 text-red-600" />
-            <AlertDescription className="text-sm text-red-800 dark:text-red-300">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4 text-danger" />
+            <AlertDescription>
               {importError}
             </AlertDescription>
           </Alert>
         )}
 
         {outcome && (
-          <Alert className="border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30">
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            <AlertDescription className="text-sm text-emerald-800 dark:text-emerald-300">
+          <Alert variant="success">
+            <CheckCircle2 className="h-4 w-4 text-success" />
+            <AlertDescription>
               <p>
                 Imported {outcome.tenants} tenant
                 {outcome.tenants === 1 ? "" : "s"}
@@ -316,7 +316,7 @@ export function ConfigBackupPanel() {
                 </ul>
               )}
               {outcome.warnings.length > 0 && (
-                <ul className="mt-2 list-disc list-inside space-y-1 text-xs text-amber-800 dark:text-amber-300">
+                <ul className="mt-2 list-disc list-inside space-y-1 text-xs text-warning-fg">
                   {outcome.warnings.map((w, i) => (
                     <li key={i}>{w}</li>
                   ))}

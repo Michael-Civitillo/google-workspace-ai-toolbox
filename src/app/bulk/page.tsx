@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
+import { FeedbackAlert } from "@/components/feedback-alert";
 import {
   Layers,
   Loader2,
@@ -420,13 +421,13 @@ export default function BulkOperations() {
   const statusIcon = (s: RowStatus) => {
     switch (s) {
       case "success":
-        return <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />;
+        return <CheckCircle2 className="h-4 w-4 text-success shrink-0" />;
       case "error":
       case "invalid":
-        return <XCircle className="h-4 w-4 text-red-500 shrink-0" />;
+        return <XCircle className="h-4 w-4 text-danger shrink-0" />;
       case "running":
         return (
-          <Loader2 className="h-4 w-4 animate-spin text-blue-500 shrink-0" />
+          <Loader2 className="h-4 w-4 animate-spin text-info shrink-0" />
         );
       default:
         return <Circle className="h-4 w-4 text-muted-foreground/40 shrink-0" />;
@@ -441,26 +442,12 @@ export default function BulkOperations() {
         badge="CSV"
       />
 
-      {message && (
-        <Alert
-          className={`mb-6 ${message.type === "error" ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40" : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"}`}
-        >
-          <AlertDescription
-            className={
-              message.type === "error"
-                ? "text-red-800 dark:text-red-300"
-                : "text-emerald-800 dark:text-emerald-300"
-            }
-          >
-            {message.text}
-          </AlertDescription>
-        </Alert>
-      )}
+      <FeedbackAlert message={message} className="mb-6" />
 
       <div className="space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <Layers className="h-5 w-5" />
               Operation & Input
             </CardTitle>
@@ -537,8 +524,8 @@ export default function BulkOperations() {
             </div>
 
             {parseError && (
-              <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-                <AlertDescription className="text-red-800 dark:text-red-300">
+              <Alert variant="destructive">
+                <AlertDescription>
                   {parseError}
                 </AlertDescription>
               </Alert>
@@ -549,7 +536,7 @@ export default function BulkOperations() {
         {rows.length > 0 && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Preview & Run</CardTitle>
+              <CardTitle>Preview & Run</CardTitle>
               <CardDescription>
                 {ran || running
                   ? `${successCount} succeeded · ${errorCount} failed · ${invalidCount} skipped (invalid)`
@@ -602,13 +589,13 @@ export default function BulkOperations() {
                     {r.status === "invalid" && (
                       <Badge
                         variant="outline"
-                        className="ml-auto shrink-0 border-red-300 dark:border-red-800 text-red-700 dark:text-red-400"
+                        className="ml-auto shrink-0 border-danger/40 text-danger-fg"
                       >
                         invalid
                       </Badge>
                     )}
                     {r.error && (
-                      <span className="ml-auto text-xs text-red-600 dark:text-red-400 truncate max-w-[40%]">
+                      <span className="ml-auto text-xs text-danger truncate max-w-[40%]">
                         {r.error}
                       </span>
                     )}

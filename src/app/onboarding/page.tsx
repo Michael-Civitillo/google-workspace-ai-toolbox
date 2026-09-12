@@ -495,7 +495,7 @@ function Stepper({
                     isActive
                       ? "bg-primary text-primary-foreground border-primary"
                       : isDone
-                      ? "bg-emerald-500 text-white border-emerald-500"
+                      ? "border-success bg-success text-white"
                       : "bg-background border-border"
                   )}
                 >
@@ -506,7 +506,7 @@ function Stepper({
                   )}
                 </span>
                 <span className="hidden sm:flex flex-col items-start min-w-0">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider opacity-70">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap opacity-70">
                     Step {idx + 1}
                   </span>
                   <span className="text-xs font-medium truncate max-w-[110px]">
@@ -519,7 +519,7 @@ function Stepper({
                   className={cn(
                     "h-px flex-1 transition-colors",
                     idx < activeIdx || completed[step.id]
-                      ? "bg-emerald-500/60"
+                      ? "bg-success/60"
                       : "bg-border"
                   )}
                 />
@@ -549,7 +549,7 @@ function WelcomeStep({
             <Sparkles className="h-5 w-5 text-primary" />
           </div>
           <div>
-            <CardTitle className="text-lg">Welcome to Open Admin</CardTitle>
+            <CardTitle>Welcome to Open Admin</CardTitle>
             <CardDescription>
               We&apos;ll get you connected to Google Workspace in about 10 minutes.
             </CardDescription>
@@ -601,9 +601,9 @@ function WelcomeStep({
         </div>
 
         {tenantCount > 0 && (
-          <Alert className="border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30">
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            <AlertDescription className="text-sm text-emerald-800 dark:text-emerald-300">
+          <Alert variant="success">
+            <CheckCircle2 className="h-4 w-4 text-success" />
+            <AlertDescription>
               You already have {tenantCount} tenant{tenantCount === 1 ? "" : "s"} configured.
               Feel free to skip ahead to{" "}
               <Link href="/" className="underline font-medium">
@@ -669,7 +669,7 @@ function SsoStep({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
+        <CardTitle className="flex items-center gap-2">
           <KeyRound className="h-5 w-5" />
           Sign-in &amp; SSO
         </CardTitle>
@@ -687,7 +687,7 @@ function SsoStep({
               className={cn(
                 "h-9 w-9 rounded-md flex items-center justify-center shrink-0",
                 config?.enabled
-                  ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600"
+                  ? "bg-success/10 text-success"
                   : "bg-muted text-muted-foreground"
               )}
             >
@@ -762,10 +762,10 @@ function PrereqCard({
 }) {
   const toneClass =
     tone === "blue"
-      ? "bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400"
+      ? "bg-info/10 text-info"
       : tone === "violet"
-      ? "bg-violet-50 dark:bg-violet-950/30 text-violet-600 dark:text-violet-400"
-      : "bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400";
+      ? "bg-primary/10 text-primary"
+      : "bg-success/8 text-success";
   return (
     <div className="rounded-lg border p-4">
       <div className={cn("h-9 w-9 rounded-md flex items-center justify-center mb-3", toneClass)}>
@@ -791,7 +791,7 @@ function InstallStep({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
+        <CardTitle className="flex items-center gap-2">
           <Terminal className="h-5 w-5" />
           {packaged ? "Install the gws CLI (optional)" : "Install the gws CLI"}
         </CardTitle>
@@ -803,7 +803,7 @@ function InstallStep({
       </CardHeader>
       <CardContent className="space-y-5">
         {packaged && (
-          <div className="rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40 p-3 text-xs text-emerald-900 dark:text-emerald-200">
+          <div className="rounded-lg border border-success/25 bg-success/8 p-3 text-xs text-success-fg">
             <p className="font-semibold">You can skip this step.</p>
             <p className="mt-0.5">
               The desktop build bundles its own runtime and authenticates with
@@ -865,7 +865,7 @@ function InstallStep({
               className={cn(
                 "h-9 w-9 rounded-md flex items-center justify-center shrink-0",
                 installed
-                  ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600"
+                  ? "bg-success/10 text-success"
                   : "bg-muted text-muted-foreground"
               )}
             >
@@ -896,7 +896,7 @@ function InstallStep({
                   {status?.error && (
                     <>
                       <br />
-                      <span className="text-amber-600 dark:text-amber-400">
+                      <span className="text-warning">
                         Diagnostic: <code className="font-mono">{status.error}</code>
                       </span>
                     </>
@@ -938,7 +938,7 @@ function ServiceAccountStep() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
+        <CardTitle className="flex items-center gap-2">
           <Cloud className="h-5 w-5" />
           Set up a service account
         </CardTitle>
@@ -1005,7 +1005,7 @@ function ServiceAccountStep() {
                     key={api}
                     className="flex items-center gap-1.5 text-xs text-muted-foreground"
                   >
-                    <Check className="h-3 w-3 text-emerald-500 shrink-0" />
+                    <Check className="h-3 w-3 text-success shrink-0" />
                     {api}
                   </li>
                 ))}
@@ -1044,9 +1044,9 @@ function ServiceAccountStep() {
           }
         />
 
-        <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30">
-          <AlertCircle className="h-4 w-4 text-amber-600" />
-          <AlertDescription className="text-sm text-amber-800 dark:text-amber-300">
+        <Alert variant="warning">
+          <AlertCircle className="h-4 w-4 text-warning" />
+          <AlertDescription>
             Domain-wide delegation grants the service account broad access. Treat
             the JSON key like a password — store it somewhere only your admin
             machines can read.
@@ -1098,7 +1098,7 @@ function TenantStep({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
+        <CardTitle className="flex items-center gap-2">
           <Building2 className="h-5 w-5" />
           Add your first tenant
         </CardTitle>
@@ -1109,18 +1109,18 @@ function TenantStep({
       </CardHeader>
       <CardContent className="space-y-5">
         {error && (
-          <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30">
-            <AlertCircle className="h-4 w-4 text-red-600" />
-            <AlertDescription className="text-sm text-red-800 dark:text-red-300">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4 text-danger" />
+            <AlertDescription>
               {error}
             </AlertDescription>
           </Alert>
         )}
 
         {isCreated && (
-          <Alert className="border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30">
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            <AlertDescription className="text-sm text-emerald-800 dark:text-emerald-300">
+          <Alert variant="success">
+            <CheckCircle2 className="h-4 w-4 text-success" />
+            <AlertDescription>
               Tenant <strong>{form.name}</strong> saved and activated. Continue to verify the connection.
             </AlertDescription>
           </Alert>
@@ -1129,7 +1129,7 @@ function TenantStep({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">
             <Label htmlFor="ob-name" className="text-xs">
-              Display name <span className="text-red-500">*</span>
+              Display name <span className="text-danger">*</span>
             </Label>
             <Input
               id="ob-name"
@@ -1177,7 +1177,7 @@ function TenantStep({
 
         <div className="space-y-1.5">
           <Label htmlFor="ob-admin" className="text-xs">
-            Super-admin email <span className="text-red-500">*</span>
+            Super-admin email <span className="text-danger">*</span>
           </Label>
           <Input
             id="ob-admin"
@@ -1194,7 +1194,7 @@ function TenantStep({
 
         <div className="space-y-1.5">
           <Label htmlFor="ob-creds" className="text-xs">
-            Path to service account JSON <span className="text-red-500">*</span>
+            Path to service account JSON <span className="text-danger">*</span>
           </Label>
           <Input
             id="ob-creds"
@@ -1250,7 +1250,7 @@ function TenantStep({
           {isCreated ? (
             <Badge
               variant="outline"
-              className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
+              className="border-success/25 bg-success/10 text-success-fg"
             >
               <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
               Tenant saved
@@ -1303,7 +1303,7 @@ function VerifyStep({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
+        <CardTitle className="flex items-center gap-2">
           <PartyPopper className="h-5 w-5" />
           Verify and finish
         </CardTitle>
@@ -1354,13 +1354,13 @@ function VerifyStep({
               {verifying ? "Running check..." : "Run connection check"}
             </Button>
             {result?.ok && (
-              <span className="text-sm text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1.5">
+              <span className="text-sm text-success inline-flex items-center gap-1.5">
                 <CheckCircle2 className="h-4 w-4" />
                 CLI responded — gws v{result.version}
               </span>
             )}
             {result && !result.ok && (
-              <span className="text-sm text-red-600 dark:text-red-400 inline-flex items-center gap-1.5">
+              <span className="text-sm text-danger inline-flex items-center gap-1.5">
                 <XCircle className="h-4 w-4" />
                 {result.message}
               </span>
@@ -1466,11 +1466,11 @@ function StatusRow({
         {loading ? (
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
         ) : ok ? (
-          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+          <CheckCircle2 className="h-4 w-4 text-success" />
         ) : (
           <XCircle
             className={`h-4 w-4 ${
-              optional ? "text-muted-foreground" : "text-red-500"
+              optional ? "text-muted-foreground" : "text-danger"
             }`}
           />
         )}

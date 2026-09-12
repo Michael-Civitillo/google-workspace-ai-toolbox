@@ -120,9 +120,9 @@ export function ConfirmActionDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {severity === "high" ? (
-              <ShieldAlert className="h-4 w-4 text-red-600 shrink-0" />
+              <ShieldAlert className="h-4 w-4 text-danger shrink-0" />
             ) : (
-              <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+              <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
             )}
             {title}
           </DialogTitle>
@@ -155,7 +155,7 @@ export function ConfirmActionDialog({
                   className={cn(
                     "rounded-md border px-3 py-2 text-xs",
                     row.emphasis
-                      ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40"
+                      ? "border-danger/25 bg-danger/8"
                       : "bg-background"
                   )}
                 >
@@ -166,7 +166,7 @@ export function ConfirmActionDialog({
                       <code className="font-mono">{row.before}</code>
                     </p>
                   )}
-                  <p className={row.emphasis ? "text-red-800 dark:text-red-300" : ""}>
+                  <p className={row.emphasis ? "text-danger-fg" : ""}>
                     <span className="opacity-60">to</span>{" "}
                     <code className="font-mono">{row.after}</code>
                   </p>
@@ -176,7 +176,7 @@ export function ConfirmActionDialog({
           </div>
 
           {warnings && (
-            <div className="rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-800 dark:text-amber-300">
+            <div className="rounded-md border border-warning/30 bg-warning/8 p-3 text-xs text-warning-fg">
               {warnings}
             </div>
           )}

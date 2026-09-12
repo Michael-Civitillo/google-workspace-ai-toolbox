@@ -135,18 +135,18 @@ export default function SsoPage() {
 
       <div className="max-w-3xl space-y-6">
         {error && (
-          <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-            <AlertCircle className="h-4 w-4 text-red-600" />
-            <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4 text-danger" />
+            <AlertDescription>
               {error}
             </AlertDescription>
           </Alert>
         )}
 
         {envDisabled && (
-          <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-            <AlertCircle className="h-4 w-4 text-amber-600" />
-            <AlertDescription className="text-amber-800 dark:text-amber-300 text-sm">
+          <Alert variant="warning">
+            <AlertCircle className="h-4 w-4 text-warning" />
+            <AlertDescription>
               <code className="font-mono">APP_SSO_DISABLED=true</code> is set on the
               server, so single sign-on is switched off and password login is
               available regardless of the configuration below.
@@ -158,7 +158,7 @@ export default function SsoPage() {
           <CardHeader>
             <div className="flex items-start justify-between gap-4">
               <div>
-                <CardTitle className="text-lg flex items-center gap-2">
+                <CardTitle className="flex items-center gap-2">
                   <KeyRound className="h-5 w-5" />
                   Identity provider
                 </CardTitle>
@@ -174,8 +174,8 @@ export default function SsoPage() {
                   className={cn(
                     "shrink-0",
                     live
-                      ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50"
-                      : "bg-zinc-100 dark:bg-zinc-900 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-800"
+                      ? "border-success/25 bg-success/10 text-success-fg"
+                      : "border-border bg-muted text-muted-foreground"
                   )}
                   data-testid="sso-status-badge"
                 >
@@ -267,9 +267,9 @@ export default function SsoPage() {
                     icon={
                       config.lastTest ? (
                         config.lastTest.ok ? (
-                          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                          <CheckCircle2 className="h-4 w-4 text-success" />
                         ) : (
-                          <XCircle className="h-4 w-4 text-red-500" />
+                          <XCircle className="h-4 w-4 text-danger" />
                         )
                       ) : undefined
                     }
@@ -344,7 +344,7 @@ export default function SsoPage() {
                     size="sm"
                     onClick={() => setConfirm("remove")}
                     disabled={busy !== null}
-                    className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 ml-auto"
+                    className="text-danger hover:bg-danger/10 hover:text-danger ml-auto"
                   >
                     <Trash2 className="h-3.5 w-3.5 mr-1.5" />
                     Remove
@@ -365,7 +365,7 @@ export default function SsoPage() {
         </Card>
 
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <div className="space-y-3 text-sm text-muted-foreground">
               <p className="font-medium text-foreground">How single sign-on works here</p>
               <ul className="space-y-1.5 list-disc list-inside">

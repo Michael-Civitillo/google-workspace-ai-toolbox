@@ -419,11 +419,11 @@ export default function Offboarding() {
   const statusIcon = (s: StepStatus) => {
     switch (s) {
       case "success":
-        return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
+        return <CheckCircle2 className="h-4 w-4 text-success" />;
       case "error":
-        return <XCircle className="h-4 w-4 text-red-500" />;
+        return <XCircle className="h-4 w-4 text-danger" />;
       case "running":
-        return <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />;
+        return <Loader2 className="h-4 w-4 text-info animate-spin" />;
       case "skipped":
         return <Circle className="h-4 w-4 text-muted-foreground" />;
       default:
@@ -440,15 +440,15 @@ export default function Offboarding() {
       />
 
       {error && (
-        <Alert className="mb-6 border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-          <AlertDescription className="text-red-800 dark:text-red-300">{error}</AlertDescription>
+        <Alert variant="destructive" className="mb-6">
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
+            <CardTitle className="flex items-center gap-2">
               <UserMinus className="h-5 w-5" />
               Plan the offboarding
             </CardTitle>
@@ -494,7 +494,7 @@ export default function Offboarding() {
                     {preflight.user.isAdmin && (
                       <Badge
                         variant="outline"
-                        className="bg-violet-50 text-violet-700 border-violet-200 text-xs"
+                        className="border-primary/20 bg-primary/10 text-primary text-xs"
                       >
                         Super admin
                       </Badge>
@@ -502,14 +502,14 @@ export default function Offboarding() {
                     {preflight.user.suspended && (
                       <Badge
                         variant="outline"
-                        className="bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border-red-200 dark:border-red-900/50 text-xs"
+                        className="border-danger/25 bg-danger/10 text-danger-fg text-xs"
                       >
                         Already suspended
                       </Badge>
                     )}
                     <Badge
                       variant="outline"
-                      className="bg-zinc-100 text-zinc-700 border-zinc-200 text-xs"
+                      className="border-border bg-muted text-muted-foreground text-xs"
                     >
                       {preflight.tokenCount == null
                         ? "OAuth tokens: count unavailable"
@@ -521,9 +521,9 @@ export default function Offboarding() {
                 </div>
 
                 {preflight.user.isAdmin && (
-                  <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-                    <AlertTriangle className="h-4 w-4 text-red-600" />
-                    <AlertDescription className="text-red-800 dark:text-red-300 text-sm">
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4 text-danger" />
+                    <AlertDescription>
                       This user is a <strong>super admin</strong>. Demote their
                       admin role in the Google Admin Console first —
                       Open Admin refuses to suspend an admin.
@@ -546,7 +546,7 @@ export default function Offboarding() {
                     {successor &&
                       successor.trim().toLowerCase() ===
                         email.trim().toLowerCase() && (
-                        <p className="text-xs text-red-600">
+                        <p className="text-xs text-danger">
                           Successor must be different from the leaver.
                         </p>
                       )}
@@ -589,7 +589,7 @@ export default function Offboarding() {
                             {s.emphasis && (
                               <Badge
                                 variant="outline"
-                                className="text-xs bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-900/50"
+                                className="text-xs border-warning/30 bg-warning/10 text-warning-fg"
                               >
                                 high impact
                               </Badge>
@@ -653,7 +653,7 @@ export default function Offboarding() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">What this does</CardTitle>
+            <CardTitle>What this does</CardTitle>
             <CardDescription>Read this once, then trust it.</CardDescription>
           </CardHeader>
           <CardContent className="text-sm space-y-3 text-muted-foreground">

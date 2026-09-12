@@ -524,7 +524,7 @@ function Stepper({
                     isActive
                       ? "bg-primary text-primary-foreground border-primary"
                       : isDone
-                      ? "bg-emerald-500 text-white border-emerald-500"
+                      ? "border-success bg-success text-white"
                       : "bg-background border-border"
                   )}
                 >
@@ -538,7 +538,7 @@ function Stepper({
                 <span
                   className={cn(
                     "h-px w-3 shrink-0",
-                    idx < activeIdx ? "bg-emerald-500/60" : "bg-border"
+                    idx < activeIdx ? "bg-success/60" : "bg-border"
                   )}
                 />
               )}
@@ -556,9 +556,9 @@ function Hint({ children }: { children: React.ReactNode }) {
 
 function Warning({ children }: { children: React.ReactNode }) {
   return (
-    <Alert className="border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40">
-      <AlertTriangle className="h-4 w-4 text-amber-600" />
-      <AlertDescription className="text-amber-800 dark:text-amber-300 text-xs">
+    <Alert variant="warning">
+      <AlertTriangle className="h-4 w-4 text-warning" />
+      <AlertDescription className="text-xs">
         {children}
       </AlertDescription>
     </Alert>
@@ -567,9 +567,9 @@ function Warning({ children }: { children: React.ReactNode }) {
 
 function Problem({ children }: { children: React.ReactNode }) {
   return (
-    <Alert className="border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/40">
-      <XCircle className="h-4 w-4 text-red-600" />
-      <AlertDescription className="text-red-800 dark:text-red-300 text-xs break-words">
+    <Alert variant="destructive">
+      <XCircle className="h-4 w-4 text-danger" />
+      <AlertDescription className="text-xs break-words">
         {children}
       </AlertDescription>
     </Alert>
@@ -766,7 +766,7 @@ function CredentialsStep({
 
       <div className="space-y-1.5">
         <Label htmlFor="sso-issuer" className="text-xs">
-          Issuer URL <span className="text-red-500">*</span>
+          Issuer URL <span className="text-danger">*</span>
         </Label>
         <div className="flex gap-2">
           <Input
@@ -808,7 +808,7 @@ function CredentialsStep({
 
       <div className="space-y-1.5">
         <Label htmlFor="sso-client-id" className="text-xs">
-          Client ID <span className="text-red-500">*</span>
+          Client ID <span className="text-danger">*</span>
         </Label>
         <Input
           id="sso-client-id"
@@ -826,7 +826,7 @@ function CredentialsStep({
           {existing?.hasClientSecret ? (
             <span className="text-muted-foreground">(stored)</span>
           ) : (
-            <span className="text-red-500">*</span>
+            <span className="text-danger">*</span>
           )}
         </Label>
         <Input
@@ -861,8 +861,8 @@ function DiscoveryPanel({
       className={cn(
         "rounded-lg border p-3 text-xs space-y-2",
         stale
-          ? "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/40"
-          : "border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40"
+          ? "border-warning/30 bg-warning/8"
+          : "border-success/25 bg-success/8"
       )}
       data-testid="sso-discovery"
     >
@@ -870,8 +870,8 @@ function DiscoveryPanel({
         className={cn(
           "font-semibold flex items-center gap-1.5",
           stale
-            ? "text-amber-900 dark:text-amber-200"
-            : "text-emerald-900 dark:text-emerald-200"
+            ? "text-warning-fg"
+            : "text-success-fg"
         )}
       >
         {stale ? (
@@ -904,7 +904,7 @@ function DiscoveryPanel({
       {result.warnings.length > 0 && (
         <ul className="space-y-1 pt-1">
           {result.warnings.map((w, i) => (
-            <li key={i} className="flex gap-1.5 text-amber-800 dark:text-amber-300">
+            <li key={i} className="flex gap-1.5 text-warning-fg">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
               <span>{w}</span>
             </li>
@@ -1144,7 +1144,7 @@ function FinishStep({
             : "Save configuration"}
         </Button>
         {saved && (
-          <span className="text-xs text-emerald-700 dark:text-emerald-300 inline-flex items-center gap-1">
+          <span className="text-xs text-success-fg inline-flex items-center gap-1">
             <CheckCircle2 className="h-3.5 w-3.5" />
             Saved{saved.enabled ? " — single sign-on is live" : " — not enabled yet"}
           </span>
@@ -1204,7 +1204,7 @@ function FinishStep({
             </Button>
           </>
         ) : saved?.enabled ? (
-          <div className="rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/40 p-3 text-xs text-emerald-800 dark:text-emerald-300">
+          <div className="rounded-lg border border-success/25 bg-success/8 p-3 text-xs text-success-fg">
             Single sign-on is enabled. The login page now offers &ldquo;Continue
             with {saved.displayName}&rdquo;
             {saved.passwordLoginEnabled
