@@ -1,4 +1,11 @@
-import { appendFileSync, chmodSync, statSync } from "fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+} from "fs";
 import path from "path";
 import { dataPath } from "./data-dir";
 
@@ -39,7 +46,9 @@ export interface AuditEntry {
 
 /**
  * Append-only JSON-lines audit log of every mutating action this tool runs
- * against a Workspace tenant. Lives next to tenants.json on the host.
+ * against a Workspace tenant. Lives next to tenants.json on the host, and
+ * rotates by size so a long-lived install cannot fill its disk one entry at
+ * a time.
  *
  * If logging fails we swallow the error — we never want a logging failure to
  * mask a real action error to the caller — but the route still returns its
@@ -51,6 +60,82 @@ export interface AuditEntry {
 let lastAuditFailureWarn = 0;
 const AUDIT_FAILURE_WARN_INTERVAL_MS = 60_000;
 
+/**
+ * Rotation cap: 8 MB per file, 3 kept archives — ~32 MB and tens of thousands
+ * of entries, sized for the desktop-to-small-server installs this tool
+ * targets. The reader (audit-reader.ts) only ever opens audit.log, so
+ * audit.log.1 … .3 are for the operator and whatever log shipper watches the
+ * data directory, not for the in-app viewer.
+ */
+const MAX_AUDIT_LOG_BYTES = 8 * 1024 * 1024;
+const KEEP_ROTATED_LOGS = 3;
+
+// audit() runs on every mutating request, so we carry the size we have
+// written instead of stat()ing per append, and only touch the filesystem when
+// the counter nears the cap or has had time to drift (a second instance
+// sharing the data directory, an operator truncating the file by hand).
+let trackedLogSize: number | null = null;
+let appendsSinceStat = 0;
+const STAT_RESYNC_APPENDS = 256;
+
+// Gate retries after a failed rotation: a read-only data directory or a
+// Windows handle on one of the archives would otherwise re-attempt the renames
+// on every request. The gate doubles as the throttle for its warning.
+let rotationRetryAfter = 0;
+const ROTATION_RETRY_INTERVAL_MS = 60_000;
+
+/**
+ * Move audit.log aside once it reaches the cap, shifting audit.log.1 up and
+ * dropping what falls off the end. Never throws, and never partially rotates:
+ * if an archive can't be shifted we leave the live log alone and keep
+ * appending to it, because an oversized log is recoverable and a lost entry —
+ * or an archive overwritten to make room — is not.
+ */
+function rotateIfAtCap(): void {
+  if (
+    trackedLogSize !== null &&
+    trackedLogSize < MAX_AUDIT_LOG_BYTES &&
+    appendsSinceStat < STAT_RESYNC_APPENDS
+  ) {
+    return;
+  }
+  const now = Date.now();
+  if (now < rotationRetryAfter) return;
+
+  let size: number;
+  try {
+    size = statSync(AUDIT_LOG_PATH).size;
+  } catch {
+    // No log yet, or it vanished under us: the append recreates it at 0600.
+    trackedLogSize = 0;
+    appendsSinceStat = 0;
+    return;
+  }
+  trackedLogSize = size;
+  appendsSinceStat = 0;
+  if (size < MAX_AUDIT_LOG_BYTES) return;
+
+  try {
+    const oldest = `${AUDIT_LOG_PATH}.${KEEP_ROTATED_LOGS}`;
+    if (existsSync(oldest)) unlinkSync(oldest);
+    for (let i = KEEP_ROTATED_LOGS - 1; i >= 1; i--) {
+      const from = `${AUDIT_LOG_PATH}.${i}`;
+      if (existsSync(from)) renameSync(from, `${AUDIT_LOG_PATH}.${i + 1}`);
+    }
+    renameSync(AUDIT_LOG_PATH, `${AUDIT_LOG_PATH}.1`);
+    // rename carries the mode over, but a log written before this module's
+    // load-time chmod could have been looser — pin the archive at 0600 too.
+    chmodSync(`${AUDIT_LOG_PATH}.1`, 0o600);
+    trackedLogSize = 0;
+  } catch (e) {
+    rotationRetryAfter = now + ROTATION_RETRY_INTERVAL_MS;
+    console.error(
+      "[audit] could not rotate the audit log — appending to the current file instead:",
+      e instanceof Error ? e.message : e
+    );
+  }
+}
+
 export function audit(entry: AuditEntry): void {
   try {
     const line =
@@ -59,7 +144,10 @@ export function audit(entry: AuditEntry): void {
         ...entry,
         params: redactSensitive(entry.params),
       }) + "\n";
+    rotateIfAtCap();
     appendFileSync(AUDIT_LOG_PATH, line, { encoding: "utf-8", mode: 0o600 });
+    if (trackedLogSize !== null) trackedLogSize += Buffer.byteLength(line);
+    appendsSinceStat++;
   } catch (e) {
     // Logging must never throw into the request handler — but a silent failure
     // means mutating actions run unaudited indefinitely and invisibly, which
