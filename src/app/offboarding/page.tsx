@@ -384,6 +384,9 @@ export default function Offboarding() {
             body: JSON.stringify({
               step: id,
               user: preflight.user.primaryEmail,
+              // Every step requires the typed confirmation server-side too —
+              // send the pinned preflight address the dialog just confirmed.
+              confirm: preflight.user.primaryEmail,
               successor: pinnedSuccessor,
               vacationSubject,
               vacationMessage,

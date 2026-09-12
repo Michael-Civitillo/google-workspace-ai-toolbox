@@ -408,10 +408,17 @@ export default function DriveTransfer() {
           break;
         }
         chunkIndex++;
+        // The server re-checks the typed confirmation on every chunk, not just
+        // the first, so each continuation has to carry it too.
         const body =
           cursor === null
-            ? { fromUser: from, toUser: to, folderIds: initialFolderIds }
-            : { fromUser: from, toUser: to, cursor };
+            ? {
+                fromUser: from,
+                toUser: to,
+                confirm: to,
+                folderIds: initialFolderIds,
+              }
+            : { fromUser: from, toUser: to, confirm: to, cursor };
         let res: Response;
         try {
           res = await tfetch(

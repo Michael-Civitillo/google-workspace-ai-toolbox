@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
 import { buildGmailClient, withGoogleRetry } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
 import { errorResponse } from "@/lib/api-errors";
+import { actorFromRequest } from "@/lib/session";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 
 const GMAIL_DELEGATION_SCOPES = [
@@ -40,6 +41,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
@@ -69,6 +71,7 @@ export async function POST(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { user, delegate },
       outcome: "success",
+      actor,
     });
     return NextResponse.json({ success: true });
   } catch (e) {
@@ -76,15 +79,17 @@ export async function POST(request: NextRequest) {
       action: "email_delegation.add",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
@@ -109,6 +114,7 @@ export async function DELETE(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { user, delegate },
       outcome: "success",
+      actor,
     });
     return NextResponse.json({ success: true });
   } catch (e) {
@@ -116,9 +122,10 @@ export async function DELETE(request: NextRequest) {
       action: "email_delegation.remove",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }

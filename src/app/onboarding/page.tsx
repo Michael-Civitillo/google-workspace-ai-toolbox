@@ -315,12 +315,16 @@ export default function OnboardingPage() {
     }
   }
 
-  async function handleScopeCheck() {
+  // `fresh` skips the server's short per-tenant cache: a re-check means the
+  // operator just fixed something in Admin Console and needs the real answer.
+  async function handleScopeCheck(fresh = false) {
     if (!createdTenantId) return;
     setScopePreflight({ kind: "loading" });
     try {
       const res = await fetch(
-        `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(createdTenantId)}`,
+        `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(
+          createdTenantId
+        )}${fresh ? "&fresh=1" : ""}`,
         { headers: { "x-tenant-id": createdTenantId } }
       );
       const json = await res.json();
@@ -1297,7 +1301,7 @@ function VerifyStep({
   tenantName: string;
   tenantId: string | null;
   scopePreflight: PreflightState | null;
-  onScopeCheck: () => void;
+  onScopeCheck: (fresh?: boolean) => void;
 }) {
   const packaged = !!status?.packaged;
   return (
@@ -1384,7 +1388,7 @@ function VerifyStep({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={onScopeCheck}
+                onClick={() => onScopeCheck()}
                 disabled={scopePreflight?.kind === "loading"}
               >
                 {scopePreflight?.kind === "loading" ? (
@@ -1398,7 +1402,7 @@ function VerifyStep({
             {scopePreflight && (
               <ScopePreflightPanel
                 state={scopePreflight}
-                onRetry={onScopeCheck}
+                onRetry={() => onScopeCheck(true)}
               />
             )}
           </div>

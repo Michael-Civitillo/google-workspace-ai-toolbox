@@ -264,7 +264,9 @@ export default function Groups() {
         {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ group, member }),
+          // The route requires a typed confirmation of the member being
+          // removed; the dialog above is that confirmation for the operator.
+          body: JSON.stringify({ group, member, confirm: member }),
         },
         tenantId
       );

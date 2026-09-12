@@ -3,6 +3,8 @@ import { exportMailboxPage } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
+import { actorFromRequest } from "@/lib/session";
+import { acquireSlot, BusyError } from "@/lib/concurrency";
 
 /**
  * Export one page of a user's mailbox for backup.
@@ -19,7 +21,18 @@ import { audit } from "@/lib/audit";
  * `nextPageToken` to walk the rest of the mailbox.
  */
 export async function GET(request: NextRequest) {
+  // Resolved before the try so the error path can attribute the failure too.
+  const actor = await actorFromRequest(request);
+
+  let release: (() => void) | null = null;
   try {
+    // A page holds up to 16 MiB of raw base64 message data and serialising the
+    // response roughly doubles that, so a couple of parallel exports can own a
+    // small host's heap. 2 because the export client walks pages strictly
+    // sequentially — one operator never trips it — and it still leaves room for
+    // a second operator or a retry issued right after a cancel.
+    release = acquireSlot("mailbox-export", 2, "mailbox export");
+
     // Resolve inside the try: a stale/deleted tenantId makes resolveTenant throw,
     // and we want that surfaced as the route's JSON error shape (not an
     // unhandled non-JSON 500 the client reports as "failed to connect").
@@ -84,13 +97,22 @@ export async function GET(request: NextRequest) {
         tenantName: tenant?.name ?? null,
         params: { user, includeSpamTrash },
         outcome: "success",
+        actor,
       });
     }
 
     return NextResponse.json({ success: true, data: result });
   } catch (e) {
+    if (e instanceof BusyError) {
+      return NextResponse.json(
+        { success: false, error: e.message },
+        { status: 429 }
+      );
+    }
     const message = e instanceof Error ? e.message : "Mailbox export failed";
     const status = e instanceof ValidationError ? 400 : 500;
     return NextResponse.json({ success: false, error: message }, { status });
+  } finally {
+    release?.();
   }
 }

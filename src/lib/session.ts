@@ -20,3 +20,8 @@ export function describeActor(identity: SessionIdentity | null): string {
   if (identity?.method === "oidc" && identity.email) return identity.email;
   return "password-session";
 }
+
+/** The audit actor for a request, in one call. */
+export async function actorFromRequest(req: NextRequest): Promise<string> {
+  return describeActor(await identityFromRequest(req));
+}

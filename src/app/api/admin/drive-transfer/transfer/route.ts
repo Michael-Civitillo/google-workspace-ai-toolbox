@@ -6,8 +6,9 @@ import {
 } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 // The largest legitimate body is a continuation cursor: a queue capped at
 // 20,000 ids (~90 chars each) ≈ 2 MB. 4 MB leaves headroom while still
@@ -20,13 +21,14 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
  * returned `cursor` until `nextCursor` is null.
  *
  * POST /api/admin/drive-transfer/transfer
- * Initial body:    { fromUser, toUser, folderIds: [<driveId>, ...] }
- * Continuation:    { fromUser, toUser, cursor: { queue, current } }
+ * Initial body:    { fromUser, toUser, confirm, folderIds: [<driveId>, ...] }
+ * Continuation:    { fromUser, toUser, confirm, cursor: { queue, current } }
  *
  * Per-item failures are collected, never thrown — one bad file doesn't abort
  * the batch. Items not owned by `fromUser` are silently counted as skipped.
  */
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -44,6 +46,19 @@ export async function POST(request: NextRequest) {
     toUser = requireEmail(body.toUser, "toUser");
     if (fromUser === toUser) {
       throw new ValidationError("fromUser and toUser must be different");
+    }
+
+    // Handing over every file a user owns can't be undone by the source user,
+    // and the API would otherwise fire on a two-field body from anything
+    // holding a session cookie — so require the typed confirmation the browser
+    // dialog already collects. Checked on continuations too: each chunk
+    // transfers more files, so each one has to carry the confirmation.
+    const confirm =
+      typeof body.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+    if (confirm !== toUser) {
+      throw new ValidationError(
+        "Type the destination user's email address into the confirm field to proceed."
+      );
     }
 
     const hasFolderIds = Array.isArray(body.folderIds) && body.folderIds.length > 0;
@@ -123,6 +138,7 @@ export async function POST(request: NextRequest) {
         progress.errors.length > 0
           ? `${progress.errors.length} items failed during this chunk`
           : undefined,
+      actor,
     });
 
     return NextResponse.json({ success: true, data: progress });
@@ -132,13 +148,13 @@ export async function POST(request: NextRequest) {
       action: "drive_transfer.chunk",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: {
-        fromUser,
-        toUser,
-        bodyKeys: Object.keys(body),
-      },
+      // Bound the rejected body: its key list and values are attacker-chosen,
+      // so logging them verbatim lets a looping client bloat audit.log and push
+      // real entries out of view.
+      params: boundedParams(body),
       outcome: "error",
       error: message,
+      actor,
     });
     const status = e instanceof ValidationError ? 400 : 500;
     return NextResponse.json({ success: false, error: message }, { status });

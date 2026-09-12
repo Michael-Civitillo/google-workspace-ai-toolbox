@@ -8,8 +8,9 @@ import {
   type GroupMemberRole,
 } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -60,6 +61,7 @@ function parseRole(raw: unknown): GroupMemberRole {
 
 /** Add a member to a group. */
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
@@ -83,9 +85,10 @@ export async function POST(request: NextRequest) {
         action: "groups.member_add",
         tenantId: tenant?.id ?? null,
         tenantName: tenant?.name ?? null,
-        params: body,
+        params: boundedParams(body),
         outcome: "error",
         error: e instanceof Error ? e.message : String(e),
+        actor,
       });
       return NextResponse.json(
         {
@@ -110,6 +113,7 @@ export async function POST(request: NextRequest) {
           : {}),
       },
       outcome: "success",
+      actor,
     });
     return NextResponse.json({
       success: true,
@@ -128,9 +132,10 @@ export async function POST(request: NextRequest) {
       action: "groups.member_add",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }
@@ -138,6 +143,7 @@ export async function POST(request: NextRequest) {
 
 /** Remove a member from a group. */
 export async function DELETE(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
@@ -145,6 +151,17 @@ export async function DELETE(request: NextRequest) {
     tenant = tenantFromRequest(request, body);
     const group = requireEmail(body.group, "group");
     const member = requireEmail(body.member, "member");
+
+    // The UI gates removal behind a typed confirm dialog, but this endpoint
+    // accepts any body carrying a session cookie — so re-confirm the exact
+    // member here before silently stripping someone's access.
+    const confirm =
+      typeof body.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+    if (confirm !== member) {
+      throw new ValidationError(
+        "Type the member's email address into the confirm field to proceed."
+      );
+    }
 
     let result: { removed: boolean };
     try {
@@ -154,9 +171,10 @@ export async function DELETE(request: NextRequest) {
         action: "groups.member_remove",
         tenantId: tenant?.id ?? null,
         tenantName: tenant?.name ?? null,
-        params: body,
+        params: boundedParams(body),
         outcome: "error",
         error: e instanceof Error ? e.message : String(e),
+        actor,
       });
       return NextResponse.json(
         {
@@ -174,6 +192,7 @@ export async function DELETE(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { group, member, removed: result.removed },
       outcome: "success",
+      actor,
     });
     return NextResponse.json({
       success: true,
@@ -191,9 +210,10 @@ export async function DELETE(request: NextRequest) {
       action: "groups.member_remove",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }

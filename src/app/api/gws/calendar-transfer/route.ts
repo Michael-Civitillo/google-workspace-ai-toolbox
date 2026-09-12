@@ -5,11 +5,12 @@ import {
   isExternalTarget,
   withGoogleRetry,
 } from "@/lib/admin-sdk";
-import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { isValidEmail, requireEmail, ValidationError } from "@/lib/validate";
+import { audit, boundedParams } from "@/lib/audit";
 import { constantTimeStringEqual } from "@/lib/auth";
 import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 export async function GET(request: NextRequest) {
   try {
@@ -60,7 +61,13 @@ export async function GET(request: NextRequest) {
 // gets echoed into audit.log.
 const MAX_BODY_BYTES = 16 * 1024;
 
+// Google's own calendar addresses: a bounded local part (which may contain the
+// "#" that bundled calendars use) under one of the *.calendar.google.com hosts.
+const GOOGLE_CALENDAR_ID_RE =
+  /^[A-Za-z0-9._%+'#-]{1,200}@[A-Za-z0-9.-]{0,60}calendar\.google\.com$/;
+
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -81,6 +88,21 @@ export async function POST(request: NextRequest) {
       : sourceUser;
     if (!calendarId) {
       throw new ValidationError("calendarId is required");
+    }
+    // calendarId is interpolated into the acl.insert/acl.delete request path,
+    // so bound it to the shapes Google actually issues: the literal "primary",
+    // an email-shaped id (a user's own calendar), or one of Google's generated
+    // calendar addresses — group, resource and the read-only bundled calendars,
+    // whose local parts run longer than an address' 64 characters and can carry
+    // a "#" (en.usa#holiday@group.v.calendar.google.com).
+    if (
+      calendarId !== "primary" &&
+      !isValidEmail(calendarId) &&
+      !GOOGLE_CALENDAR_ID_RE.test(calendarId)
+    ) {
+      throw new ValidationError(
+        'calendarId must be "primary" or a calendar address such as user@example.com or <id>@group.calendar.google.com'
+      );
     }
 
     const removeSourceAccess = body.removeSourceAccess === true;
@@ -138,6 +160,7 @@ export async function POST(request: NextRequest) {
         params: { sourceUser, targetUser, calendarId },
         outcome: "error",
         error: msg,
+        actor,
       });
       return NextResponse.json(
         {
@@ -156,6 +179,7 @@ export async function POST(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { sourceUser, targetUser, calendarId },
       outcome: "success",
+      actor,
     });
 
     if (!removeSourceAccess) {
@@ -187,6 +211,7 @@ export async function POST(request: NextRequest) {
       params: { sourceUser, calendarId },
       outcome: removeError ? "error" : "success",
       error: removeError,
+      actor,
     });
 
     return NextResponse.json({
@@ -208,9 +233,10 @@ export async function POST(request: NextRequest) {
       action: "calendar_transfer",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }

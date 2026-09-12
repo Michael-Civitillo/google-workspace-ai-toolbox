@@ -6,7 +6,8 @@ import {
   withGoogleRetry,
 } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
+import { actorFromRequest } from "@/lib/session";
 import { constantTimeStringEqual } from "@/lib/auth";
 import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
@@ -22,6 +23,28 @@ function tooLarge() {
     { success: false, error: "Body too large" },
     { status: 413 }
   );
+}
+
+// Calendar only ever issues ACL rule ids of these shapes, and the id goes
+// straight into the upstream acl.delete path — so reject anything else here
+// rather than let a caller-supplied string address arbitrary Google resources.
+const ACL_RULE_ID_RE = /^(?:user|group|domain):\S+$/;
+const MAX_RULE_ID_LENGTH = 254;
+
+function requireRuleId(value: unknown): string {
+  const ruleId = typeof value === "string" ? value.trim() : "";
+  if (!ruleId) {
+    throw new ValidationError("ruleId is required");
+  }
+  if (
+    ruleId.length > MAX_RULE_ID_LENGTH ||
+    (ruleId !== "default" && !ACL_RULE_ID_RE.test(ruleId))
+  ) {
+    throw new ValidationError(
+      'ruleId must be "default" or "<user|group|domain>:<value>"'
+    );
+  }
+  return ruleId;
 }
 
 export async function GET(request: NextRequest) {
@@ -65,6 +88,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
@@ -114,6 +138,7 @@ export async function POST(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { calendarId, delegateEmail, role },
       outcome: "success",
+      actor,
     });
     return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
@@ -121,25 +146,26 @@ export async function POST(request: NextRequest) {
       action: "calendar_delegation.add",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      // Bound the rejected body: an unvalidated payload logged verbatim lets a
+      // looping client bloat audit.log and push real entries out of view.
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
   let tenant = null;
   try {
     tenant = tenantFromRequest(request, body);
     const calendarId = requireEmail(body.calendarId, "calendarId");
-    const ruleId = String(body.ruleId || "");
-    if (!ruleId.trim()) {
-      throw new ValidationError("ruleId is required");
-    }
+    const ruleId = requireRuleId(body.ruleId);
 
     const cal = buildCalendarClient(tenant, calendarId);
     await withGoogleRetry(() => cal.acl.delete({ calendarId, ruleId }), {
@@ -152,6 +178,7 @@ export async function DELETE(request: NextRequest) {
       tenantName: tenant?.name ?? null,
       params: { calendarId, ruleId },
       outcome: "success",
+      actor,
     });
     return NextResponse.json({ success: true });
   } catch (e) {
@@ -159,9 +186,12 @@ export async function DELETE(request: NextRequest) {
       action: "calendar_delegation.remove",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      // Bound the rejected body: an unvalidated payload logged verbatim lets a
+      // looping client bloat audit.log and push real entries out of view.
+      params: boundedParams(body),
       outcome: "error",
       error: e instanceof Error ? e.message : String(e),
+      actor,
     });
     return errorResponse(e);
   }

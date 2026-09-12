@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { revokeExternalPermissions, type RevokeCategory } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
-import { audit } from "@/lib/audit";
+import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { actorFromRequest } from "@/lib/session";
 
 const VALID_CATEGORIES: ReadonlySet<RevokeCategory> = new Set([
   "anyone",
@@ -23,12 +24,17 @@ const MAX_BODY_BYTES = 1 * 1024 * 1024;
  * POST /api/admin/sharing-audit/revoke
  * Body: { user: "alice@yourdomain.com", fileIds: ["abc...", ...] }
  *
+ * A batch touching more than one file also requires `confirm: "REVOKE"` — the
+ * browser gates bulk un-sharing behind that typed phrase, and un-sharing can't
+ * be undone from here, so the API must demand it too.
+ *
  * Per-permission classification is re-evaluated server-side against the live
  * verified-domain set, so a stale client cannot trick this into removing
  * internal collaborators. Per-file outcomes are returned individually — one
  * file's failure never aborts the rest of the batch.
  */
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -65,6 +71,19 @@ export async function POST(request: NextRequest) {
         throw new ValidationError(`fileId ${JSON.stringify(f)} looks invalid`);
       }
       fileIds.push(trimmed);
+    }
+
+    // Bulk un-sharing can't be reversed from this tool, and a session cookie is
+    // all the API itself demands — so re-check the phrase the UI already types.
+    // One file stays unconfirmed so the per-row revoke buttons keep working.
+    if (fileIds.length > 1) {
+      const confirm =
+        typeof body.confirm === "string" ? body.confirm.trim() : "";
+      if (confirm !== "REVOKE") {
+        throw new ValidationError(
+          "Type REVOKE into the confirm field to revoke sharing on multiple files at once."
+        );
+      }
     }
 
     let categories: RevokeCategory[] | undefined;
@@ -156,6 +175,7 @@ export async function POST(request: NextRequest) {
         ...(failures.length > 0 ? { failures } : {}),
         ...(noOps.length > 0 ? { noOps } : {}),
       },
+      actor,
       outcome: filesWithErrors > 0 ? "error" : "success",
       error:
         filesWithErrors > 0
@@ -170,7 +190,8 @@ export async function POST(request: NextRequest) {
       action: "sharing_audit.revoke",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: body,
+      params: boundedParams(body),
+      actor,
       outcome: "error",
       error: message,
     });

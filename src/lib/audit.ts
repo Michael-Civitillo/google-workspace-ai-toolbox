@@ -122,3 +122,42 @@ function redactValue(value: unknown, depth: number): unknown {
 function redactSensitive(obj: Record<string, unknown>): Record<string, unknown> {
   return redactValue(obj, 0) as Record<string, unknown>;
 }
+
+const BOUNDED_MAX_KEYS = 20;
+const BOUNDED_MAX_CHARS = 320;
+
+/**
+ * A request body reduced to what an audit entry on the error path needs:
+ * the identifiers the operator sent (short strings, numbers, booleans),
+ * with long strings truncated and nested values summarised. Routes used to
+ * log `params: body` when validation failed, which let a looping client grow
+ * the log by up to a megabyte per request and hid the entry from the reader
+ * once the line outgrew its window.
+ */
+export function boundedParams(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { bodyType: Array.isArray(body) ? "array" : typeof body };
+  }
+  const out: Record<string, unknown> = {};
+  const entries = Object.entries(body as Record<string, unknown>);
+  for (const [k, v] of entries.slice(0, BOUNDED_MAX_KEYS)) {
+    if (typeof v === "string") {
+      out[k] =
+        v.length > BOUNDED_MAX_CHARS
+          ? `${v.slice(0, BOUNDED_MAX_CHARS)}… [${v.length} chars]`
+          : v;
+    } else if (typeof v === "number" || typeof v === "boolean" || v === null) {
+      out[k] = v;
+    } else if (Array.isArray(v)) {
+      out[k] = `[array of ${v.length}]`;
+    } else if (typeof v === "object") {
+      out[k] = `[object with ${Object.keys(v as object).length} keys]`;
+    } else {
+      out[k] = `[${typeof v}]`;
+    }
+  }
+  if (entries.length > BOUNDED_MAX_KEYS) {
+    out.omittedKeys = entries.length - BOUNDED_MAX_KEYS;
+  }
+  return out;
+}

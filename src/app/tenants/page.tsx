@@ -241,11 +241,16 @@ export default function TenantsPage() {
     }
   }
 
-  async function runPreflight(tenantId: string) {
+  // `fresh` skips the server's short per-tenant cache. A retry means the
+  // operator just changed something in Admin Console and wants the real answer,
+  // not the one from ten seconds ago.
+  async function runPreflight(tenantId: string, fresh = false) {
     setPreflightByTenant((prev) => ({ ...prev, [tenantId]: { kind: "loading" } }));
     try {
       const res = await fetch(
-        `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(tenantId)}`,
+        `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(tenantId)}${
+          fresh ? "&fresh=1" : ""
+        }`,
         { headers: { "x-tenant-id": tenantId } }
       );
       const json = await res.json();
@@ -494,7 +499,7 @@ export default function TenantsPage() {
                     {preflightByTenant[tenant.id] && !isEditing && (
                       <ScopePreflightPanel
                         state={preflightByTenant[tenant.id]}
-                        onRetry={() => void runPreflight(tenant.id)}
+                        onRetry={() => void runPreflight(tenant.id, true)}
                       />
                     )}
                   </div>

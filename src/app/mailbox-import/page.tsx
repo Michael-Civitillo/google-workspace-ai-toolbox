@@ -32,7 +32,9 @@ const EXPORT_TYPE = "gws-mailbox-export";
 // message larger than this budget is sent on its own (it can still be up to
 // ~72 MB, which fits under the body cap).
 const IMPORT_BATCH_COUNT = 25;
-const IMPORT_BATCH_BYTES = 20 * 1024 * 1024;
+// 8 MB per batch keeps the server-side peak (the body, its parsed copy and
+// the re-serialised inserts) around 40 MB instead of 100 MB.
+const IMPORT_BATCH_BYTES = 8 * 1024 * 1024;
 
 interface GmailLabel {
   id: string;
@@ -243,7 +245,9 @@ export default function MailboxImport() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ user, messages: batch }),
+            // The route re-checks the typed confirmation server-side on every
+            // batch, so send the target it will compare against.
+            body: JSON.stringify({ user, messages: batch, confirm: user }),
             signal: ac.signal,
           },
           pinnedTenantId

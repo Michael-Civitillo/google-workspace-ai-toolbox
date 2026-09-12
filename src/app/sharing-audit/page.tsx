@@ -846,6 +846,9 @@ export default function SharingAudit() {
                 user: revokeTarget.user,
                 fileIds: fileChunks[i].map((f) => f.id),
                 categories: revokeTarget.categories,
+                // The route re-checks the dialog's typed phrase server-side for
+                // any multi-file chunk; a single-file revoke ignores it.
+                confirm: "REVOKE",
               }),
             },
             pinnedTenantId
