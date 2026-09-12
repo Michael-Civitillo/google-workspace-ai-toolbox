@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exportMailboxPage } from "@/lib/admin-sdk";
+import { exportMailboxPage, isAbortError } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
@@ -85,6 +85,10 @@ export async function GET(request: NextRequest) {
       pageSize,
       includeSpamTrash,
       pendingIds,
+      // Without this the page keeps fetching up to 50 raw messages after the
+      // operator cancels (or a proxy hangs up), spending Gmail quota and heap
+      // on a response nobody will read.
+      signal: request.signal,
     });
 
     // Audit the start of an export only (the very first call — no pageToken and
@@ -95,7 +99,13 @@ export async function GET(request: NextRequest) {
         action: "mailbox_export",
         tenantId: tenant?.id ?? null,
         tenantName: tenant?.name ?? null,
-        params: { user, includeSpamTrash },
+        params: {
+          user,
+          includeSpamTrash,
+          // The caller went away mid-page: some mail was still read, so the
+          // entry stays, flagged as cut short rather than as a clean export.
+          ...(result.aborted ? { aborted: true } : {}),
+        },
         outcome: "success",
         actor,
       });
@@ -107,6 +117,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: e.message },
         { status: 429 }
+      );
+    }
+    // A cancelled request is not a server fault and must not read as a 500 in
+    // monitoring: nothing upstream failed, the caller simply went away.
+    if (isAbortError(e)) {
+      return NextResponse.json(
+        { success: false, error: "Request cancelled by the client" },
+        { status: 499 }
       );
     }
     const message = e instanceof Error ? e.message : "Mailbox export failed";

@@ -109,6 +109,10 @@ export async function POST(request: NextRequest) {
 
     const result = await revokeExternalPermissions(tenant, user, fileIds, {
       categories,
+      // Without this the batch keeps deleting permissions after the operator
+      // cancels (or a proxy hangs up), on the tenant's Drive quota and with
+      // nobody left to read which files were touched.
+      signal: request.signal,
     });
 
     const totalRemoved = result.results.reduce(
@@ -167,6 +171,11 @@ export async function POST(request: NextRequest) {
       params: {
         user,
         fileCount: fileIds.length,
+        // Cut short by the caller: only these files were processed, so the
+        // counters below describe a partial batch, not the whole request.
+        ...(result.aborted
+          ? { aborted: true, filesProcessed: result.results.length }
+          : {}),
         totalRemoved,
         totalRemovedAsAdmin,
         filesWithErrors,

@@ -1885,6 +1885,12 @@ export interface RevokeFileOutcome {
 export interface RevokeBatchResult {
   user: string;
   results: RevokeFileOutcome[];
+  /**
+   * The caller went away mid-batch (operator cancelled, or a proxy hung up) and
+   * the remaining files were never touched. `results` holds only the files we
+   * actually processed, so a re-run can safely repeat the whole batch.
+   */
+  aborted?: true;
 }
 
 export type RevokeCategory = "anyone" | "domain" | "user" | "group";
@@ -1895,6 +1901,8 @@ export interface RevokeOptions {
    * externally-classified permission is stripped (historical default).
    */
   categories?: RevokeCategory[];
+  /** The route's `request.signal`: stop revoking once the caller is gone. */
+  signal?: AbortSignal;
 }
 
 /** Per-batch cap — protects the request handler from a runaway client. */
@@ -1987,8 +1995,17 @@ export async function revokeExternalPermissions(
   const trimmed = fileIds.map((f) => String(f || "").trim());
   const results: RevokeFileOutcome[] = new Array(trimmed.length);
   let cursor = 0;
+  let aborted = false;
   const worker = async () => {
     while (cursor < trimmed.length) {
+      // Between files only: a cancelled operator (or a proxy timeout) shouldn't
+      // have the rest of the batch un-shared on their tenant's Drive quota for
+      // a response nobody is reading. The file in flight finishes so its
+      // outcome is reported rather than left unknown.
+      if (options.signal?.aborted) {
+        aborted = true;
+        return;
+      }
       const idx = cursor++;
       const fileId = trimmed[idx];
       if (!fileId) continue;
@@ -1997,7 +2014,8 @@ export async function revokeExternalPermissions(
         getAdminDrive,
         fileId,
         verifiedDomains,
-        allowedCategories
+        allowedCategories,
+        options.signal
       );
     }
   };
@@ -2010,8 +2028,10 @@ export async function revokeExternalPermissions(
 
   return {
     user: userEmail.toLowerCase(),
-    // Drop holes left by blank ids (skipped above) so the shape is unchanged.
+    // Drop holes left by blank ids (skipped above), and by files a cancellation
+    // never reached, so the shape is unchanged.
     results: results.filter((r): r is RevokeFileOutcome => r !== undefined),
+    ...(aborted ? { aborted: true as const } : {}),
   };
 }
 
@@ -2020,7 +2040,8 @@ async function revokeForOneFile(
   getAdminDrive: () => drive_v3.Drive,
   fileId: string,
   verifiedDomains: Set<string>,
-  allowedCategories: Set<RevokeCategory> | null
+  allowedCategories: Set<RevokeCategory> | null,
+  signal?: AbortSignal
 ): Promise<RevokeFileOutcome> {
   const outcome: RevokeFileOutcome = {
     fileId,
@@ -2089,6 +2110,11 @@ async function revokeForOneFile(
   outcome.permissionsTargeted = externalPerms.length;
 
   for (const p of externalPerms) {
+    // Between deletes only: what we already removed is reported, and a
+    // cancelled operator's request stops rather than spending more Drive quota.
+    // The delete in flight is left alone — it is a write, so dropping it would
+    // leave the permission's fate unknown.
+    if (signal?.aborted) break;
     const target =
       p.type === "anyone"
         ? "anyone"
@@ -2325,6 +2351,13 @@ export interface DriveTransferProgress {
   errors: DriveTransferErrorEntry[];
   /** Cursor to pass into the next call. Null when the entire selection is done. */
   nextCursor: DriveTransferCursor | null;
+  /**
+   * The caller went away mid-chunk (operator cancelled, or a proxy hung up) and
+   * we stopped early. The counters describe what really moved and `nextCursor`
+   * still carries the remaining queue, so a re-run resumes rather than
+   * restarting the walk.
+   */
+  aborted?: true;
 }
 
 /** Per-request work budget. Bounded so each call stays well under request timeouts. */
@@ -2470,7 +2503,11 @@ export async function transferDriveFoldersOwnership(
   tenant: Tenant | null,
   fromUser: string,
   toUser: string,
-  cursor: DriveTransferCursor
+  cursor: DriveTransferCursor,
+  opts: {
+    /** The route's `request.signal`: stop walking once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<DriveTransferProgress> {
   if (!isValidEmail(fromUser) || !isValidEmail(toUser)) {
     throw new Error("fromUser and toUser must be valid email addresses");
@@ -2535,6 +2572,13 @@ export async function transferDriveFoldersOwnership(
   let listPagesFetched = 0;
 
   while (budget > 0 && listPagesFetched < TRANSFER_MAX_LIST_PAGES) {
+    // A cancelled operator (or a proxy that timed out) must not keep moving
+    // files: stop between items and hand the untouched remainder back as
+    // nextCursor, so a re-run resumes here instead of re-walking from the top.
+    if (opts.signal?.aborted) {
+      out.aborted = true;
+      break;
+    }
     if (!local.current) {
       const next = local.queue.shift();
       if (!next) break;
@@ -2585,11 +2629,18 @@ export async function transferDriveFoldersOwnership(
               pageToken: local.current!.pageToken ?? undefined,
               corpora: "user",
             },
-            { timeout: ADMIN_API_TIMEOUT_MS }
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
           ),
-        { retryServerErrors: true }
+        { retryServerErrors: true, signal: opts.signal }
       );
     } catch (e) {
+      // A listing dropped by the cancellation is not a bad branch: leave
+      // `current` (folder + page token) untouched so the cursor resumes here,
+      // and never record it as a per-item failure.
+      if (isAbortError(e)) {
+        out.aborted = true;
+        break;
+      }
       // Record the listing failure against the folder itself and move on so
       // the rest of the selection isn't held up by one bad branch.
       out.errors.push({
@@ -2613,8 +2664,16 @@ export async function transferDriveFoldersOwnership(
     // enqueued serially afterwards so the queue hard-cap check can't race.
     const discoveredFolders: Array<{ id: string; name: string | null }> = [];
     let childCursor = 0;
+    let childAborted = false;
     const childWorker = async () => {
       while (childCursor < children.length) {
+        // Between items only: the transfer already in flight finishes so its
+        // outcome is counted honestly, but a cancelled operator's chunk stops
+        // instead of moving up to 500 more files on their tenant's quota.
+        if (opts.signal?.aborted) {
+          childAborted = true;
+          return;
+        }
         const child = children[childCursor++];
         const childId = child.id;
         if (!childId) continue;
@@ -2661,6 +2720,14 @@ export async function transferDriveFoldersOwnership(
         enqueuedFolders.add(f.id);
         local.queue.push(f.id);
       }
+    }
+    if (childAborted) {
+      // Deliberately leave `current.pageToken` pointing at THIS page: a re-run
+      // re-checks the items we already moved (transferring an item that is
+      // already owned by the target is a no-op) rather than skipping the ones
+      // we never claimed.
+      out.aborted = true;
+      break;
     }
     budget -= children.length;
 
@@ -3005,6 +3072,12 @@ export interface MailboxExportPage {
    * header.
    */
   labels?: GmailLabelInfo[];
+  /**
+   * The caller went away mid-page (operator cancelled, or a proxy hung up) and
+   * we stopped early. Whatever was fetched is still returned; `pendingIds`
+   * carries the ids we abandoned so a re-run resumes instead of losing them.
+   */
+  aborted?: true;
 }
 
 /** Best-effort extraction of an HTTP status from a googleapis error. */
@@ -3136,23 +3209,65 @@ function isRetriableGoogleError(
 }
 
 /**
+ * The caller's request went away — the operator clicked Cancel, or a reverse
+ * proxy hung up — and a long-running helper stopped on purpose. Kept distinct
+ * from a Google rejection so routes can answer with a cancellation instead of
+ * reporting an upstream failure that never happened.
+ */
+export class RequestAbortedError extends Error {
+  constructor(message = "Request cancelled by the client") {
+    super(message);
+    this.name = "RequestAbortedError";
+  }
+}
+
+/**
+ * True for our own cancellation and for the shapes an aborted fetch reaches us
+ * as through gaxios (which copies the DOMException name into `code`).
+ * Deliberately does NOT match "TimeoutError": that is our own per-call timeout
+ * firing, which is a real upstream failure and stays retriable.
+ */
+export function isAbortError(e: unknown): boolean {
+  if (e instanceof RequestAbortedError) return true;
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { name?: unknown; code?: unknown };
+  return (
+    err.name === "AbortError" ||
+    err.code === "AbortError" ||
+    err.code === "ABORT_ERR" ||
+    err.code === "ERR_CANCELED"
+  );
+}
+
+/**
  * Retry a Google API call with exponential backoff + jitter on transient errors.
  *
  * Exported so API routes that talk to Gmail / Calendar directly get the same
  * rate-limit handling as the Admin SDK helpers here: use
  * `retryServerErrors: false` for non-idempotent writes (create, insert) and
- * `true` for reads and idempotent settings updates.
+ * `true` for reads and idempotent settings updates. Pass `signal` (a route's
+ * `request.signal`) to stop as soon as the caller goes away; forward the same
+ * signal in the per-call options to drop an in-flight request too, but only
+ * where a dropped call can't leave a half-done write behind.
  */
 export async function withGoogleRetry<T>(
   fn: () => Promise<T>,
-  opts: { retries?: number; retryServerErrors: boolean }
+  opts: { retries?: number; retryServerErrors: boolean; signal?: AbortSignal }
 ): Promise<T> {
   const retries = opts.retries ?? 5;
   let attempt = 0;
   while (true) {
+    // Before every attempt, not just the first: once the operator has cancelled
+    // (or a proxy has timed out) another call only spends the tenant's API quota
+    // on a response nobody will read.
+    if (opts.signal?.aborted) throw new RequestAbortedError();
     try {
       return await fn();
     } catch (e) {
+      // A cancellation is not a transient Google failure: never retry it, and
+      // never sleep out a backoff for a caller that is already gone.
+      if (opts.signal?.aborted) throw new RequestAbortedError();
+      if (isAbortError(e)) throw e;
       attempt++;
       if (attempt > retries || !isRetriableGoogleError(e, opts)) throw e;
       const backoff = Math.min(8000, 300 * 2 ** (attempt - 1));
@@ -3206,6 +3321,8 @@ export async function exportMailboxPage(
     includeSpamTrash?: boolean;
     /** Unfetched ids from a prior page whose byte budget was reached. */
     pendingIds?: string[];
+    /** The route's `request.signal`: stop fetching once the caller is gone. */
+    signal?: AbortSignal;
   } = {}
 ): Promise<MailboxExportPage> {
   if (!isValidEmail(userEmail)) {
@@ -3240,9 +3357,9 @@ export async function exportMailboxPage(
             pageToken: opts.pageToken,
             includeSpamTrash: opts.includeSpamTrash ?? false,
           },
-          { timeout: MAILBOX_API_TIMEOUT_MS }
+          { timeout: MAILBOX_API_TIMEOUT_MS, signal: opts.signal }
         ),
-      { retryServerErrors: true }
+      { retryServerErrors: true, signal: opts.signal }
     );
     ids = (listRes.data.messages || [])
       .map((m) => m.id)
@@ -3257,13 +3374,26 @@ export async function exportMailboxPage(
   const skipped: Array<{ id: string; error: string }> = [];
   // Cumulative raw bytes fetched this page. Once it reaches the budget we stop
   // claiming new ids; workers claim sequentially, so the fetched set is always a
-  // prefix [0, cursor) and the tail is returned as pendingIds. The `?? 0` and
+  // prefix [0, cursor) and the unclaimed tail rolls over as pendingIds. The `?? 0` and
   // `budgetReached` flag guarantee at least one message is fetched.
   let accumulatedBytes = 0;
   let budgetReached = false;
   let cursor = 0;
+  // Ids that reached a final state this call (fetched, or recorded as skipped).
+  // Everything else rolls over to `pendingIds` — including a fetch a
+  // cancellation abandoned, so a resumed export can never silently drop a
+  // message it claimed but never wrote.
+  const settled = new Array<boolean>(ids.length).fill(false);
+  let aborted = false;
   const worker = async () => {
     while (cursor < ids.length && !budgetReached) {
+      // A cancelled operator (or a proxy that gave up) must not keep pulling
+      // raw messages for a socket nobody is reading — each one costs Gmail
+      // quota and up to tens of MB of heap.
+      if (opts.signal?.aborted) {
+        aborted = true;
+        break;
+      }
       const idx = cursor++;
       const id = ids[idx];
       try {
@@ -3271,15 +3401,16 @@ export async function exportMailboxPage(
           () =>
             gmail.users.messages.get(
               { userId: "me", id, format: "raw" },
-              { timeout: MAILBOX_API_TIMEOUT_MS }
+              { timeout: MAILBOX_API_TIMEOUT_MS, signal: opts.signal }
             ),
-          { retryServerErrors: true }
+          { retryServerErrors: true, signal: opts.signal }
         );
         // A message with no raw body (e.g. a Chat / structured item) can't be
         // re-imported, so record it as skipped rather than writing an empty,
         // unimportable line that the importer would later count as a failure.
         if (!r.data.raw) {
           skipped.push({ id, error: "Message has no exportable raw content" });
+          settled[idx] = true;
           continue;
         }
         messages[idx] = {
@@ -3290,6 +3421,7 @@ export async function exportMailboxPage(
           sizeEstimate: r.data.sizeEstimate ?? 0,
           raw: r.data.raw,
         };
+        settled[idx] = true;
         accumulatedBytes += r.data.raw.length;
         if (accumulatedBytes >= MAILBOX_EXPORT_PAGE_BYTE_BUDGET) {
           // Stop starting new fetches; in-flight ones finish and fill their
@@ -3297,9 +3429,17 @@ export async function exportMailboxPage(
           budgetReached = true;
         }
       } catch (e) {
+        // A fetch dropped by the cancellation is not an unfetchable message:
+        // leave the id unsettled so it rolls over to pendingIds instead of
+        // being reported as a permanent gap in the backup.
+        if (isAbortError(e)) {
+          aborted = true;
+          break;
+        }
         // Don't let one unfetchable message abort the whole mailbox export —
         // record it and move on.
         skipped.push({ id, error: e instanceof Error ? e.message : String(e) });
+        settled[idx] = true;
       }
     }
   };
@@ -3310,10 +3450,13 @@ export async function exportMailboxPage(
     )
   );
 
-  // Ids never claimed (cursor points past the last claimed index) roll over to
-  // the next call. Claims are sequential, so this tail is exactly the unfetched
-  // remainder of the current list page.
-  const pendingIds = cursor < ids.length ? ids.slice(cursor) : null;
+  // Ids that never reached a final state roll over to the next call: the tail
+  // the byte budget stopped us claiming plus, after a cancellation, the fetch
+  // we abandoned. With no cancellation this is exactly `ids.slice(cursor)`,
+  // since claims are sequential and every claimed id settles.
+  const unsettled = ids.filter((_, i) => !settled[i]);
+  const pendingIds = unsettled.length > 0 ? unsettled : null;
+  const wasAborted = aborted || opts.signal?.aborted === true;
 
   const page: MailboxExportPage = {
     user: userEmail.toLowerCase(),
@@ -3323,8 +3466,11 @@ export async function exportMailboxPage(
     resultSizeEstimate,
     pendingIds,
   };
-  // Labels belong on the first call only (no pageToken and not a continuation).
-  if (!opts.pageToken && !continuing) {
+  if (wasAborted) page.aborted = true;
+  // Labels belong on the first call only (no pageToken and not a continuation),
+  // and are pointless once the caller has gone — one more Gmail call for an
+  // export header nobody will write.
+  if (!opts.pageToken && !continuing && !wasAborted) {
     page.labels = await listGmailLabels(tenant, userEmail);
   }
   return page;
@@ -3491,6 +3637,17 @@ export interface ImportBatchResult {
   inserted: number;
   failed: number;
   errors: Array<{ index: number; message: string }>;
+  /**
+   * The caller went away mid-batch (operator cancelled, or a proxy hung up) and
+   * the remaining messages were never attempted.
+   */
+  aborted?: true;
+  /**
+   * Indexes into the request's `messages` array that were actually inserted.
+   * Reported on a cancelled batch only: messages.insert has no dedup key, so a
+   * re-run that re-sends one of these stores a duplicate copy.
+   */
+  insertedIndexes?: number[];
 }
 
 // A real message carries a handful of labels; cap the array so a crafted
@@ -3524,7 +3681,11 @@ function sanitizeImportLabelIds(labelIds: unknown): string[] {
 export async function importMessageBatch(
   tenant: Tenant | null,
   userEmail: string,
-  messages: ImportMessageInput[]
+  messages: ImportMessageInput[],
+  opts: {
+    /** The route's `request.signal`: stop inserting once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<ImportBatchResult> {
   if (!isValidEmail(userEmail)) {
     throw new Error("userEmail must be a valid email address");
@@ -3540,6 +3701,9 @@ export async function importMessageBatch(
 
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_INSERT_SCOPES);
   const out: ImportBatchResult = { inserted: 0, failed: 0, errors: [] };
+  // Tracked for the cancelled case: the operator's re-run has to know exactly
+  // which messages already landed, because insert cannot dedup them.
+  const insertedIndexes: number[] = [];
 
   const insertOne = async (i: number): Promise<void> => {
     const raw = typeof messages[i]?.raw === "string" ? messages[i].raw : "";
@@ -3576,6 +3740,7 @@ export async function importMessageBatch(
         { retryServerErrors: false }
       );
       out.inserted++;
+      insertedIndexes.push(i);
     } catch (e) {
       // Retry once with no labels — the most common insert rejection is an
       // unapplicable label. But ONLY when the first attempt definitely did not
@@ -3606,6 +3771,7 @@ export async function importMessageBatch(
             { retryServerErrors: false }
           );
           out.inserted++;
+          insertedIndexes.push(i);
           return;
         } catch (e2) {
           out.failed++;
@@ -3631,8 +3797,17 @@ export async function importMessageBatch(
   // isolation and no-blind-retry duplicate protection above are unchanged, and
   // the synchronous counter/array mutations can't interleave mid-statement.
   let cursor = 0;
+  let aborted = false;
   const worker = async () => {
     while (cursor < messages.length) {
+      // Between messages only: a cancelled operator re-runs this batch, and
+      // every further insert here becomes a duplicate they have to hunt down.
+      // The insert already in flight is deliberately left to finish — dropping
+      // it mid-write would leave us unable to say whether Gmail stored it.
+      if (opts.signal?.aborted) {
+        aborted = true;
+        break;
+      }
       await insertOne(cursor++);
     }
   };
@@ -3642,6 +3817,13 @@ export async function importMessageBatch(
       worker
     )
   );
+
+  if (aborted) {
+    out.aborted = true;
+    // Sorted so the log and a resumed run read in message order (inserts
+    // complete out of order under the worker pool).
+    out.insertedIndexes = insertedIndexes.sort((a, b) => a - b);
+  }
 
   return out;
 }

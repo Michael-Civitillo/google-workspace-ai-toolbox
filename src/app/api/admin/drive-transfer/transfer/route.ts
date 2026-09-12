@@ -26,6 +26,10 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
  *
  * Per-item failures are collected, never thrown — one bad file doesn't abort
  * the batch. Items not owned by `fromUser` are silently counted as skipped.
+ *
+ * A cancelled request (the operator hit Cancel, or a reverse proxy timed out)
+ * stops between items and still answers with the progress made plus the cursor
+ * for the untouched remainder, so a re-run resumes instead of restarting.
  */
 export async function POST(request: NextRequest) {
   const actor = await actorFromRequest(request);
@@ -110,7 +114,11 @@ export async function POST(request: NextRequest) {
       tenant,
       fromUser,
       toUser,
-      cursor
+      cursor,
+      // Without this the chunk keeps moving files after the operator cancels
+      // (or a proxy hangs up), burning the tenant's Drive quota and losing the
+      // resume cursor with the response nobody reads.
+      { signal: request.signal }
     );
 
     // Cap the error detail captured in the audit log so a pathological batch
@@ -129,6 +137,9 @@ export async function POST(request: NextRequest) {
         notOwned: progress.notOwned,
         errorCount: progress.errors.length,
         hasMore: progress.nextCursor !== null,
+        // Distinguishes "stopped early because the caller went away" from a
+        // completed chunk — the counters and cursor above are still accurate.
+        ...(progress.aborted ? { aborted: true } : {}),
         ...(progress.errors.length > 0
           ? { errors: progress.errors.slice(0, FAILURE_DETAIL_CAP) }
           : {}),

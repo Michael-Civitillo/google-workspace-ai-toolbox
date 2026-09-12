@@ -99,7 +99,12 @@ export async function POST(request: NextRequest) {
       };
     });
 
-    const result = await importMessageBatch(tenant, user, messages);
+    // Without the signal the batch keeps inserting after the operator cancels
+    // (or a proxy hangs up), and their re-run duplicates every message that
+    // landed after the cancel — insert has no dedup key.
+    const result = await importMessageBatch(tenant, user, messages, {
+      signal: request.signal,
+    });
 
     audit({
       action: "mailbox_import.batch",
@@ -110,6 +115,15 @@ export async function POST(request: NextRequest) {
         batchSize,
         inserted: result.inserted,
         failed: result.failed,
+        // Cut short by the caller: record which messages actually landed, since
+        // that is the only place the operator can look before re-running the
+        // batch without duplicating them.
+        ...(result.aborted
+          ? {
+              aborted: true,
+              insertedIndexes: result.insertedIndexes ?? [],
+            }
+          : {}),
       },
       outcome: result.failed === 0 ? "success" : "error",
       error:
