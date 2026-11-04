@@ -2,8 +2,8 @@ import path from "node:path";
 
 /**
  * Base directory for everything Open Admin persists locally: tenants.json,
- * app-config.json, sso.json, audit.log, and credential files relocated by a
- * configuration import.
+ * app-config.json, sso.json, delegation-sightings.json, audit.log, and
+ * credential files relocated by a configuration import.
  *
  * Defaults to the process working directory, so `npm run dev` and
  * `npm start` keep writing next to the project exactly as before.

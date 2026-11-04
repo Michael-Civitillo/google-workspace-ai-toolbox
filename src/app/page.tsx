@@ -25,6 +25,7 @@ import {
   Layers,
   Activity,
   ScrollText,
+  UserSearch,
 } from "lucide-react";
 
 interface GwsStatus {
@@ -60,6 +61,12 @@ const taskGroups: TaskGroup[] = [
         description: "Grant mailbox access to another user without sharing passwords.",
         href: "/email-delegation",
         icon: Mail,
+      },
+      {
+        title: "Delegate Lookup",
+        description: "See every mailbox a person can access as a delegate, and for how long.",
+        href: "/delegation-lookup",
+        icon: UserSearch,
       },
       {
         title: "Calendar Delegation",

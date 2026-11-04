@@ -43,6 +43,9 @@ sso.json*
 # Append-only audit log of all mutating actions
 audit.log
 
+# First-seen record of mailbox delegations (feeds Delegate Lookup) — local to this install
+delegation-sightings.json*
+
 # Auto-generated key that signs session cookies when APP_SESSION_SECRET is unset
 session-secret
 

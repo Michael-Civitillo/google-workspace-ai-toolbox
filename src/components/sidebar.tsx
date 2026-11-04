@@ -25,6 +25,7 @@ import {
   Layers,
   KeyRound,
   Settings2,
+  UserSearch,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -53,6 +54,7 @@ const navigation: NavGroup[] = [
     label: "Access",
     items: [
       { name: "Email Delegation", href: "/email-delegation", icon: Mail },
+      { name: "Delegate Lookup", href: "/delegation-lookup", icon: UserSearch },
       {
         name: "Calendar Delegation",
         href: "/calendar-delegation",

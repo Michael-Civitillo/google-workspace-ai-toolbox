@@ -19,7 +19,8 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### Workspace operations
 
-- 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama.
+- 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama. If Google refuses because the owner (or the delegate) is suspended, the dialog says so and offers to re-enable the account and retry, behind a typed confirmation.
+- 🔎 **Delegate Lookup** — The reverse question: which mailboxes can *this person* read, and since when? Gmail only lists delegates per mailbox, so the lookup walks every active mailbox in the tenant (paged, cancellable; suspended accounts are counted but skipped, since Google won't read their settings) and shows every match with a one-click remove. Grants made through Open Admin show their exact date and operator from the audit log; everything else shows how long Open Admin has known about it, because Google doesn't record when a delegate was added.
 - 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. External-domain transfers require explicit confirmation.
@@ -303,7 +304,7 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | `GOOGLE_GENERATIVE_AI_API_KEY` | ⚠️ for AI features | Gemini API key. |
 | `APP_ALLOWED_ORIGINS` | ✅ behind a proxy | Comma-separated public origin(s) browsers use, e.g. `https://admin.example.com`. Behind Cloudflare Tunnel, nginx or Docker with a hostname the browser's `Origin` is the public URL while the server only knows the address it bound — without this every mutating request is refused (403). |
 | `TRUSTED_PROXY` | optional | Set to `true` when nothing but a trusted proxy can reach the app; per-address login rate limiting then reads `X-Forwarded-For`. |
-| `OPEN_ADMIN_DATA_DIR` | optional | Where `tenants.json`, `app-config.json`, `sso.json`, `audit.log` and imported keys are kept (defaults to the working directory). The packaged Windows build sets this to your user profile. |
+| `OPEN_ADMIN_DATA_DIR` | optional | Where `tenants.json`, `app-config.json`, `sso.json`, `delegation-sightings.json`, `audit.log` and imported keys are kept (defaults to the working directory). The packaged Windows build sets this to your user profile. |
 | `AUDIT_LOG_PATH` | optional | Override location of the append-only audit log (defaults to `./audit.log`). At 8 MB it rotates to `audit.log.1`, shifting older files up to `.3` and dropping the rest — about 32 MB of history, all mode 0600. The in-app viewer reads the current file; the rotated ones are there for your own archive or log shipper. |
 | `GWS_CREDENTIALS_DIR` | optional | Allowlist a directory; tenant credential paths must live underneath it. |
 | `SSO_CONFIG_PATH` | optional | Override location of the single sign-on config (defaults to `./sso.json`). |

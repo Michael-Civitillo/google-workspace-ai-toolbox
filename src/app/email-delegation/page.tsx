@@ -15,13 +15,38 @@ import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert } from "@/components/feedback-alert";
 import { StatusBadge } from "@/components/status-badge";
-import { Mail, Loader2, Trash2, UserPlus, Search } from "lucide-react";
+import { Mail, Loader2, Trash2, UserPlus, Search, UserCheck } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
+import { ReactivateAccountDialog } from "@/components/reactivate-account-dialog";
 
 interface Delegate {
   delegateEmail: string;
   verificationStatus: string;
+}
+
+/**
+ * A failed add/remove, shown inside the dialog that triggered it. When the
+ * server says the failure is a suspended account, `suspendedUser` lets the
+ * dialog offer to re-enable it and retry.
+ */
+interface DialogError {
+  message: string;
+  suspendedUser?: string;
+}
+
+function dialogErrorFrom(result: {
+  error?: string;
+  suspendedUser?: string;
+  code?: string;
+}, fallback: string): DialogError {
+  return {
+    message: result.error || fallback,
+    suspendedUser:
+      typeof result.suspendedUser === "string" && result.suspendedUser
+        ? result.suspendedUser
+        : undefined,
+  };
 }
 
 export default function EmailDelegation() {
@@ -38,6 +63,14 @@ export default function EmailDelegation() {
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmAddOpen, setConfirmAddOpen] = useState(false);
   const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<string | null>(null);
+  const [addError, setAddError] = useState<DialogError | null>(null);
+  const [removeError, setRemoveError] = useState<DialogError | null>(null);
+  // Which suspended account the re-enable dialog is for, and what to retry
+  // once it is active again.
+  const [reactivate, setReactivate] = useState<{
+    user: string;
+    then: "add" | "remove";
+  } | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -92,10 +125,17 @@ export default function EmailDelegation() {
     setListedOwner("");
   }, [tenantId]);
 
-  const addDelegate = async () => {
+  /**
+   * Add the delegate. Failures stay in the add dialog (`addError`) so the
+   * operator sees them where they are looking; only success closes it.
+   * `reactivated` names an account that was just re-enabled for this add,
+   * so the success message can say so.
+   */
+  const addDelegate = async (reactivated?: string) => {
     if (!user || !delegate) return;
     setAdding(true);
     setMessage(null);
+    setAddError(null);
 
     try {
       const res = await tfetch(
@@ -119,26 +159,25 @@ export default function EmailDelegation() {
         await listDelegates();
         setMessage({
           type: "success",
-          text: `Successfully added ${added} as a delegate for ${user}`,
+          text: reactivated
+            ? `Re-enabled ${reactivated} and added ${added} as a delegate for ${user}`
+            : `Successfully added ${added} as a delegate for ${user}`,
         });
       } else {
-        // Close the dialog so the page-level error banner isn't hidden
-        // behind the modal overlay.
-        setConfirmAddOpen(false);
-        setMessage({ type: "error", text: result.error || "Failed to add delegate" });
+        setAddError(dialogErrorFrom(result, "Failed to add delegate"));
       }
     } catch {
-      setConfirmAddOpen(false);
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      setAddError({ message: "Failed to connect to the API" });
     } finally {
       setAdding(false);
     }
   };
 
-  const removeDelegate = async (delegateEmail: string) => {
+  const removeDelegate = async (delegateEmail: string, reactivated?: string) => {
     if (!listedOwner) return;
     setRemoving(delegateEmail);
     setMessage(null);
+    setRemoveError(null);
 
     try {
       const res = await tfetch(
@@ -162,21 +201,31 @@ export default function EmailDelegation() {
         await listDelegates(listedOwner);
         setMessage({
           type: "success",
-          text: `Successfully removed ${delegateEmail} as a delegate from ${listedOwner}`,
+          text: reactivated
+            ? `Re-enabled ${reactivated} and removed ${delegateEmail} as a delegate from ${listedOwner}`
+            : `Successfully removed ${delegateEmail} as a delegate from ${listedOwner}`,
         });
       } else {
-        // Close the dialog so the page-level error banner isn't hidden
-        // behind the modal overlay.
-        setConfirmRemoveTarget(null);
-        setMessage({ type: "error", text: result.error || "Failed to remove delegate" });
+        setRemoveError(dialogErrorFrom(result, "Failed to remove delegate"));
       }
     } catch {
-      setConfirmRemoveTarget(null);
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      setRemoveError({ message: "Failed to connect to the API" });
     } finally {
       setRemoving(null);
     }
   };
+
+  const reenableButton = (err: DialogError | null, then: "add" | "remove") =>
+    err?.suspendedUser ? (
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => setReactivate({ user: err.suspendedUser as string, then })}
+      >
+        <UserCheck className="h-3.5 w-3.5" />
+        Re-enable {err.suspendedUser}…
+      </Button>
+    ) : null;
 
   return (
     <>
@@ -238,6 +287,7 @@ export default function EmailDelegation() {
                 <Button
                   onClick={() => {
                     setMessage(null);
+                    setAddError(null);
                     setConfirmAddOpen(true);
                   }}
                   disabled={!user || !delegate || adding}
@@ -301,6 +351,7 @@ export default function EmailDelegation() {
                       size="sm"
                       onClick={() => {
                         setMessage(null);
+                        setRemoveError(null);
                         setConfirmRemoveTarget(d.delegateEmail);
                       }}
                       disabled={removing === d.delegateEmail}
@@ -321,12 +372,16 @@ export default function EmailDelegation() {
 
       <ConfirmActionDialog
         open={confirmAddOpen}
-        onOpenChange={(o) => !adding && setConfirmAddOpen(o)}
+        onOpenChange={(o) => {
+          if (adding) return;
+          if (!o) setAddError(null);
+          setConfirmAddOpen(o);
+        }}
         title="Add mailbox delegate"
         summary={`Grant ${delegate || "—"} delegate access to ${user || "—"}'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="medium"
-        confirmLabel="Add delegate"
+        confirmLabel={addError ? "Try again" : "Add delegate"}
         busy={adding}
         changes={[
           { label: "Mailbox owner", after: user },
@@ -341,17 +396,25 @@ export default function EmailDelegation() {
             after: "Delegate must accept an email invitation before access activates",
           },
         ]}
-        onConfirm={addDelegate}
+        error={addError?.message}
+        errorActions={reenableButton(addError, "add")}
+        onConfirm={() => addDelegate()}
       />
 
       <ConfirmActionDialog
         open={!!confirmRemoveTarget}
-        onOpenChange={(o) => !removing && !o && setConfirmRemoveTarget(null)}
+        onOpenChange={(o) => {
+          if (removing) return;
+          if (!o) {
+            setRemoveError(null);
+            setConfirmRemoveTarget(null);
+          }
+        }}
         title="Remove mailbox delegate"
         summary={`${confirmRemoveTarget ?? ""} will lose access to ${listedOwner}'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="medium"
-        confirmLabel="Remove delegate"
+        confirmLabel={removeError ? "Try again" : "Remove delegate"}
         busy={!!removing}
         changes={[
           { label: "Mailbox owner", after: listedOwner },
@@ -362,8 +425,31 @@ export default function EmailDelegation() {
             emphasis: true,
           },
         ]}
+        error={removeError?.message}
+        errorActions={reenableButton(removeError, "remove")}
         onConfirm={() => {
           if (confirmRemoveTarget) void removeDelegate(confirmRemoveTarget);
+        }}
+      />
+
+      <ReactivateAccountDialog
+        user={reactivate?.user ?? null}
+        onOpenChange={(o) => {
+          if (!o) setReactivate(null);
+        }}
+        thenLabel={
+          reactivate?.then === "remove"
+            ? `Remove ${confirmRemoveTarget ?? ""} as a delegate from ${listedOwner}`
+            : `Add ${delegate} as a delegate for ${user}`
+        }
+        onReactivated={async (reactivated) => {
+          const then = reactivate?.then;
+          setReactivate(null);
+          if (then === "remove") {
+            if (confirmRemoveTarget) await removeDelegate(confirmRemoveTarget, reactivated);
+          } else {
+            await addDelegate(reactivated);
+          }
         }}
       />
     </>

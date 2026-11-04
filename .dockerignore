@@ -16,6 +16,7 @@ deploy
 tenants.json*
 sso.json*
 app-config.json*
+delegation-sightings.json*
 audit.log
 session-secret
 credentials
