@@ -549,6 +549,190 @@ export async function listUsers(
 }
 
 /**
+ * Scopes the Gmail delegates API accepts. Shared by the per-mailbox delegate
+ * routes and the tenant-wide reverse lookup so a scope change lands in one
+ * place (and in REQUIRED_SCOPES in preflight.ts).
+ */
+export const GMAIL_DELEGATION_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.settings.sharing",
+  "https://www.googleapis.com/auth/gmail.settings.basic",
+] as const;
+
+export interface DelegatedMailboxMatch {
+  /** Primary email of the mailbox the delegate can access. */
+  owner: string;
+  ownerName: string;
+  ownerSuspended: boolean;
+  orgUnitPath: string;
+  /** Gmail's "accepted" / "pending" for the delegate's invitation. */
+  verificationStatus: string;
+  /**
+   * The delegate address exactly as the mailbox stores it (primary or an
+   * alias) — what a `delegates.delete` for this grant has to name.
+   */
+  delegateAddress: string;
+}
+
+/** One (owner, delegate) pair observed while scanning, match or not. */
+export interface DelegationSighting {
+  owner: string;
+  delegate: string;
+  verificationStatus: string;
+}
+
+export interface DelegationLookupPage {
+  matches: DelegatedMailboxMatch[];
+  /**
+   * Every delegation seen on this page of mailboxes, not just the ones for
+   * the looked-up delegate. The route records these as first-seen sightings
+   * so later lookups for anyone can say how long a delegation has existed.
+   */
+  sightings: DelegationSighting[];
+  /** Mailboxes whose delegate list was read successfully. */
+  scannedUsers: number;
+  /** Suspended accounts on this page that were not scanned. */
+  skippedSuspended: number;
+  /** Mailboxes Google refused to list (no Gmail licence, etc.). */
+  unscanned: Array<{ owner: string; error: string }>;
+  nextPageToken: string | null;
+}
+
+const DELEGATION_LOOKUP_DEFAULT_PAGE = 100;
+const DELEGATION_LOOKUP_MAX_PAGE = 200;
+// Each mailbox costs a token exchange plus one settings call against a
+// different impersonated user, so Gmail's per-user quotas don't compete;
+// the bound is on our own outbound connections and the admin token endpoint.
+const DELEGATION_LOOKUP_CONCURRENCY = 6;
+const DELEGATION_LOOKUP_ERROR_CHARS = 200;
+
+/**
+ * Reverse delegation lookup: which mailboxes list any of `delegateEmails` as
+ * a delegate?
+ *
+ * Gmail only exposes delegation from the owner's side (`delegates.list` on
+ * the mailbox), so the only way to answer "what can this person read?" is to
+ * walk the tenant's users and ask each mailbox. One call scans one page of
+ * users (`pageSize`, default 100) with a small worker pool and hands back a
+ * `nextPageToken` for the caller to continue — the same stateless, resumable
+ * shape as the sharing audit, so the browser can show progress and cancel.
+ *
+ * `delegateEmails` should hold the delegate's primary address and aliases,
+ * lower-cased: Gmail stores whichever address the grant named.
+ *
+ * Per-mailbox failures never fail the page. A user without a Gmail licence
+ * (or whose mailbox is otherwise unreadable) lands in `unscanned` with
+ * Google's message so the operator knows the answer is incomplete for them.
+ */
+export async function findMailboxesDelegatedTo(
+  tenant: Tenant | null,
+  opts: {
+    delegateEmails: ReadonlySet<string>;
+    pageToken?: string;
+    pageSize?: number;
+    includeSuspended?: boolean;
+    signal?: AbortSignal;
+  }
+): Promise<DelegationLookupPage> {
+  if (opts.delegateEmails.size === 0) {
+    throw new Error("delegateEmails must name at least one address");
+  }
+  for (const d of opts.delegateEmails) {
+    if (!isValidEmail(d)) {
+      throw new Error("delegateEmails must be valid email addresses");
+    }
+  }
+  const pageSize = Math.min(
+    DELEGATION_LOOKUP_MAX_PAGE,
+    Math.max(1, opts.pageSize ?? DELEGATION_LOOKUP_DEFAULT_PAGE)
+  );
+
+  const page = await listUsers(tenant, {
+    pageToken: opts.pageToken,
+    pageSize,
+  });
+
+  const targets = opts.includeSuspended
+    ? page.users
+    : page.users.filter((u) => !u.suspended);
+  const skippedSuspended = page.users.length - targets.length;
+
+  const matches: DelegatedMailboxMatch[] = [];
+  const sightings: DelegationSighting[] = [];
+  const unscanned: Array<{ owner: string; error: string }> = [];
+  let scannedUsers = 0;
+
+  const scanOne = async (u: ListedUser) => {
+    const gmail = buildGmailClient(tenant, u.primaryEmail, [
+      ...GMAIL_DELEGATION_SCOPES,
+    ]);
+    try {
+      const res = await withGoogleRetry(
+        () =>
+          gmail.users.settings.delegates.list(
+            { userId: "me" },
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+          ),
+        { retryServerErrors: true, signal: opts.signal }
+      );
+      scannedUsers++;
+      for (const d of res.data.delegates || []) {
+        const delegate = (d.delegateEmail || "").toLowerCase();
+        if (!delegate) continue;
+        const verificationStatus = d.verificationStatus || "unknown";
+        sightings.push({ owner: u.primaryEmail, delegate, verificationStatus });
+        if (opts.delegateEmails.has(delegate)) {
+          matches.push({
+            owner: u.primaryEmail,
+            ownerName: u.fullName,
+            ownerSuspended: u.suspended,
+            orgUnitPath: u.orgUnitPath,
+            verificationStatus,
+            delegateAddress: delegate,
+          });
+        }
+      }
+    } catch (e) {
+      // A cancelled request is the caller's doing, not a mailbox problem:
+      // let it propagate so the route answers 499 instead of reporting
+      // every remaining mailbox as unreadable.
+      if (isAbortError(e)) throw e;
+      const message = e instanceof Error ? e.message : String(e);
+      unscanned.push({
+        owner: u.primaryEmail,
+        error: message.slice(0, DELEGATION_LOOKUP_ERROR_CHARS),
+      });
+    }
+  };
+
+  let next = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      if (opts.signal?.aborted) throw new RequestAbortedError();
+      await scanOne(targets[next++]);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(DELEGATION_LOOKUP_CONCURRENCY, targets.length) },
+      worker
+    )
+  );
+
+  // Workers finish in whatever order Google answers; present a stable list.
+  matches.sort((a, b) => a.owner.localeCompare(b.owner));
+  unscanned.sort((a, b) => a.owner.localeCompare(b.owner));
+
+  return {
+    matches,
+    sightings,
+    scannedUsers,
+    skippedSuspended,
+    unscanned,
+    nextPageToken: page.nextPageToken,
+  };
+}
+
+/**
  * Change a user's primary domain. (Preflight + read-after-write — see the
  * domain-change route handler for the full safety story.)
  */

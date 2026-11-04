@@ -18,7 +18,7 @@ import path from "node:path";
  * a crashed write can leave behind.
  */
 export const LOCAL_STATE_RE =
-  /^(tenants\.json|sso\.json|app-config\.json|session-secret|audit\.log)(\..*)?$/;
+  /^(tenants\.json|sso\.json|app-config\.json|delegation-sightings\.json|session-secret|audit\.log)(\..*)?$/;
 
 /** Environment files, which carry the password and the session secret. */
 export const ENV_FILE_RE = /^\.env(\..*)?$/;

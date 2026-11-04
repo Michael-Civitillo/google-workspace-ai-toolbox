@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { buildGmailClient, withGoogleRetry } from "@/lib/admin-sdk";
+import {
+  buildGmailClient,
+  withGoogleRetry,
+  GMAIL_DELEGATION_SCOPES,
+} from "@/lib/admin-sdk";
+import { recordDelegationSightings } from "@/lib/delegation-sightings";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit, boundedParams } from "@/lib/audit";
 import { errorResponse } from "@/lib/api-errors";
 import { actorFromRequest } from "@/lib/session";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
-
-const GMAIL_DELEGATION_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.settings.sharing",
-  "https://www.googleapis.com/auth/gmail.settings.basic",
-];
 
 // Delegation bodies are tiny (two emails) — cap aggressively so a malicious
 // caller can't stream a huge payload that then gets echoed into audit.log.
@@ -27,12 +27,20 @@ export async function GET(request: NextRequest) {
   try {
     const tenant = tenantFromRequest(request);
     const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
-    const gmail = buildGmailClient(tenant, user, GMAIL_DELEGATION_SCOPES);
+    const gmail = buildGmailClient(tenant, user, [...GMAIL_DELEGATION_SCOPES]);
     // Gmail throttles per user; back off on 429 / rate-limit 403s instead of
     // failing the whole request on the first one. Reads also retry 5xx blips.
     const res = await withGoogleRetry(
       () => gmail.users.settings.delegates.list({ userId: "me" }),
       { retryServerErrors: true }
+    );
+    // Remember when each delegation was first seen, so the reverse lookup
+    // (/delegation-lookup) can later say how long it has at least existed.
+    await recordDelegationSightings(
+      tenant?.id ?? null,
+      (res.data.delegates || [])
+        .filter((d) => !!d.delegateEmail)
+        .map((d) => ({ owner: user, delegate: d.delegateEmail as string }))
     );
     return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
@@ -53,7 +61,7 @@ export async function POST(request: NextRequest) {
       throw new ValidationError("Mailbox owner and delegate must be different users");
     }
 
-    const gmail = buildGmailClient(tenant, user, GMAIL_DELEGATION_SCOPES);
+    const gmail = buildGmailClient(tenant, user, [...GMAIL_DELEGATION_SCOPES]);
     // Rate-limit retries only: a create is not idempotent, so a 5xx that may
     // have committed must surface rather than be blindly re-sent.
     await withGoogleRetry(
@@ -98,7 +106,7 @@ export async function DELETE(request: NextRequest) {
     const user = requireEmail(body.user, "user");
     const delegate = requireEmail(body.delegate, "delegate");
 
-    const gmail = buildGmailClient(tenant, user, GMAIL_DELEGATION_SCOPES);
+    const gmail = buildGmailClient(tenant, user, [...GMAIL_DELEGATION_SCOPES]);
     await withGoogleRetry(
       () =>
         gmail.users.settings.delegates.delete({

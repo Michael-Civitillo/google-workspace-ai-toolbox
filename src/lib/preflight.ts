@@ -91,7 +91,7 @@ const REQUIRED_SCOPES: ReadonlyArray<{
   {
     scope: "https://www.googleapis.com/auth/gmail.settings.basic",
     label: "Gmail settings (basic)",
-    feature: "Email delegation setup",
+    feature: "Email delegation setup + delegate lookup",
   },
   {
     scope: "https://www.googleapis.com/auth/gmail.readonly",

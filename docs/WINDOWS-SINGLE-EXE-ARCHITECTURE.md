@@ -24,7 +24,7 @@ Everything marked **verified** was executed in a Linux sandbox against this repo
 | Runtime | Node.js 22 LTS, embedded. No Node, npm, or `gws` install required on the target machine |
 | First run | Console window opens, asks the operator to choose the admin password, extracts the app to `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\app\<version>-<hash>\` (about 2,300 files), starts the server, opens the default browser at `http://localhost:3000` |
 | Later runs | Skips extraction (marker file), ready in about a second, opens the browser |
-| State | `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data\` holds `tenants.json`, `sso.json`, `app-config.json`, `audit.log`, `credentials\`, `launcher.json`, `logs\` |
+| State | `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data\` holds `tenants.json`, `sso.json`, `app-config.json`, `delegation-sightings.json`, `audit.log`, `credentials\`, `launcher.json`, `logs\` |
 | Upgrade | Download the new exe, run it. New version extracts to its own folder, data folder is untouched, old app folders are pruned |
 | Uninstall | Delete the exe and `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin` |
 | Stop | Ctrl+C in the console, or close the console window |
