@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert, type Feedback } from "@/components/feedback-alert";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
+import { ReactivateAccountDialog } from "@/components/reactivate-account-dialog";
 import {
   Loader2,
   Search,
@@ -24,6 +25,7 @@ import {
   Inbox,
   AlertTriangle,
   X,
+  UserCheck,
 } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 
@@ -96,7 +98,6 @@ function isJustNow(iso: string, now = Date.now()): boolean {
 export default function DelegationLookup() {
   const { tenant, id: tenantId } = useCurrentTenant();
   const [delegate, setDelegate] = useState("");
-  const [includeSuspended, setIncludeSuspended] = useState(false);
 
   const [scanning, setScanning] = useState(false);
   const [done, setDone] = useState(false);
@@ -114,6 +115,13 @@ export default function DelegationLookup() {
   const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<Match | null>(
     null
   );
+  // A failed removal, shown inside its dialog; `suspendedUser` is set when
+  // the server says the owner is suspended and offers to re-enable it.
+  const [removeError, setRemoveError] = useState<{
+    message: string;
+    suspendedUser?: string;
+  } | null>(null);
+  const [reactivateUser, setReactivateUser] = useState<string | null>(null);
 
   const cancelRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -208,7 +216,6 @@ export default function DelegationLookup() {
       while (true) {
         const qs = new URLSearchParams({ delegate: target });
         if (pageToken) qs.set("pageToken", pageToken);
-        if (includeSuspended) qs.set("includeSuspended", "1");
         const res = await tfetch(
           `/api/admin/delegation-lookup?${qs.toString()}`,
           { signal: ac.signal },
@@ -277,10 +284,11 @@ export default function DelegationLookup() {
     abortRef.current?.abort();
   };
 
-  const removeDelegate = async (m: Match) => {
+  const removeDelegate = async (m: Match, reactivated?: string) => {
     if (!delegateInfo) return;
     setRemoving(m.owner);
     setMessage(null);
+    setRemoveError(null);
     try {
       const res = await tfetch(
         "/api/gws/email-delegation",
@@ -294,22 +302,27 @@ export default function DelegationLookup() {
         tenantId
       );
       const result = await res.json();
-      setConfirmRemoveTarget(null);
       if (result.success) {
+        setConfirmRemoveTarget(null);
         setMatches((prev) => prev.filter((x) => x.owner !== m.owner));
         setMessage({
           type: "success",
-          text: `Removed ${delegateInfo.primaryEmail}'s delegate access to ${m.owner}`,
+          text: reactivated
+            ? `Re-enabled ${reactivated} and removed ${delegateInfo.primaryEmail}'s delegate access to ${m.owner}`
+            : `Removed ${delegateInfo.primaryEmail}'s delegate access to ${m.owner}`,
         });
       } else {
-        setMessage({
-          type: "error",
-          text: result.error || "Failed to remove delegate",
+        // Stay in the dialog: that is where the operator is looking.
+        setRemoveError({
+          message: result.error || "Failed to remove delegate",
+          suspendedUser:
+            typeof result.suspendedUser === "string" && result.suspendedUser
+              ? result.suspendedUser
+              : undefined,
         });
       }
     } catch {
-      setConfirmRemoveTarget(null);
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      setRemoveError({ message: "Failed to connect to the API" });
     } finally {
       setRemoving(null);
     }
@@ -364,7 +377,9 @@ export default function DelegationLookup() {
       } checked`,
     ];
     if (progress.skippedSuspended > 0) {
-      parts.push(`${progress.skippedSuspended.toLocaleString()} suspended skipped`);
+      parts.push(
+        `${progress.skippedSuspended.toLocaleString()} suspended skipped (Google won't read a suspended mailbox)`
+      );
     }
     if (unscanned.length > 0) {
       parts.push(`${unscanned.length.toLocaleString()} unreadable`);
@@ -398,7 +413,9 @@ export default function DelegationLookup() {
             </CardTitle>
             <CardDescription>
               Gmail only lists delegates per mailbox, so this checks every
-              mailbox in the tenant. It runs in pages and can be cancelled.
+              active mailbox in the tenant. It runs in pages and can be
+              cancelled. Suspended accounts are skipped: Google won&apos;t read
+              their settings.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -430,16 +447,6 @@ export default function DelegationLookup() {
                 )}
               </div>
             </div>
-
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={includeSuspended}
-                onChange={(e) => setIncludeSuspended(e.target.checked)}
-                disabled={scanning}
-              />
-              Include suspended mailboxes
-            </label>
 
             {progress && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -541,6 +548,7 @@ export default function DelegationLookup() {
                       aria-label={`Remove delegate access to ${m.owner}`}
                       onClick={() => {
                         setMessage(null);
+                        setRemoveError(null);
                         setConfirmRemoveTarget(m);
                       }}
                       disabled={removing === m.owner || scanning}
@@ -596,14 +604,20 @@ export default function DelegationLookup() {
 
       <ConfirmActionDialog
         open={!!confirmRemoveTarget}
-        onOpenChange={(o) => !removing && !o && setConfirmRemoveTarget(null)}
+        onOpenChange={(o) => {
+          if (removing) return;
+          if (!o) {
+            setRemoveError(null);
+            setConfirmRemoveTarget(null);
+          }
+        }}
         title="Remove mailbox delegate"
         summary={`${delegateInfo?.primaryEmail ?? ""} will lose access to ${
           confirmRemoveTarget?.owner ?? ""
         }'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="medium"
-        confirmLabel="Remove delegate"
+        confirmLabel={removeError ? "Try again" : "Remove delegate"}
         busy={!!removing}
         changes={[
           { label: "Mailbox owner", after: confirmRemoveTarget?.owner ?? "" },
@@ -614,8 +628,35 @@ export default function DelegationLookup() {
             emphasis: true,
           },
         ]}
+        error={removeError?.message}
+        errorActions={
+          removeError?.suspendedUser ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setReactivateUser(removeError.suspendedUser as string)}
+            >
+              <UserCheck className="h-3.5 w-3.5" />
+              Re-enable {removeError.suspendedUser}…
+            </Button>
+          ) : null
+        }
         onConfirm={() => {
           if (confirmRemoveTarget) void removeDelegate(confirmRemoveTarget);
+        }}
+      />
+
+      <ReactivateAccountDialog
+        user={reactivateUser}
+        onOpenChange={(o) => {
+          if (!o) setReactivateUser(null);
+        }}
+        thenLabel={`Remove ${delegateInfo?.primaryEmail ?? ""} as a delegate from ${
+          confirmRemoveTarget?.owner ?? ""
+        }`}
+        onReactivated={async (reactivated) => {
+          setReactivateUser(null);
+          if (confirmRemoveTarget) await removeDelegate(confirmRemoveTarget, reactivated);
         }}
       />
     </>

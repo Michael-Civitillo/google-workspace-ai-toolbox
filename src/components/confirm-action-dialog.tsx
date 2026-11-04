@@ -12,7 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AlertTriangle, Loader2, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Loader2, ShieldAlert, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface DiffRow {
@@ -57,6 +57,14 @@ export interface ConfirmActionDialogProps {
   confirmLabel?: string;
   busy?: boolean;
   onConfirm: () => void | Promise<void>;
+  /**
+   * Why the last confirm attempt failed, shown inside the dialog so the
+   * operator sees it where they are looking, not on the page behind the
+   * overlay. The dialog stays open; they can fix things and retry, or cancel.
+   */
+  error?: ReactNode;
+  /** Buttons offered next to the error, e.g. a way to clear the blocker. */
+  errorActions?: ReactNode;
 }
 
 /**
@@ -84,6 +92,8 @@ export function ConfirmActionDialog({
   confirmLabel,
   busy,
   onConfirm,
+  error,
+  errorActions,
 }: ConfirmActionDialogProps) {
   const [typed, setTyped] = useState("");
   const [wasOpen, setWasOpen] = useState(open);
@@ -178,6 +188,21 @@ export function ConfirmActionDialog({
           {warnings && (
             <div className="rounded-md border border-warning/30 bg-warning/8 p-3 text-xs text-warning-fg">
               {warnings}
+            </div>
+          )}
+
+          {error && (
+            <div
+              role="alert"
+              className="rounded-md border border-danger/25 bg-danger/8 p-3 text-xs text-danger-fg space-y-2"
+            >
+              <div className="flex items-start gap-2">
+                <XCircle className="h-4 w-4 shrink-0 mt-px" />
+                <div className="min-w-0 break-words">{error}</div>
+              </div>
+              {errorActions && (
+                <div className="flex flex-wrap gap-2 pl-6">{errorActions}</div>
+              )}
             </div>
           )}
 

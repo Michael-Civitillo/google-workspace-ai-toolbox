@@ -590,7 +590,11 @@ export interface DelegationLookupPage {
   sightings: DelegationSighting[];
   /** Mailboxes whose delegate list was read successfully. */
   scannedUsers: number;
-  /** Suspended accounts on this page that were not scanned. */
+  /**
+   * Suspended accounts on this page. Google will not mint an impersonation
+   * token for a suspended account, so their delegate lists cannot be read
+   * and they are skipped rather than reported as errors.
+   */
   skippedSuspended: number;
   /** Mailboxes Google refused to list (no Gmail licence, etc.). */
   unscanned: Array<{ owner: string; error: string }>;
@@ -619,6 +623,10 @@ const DELEGATION_LOOKUP_ERROR_CHARS = 200;
  * `delegateEmails` should hold the delegate's primary address and aliases,
  * lower-cased: Gmail stores whichever address the grant named.
  *
+ * Suspended accounts are always skipped: Google refuses to impersonate one,
+ * so asking would only turn every suspended user into an error row. The
+ * count comes back as `skippedSuspended` so the operator knows.
+ *
  * Per-mailbox failures never fail the page. A user without a Gmail licence
  * (or whose mailbox is otherwise unreadable) lands in `unscanned` with
  * Google's message so the operator knows the answer is incomplete for them.
@@ -629,7 +637,6 @@ export async function findMailboxesDelegatedTo(
     delegateEmails: ReadonlySet<string>;
     pageToken?: string;
     pageSize?: number;
-    includeSuspended?: boolean;
     signal?: AbortSignal;
   }
 ): Promise<DelegationLookupPage> {
@@ -651,9 +658,7 @@ export async function findMailboxesDelegatedTo(
     pageSize,
   });
 
-  const targets = opts.includeSuspended
-    ? page.users
-    : page.users.filter((u) => !u.suspended);
+  const targets = page.users.filter((u) => !u.suspended);
   const skippedSuspended = page.users.length - targets.length;
 
   const matches: DelegatedMailboxMatch[] = [];
@@ -904,6 +909,44 @@ export async function suspendUser(
       ),
     { retryServerErrors: true }
   );
+}
+
+/**
+ * Re-enable a suspended user. The mirror of suspendUser, used when an
+ * operator needs to act on a mailbox Google refuses to impersonate (add or
+ * remove a delegate, say) and chooses to bring the account back to do it.
+ * Reads the account back from the update response so a silent no-op surfaces.
+ */
+export async function unsuspendUser(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<{ primaryEmail: string; suspended: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  const { client } = getAdminClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.users.update(
+        {
+          userKey: userEmail,
+          requestBody: { suspended: false },
+          fields: "primaryEmail, suspended",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  const suspended = res.data.suspended ?? false;
+  if (suspended) {
+    throw new Error(
+      `Google accepted the update but still reports ${userEmail} as suspended`
+    );
+  }
+  return {
+    primaryEmail: (res.data.primaryEmail || userEmail).toLowerCase(),
+    suspended,
+  };
 }
 
 /**

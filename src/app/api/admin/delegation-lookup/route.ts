@@ -13,12 +13,14 @@ import { errorResponse } from "@/lib/api-errors";
  * Reverse delegation lookup: every mailbox a user has delegate access to.
  *
  * GET /api/admin/delegation-lookup?delegate=sam@yourdomain.com
- *       [&pageToken=...][&pageSize=100][&includeSuspended=1]
+ *       [&pageToken=...][&pageSize=100]
  *
  * Read-only against Google. Gmail only lists delegates per mailbox, so this
  * walks one page of the tenant's users per call and reports which of them
  * name the delegate; the client chains calls on `nextPageToken` until it is
- * null, showing progress and allowing cancellation in between.
+ * null, showing progress and allowing cancellation in between. Suspended
+ * accounts are counted and skipped — Google will not impersonate them, so
+ * their delegate lists cannot be read.
  *
  * Side effect, local only: every delegation observed on the page is recorded
  * as a first-seen sighting (see delegation-sightings.ts) so the history
@@ -48,10 +50,6 @@ export async function GET(request: NextRequest) {
       }
       pageSize = Math.min(200, Math.max(1, n));
     }
-
-    const includeSuspendedRaw = params.get("includeSuspended");
-    const includeSuspended =
-      includeSuspendedRaw === "1" || includeSuspendedRaw === "true";
 
     // Resolve the delegate first: a typo should come back as "no such user",
     // not as a full tenant scan that finds nothing. The alias set matters
@@ -84,7 +82,6 @@ export async function GET(request: NextRequest) {
       delegateEmails,
       pageToken,
       pageSize,
-      includeSuspended,
       signal: request.signal,
     });
 

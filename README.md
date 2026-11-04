@@ -19,8 +19,8 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### Workspace operations
 
-- 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama.
-- 🔎 **Delegate Lookup** — The reverse question: which mailboxes can *this person* read, and since when? Gmail only lists delegates per mailbox, so the lookup walks the tenant (paged, cancellable, suspended accounts optional) and shows every match with a one-click remove. Grants made through Open Admin show their exact date and operator from the audit log; everything else shows how long Open Admin has known about it, because Google doesn't record when a delegate was added.
+- 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama. If Google refuses because the owner (or the delegate) is suspended, the dialog says so and offers to re-enable the account and retry, behind a typed confirmation.
+- 🔎 **Delegate Lookup** — The reverse question: which mailboxes can *this person* read, and since when? Gmail only lists delegates per mailbox, so the lookup walks every active mailbox in the tenant (paged, cancellable; suspended accounts are counted but skipped, since Google won't read their settings) and shows every match with a one-click remove. Grants made through Open Admin show their exact date and operator from the audit log; everything else shows how long Open Admin has known about it, because Google doesn't record when a delegate was added.
 - 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. External-domain transfers require explicit confirmation.
