@@ -92,3 +92,28 @@ export function isPortFree(host: string, port: number): Promise<boolean> {
     server.listen({ host, port, exclusive: true });
   });
 }
+
+/** How many ports above a busy one are tried before giving up. */
+export const PORT_FALLBACK_SPAN = 20;
+
+/**
+ * The first free port in `first .. first + span - 1`, or null when every one
+ * is taken.
+ *
+ * Someone who double-clicked the executable has no way to act on "start with
+ * --port 3001": there is no command line in front of them. When the port they
+ * would normally get is busy, the launcher takes the next free one for that
+ * run instead. `isFree` is injectable for tests.
+ */
+export async function findFreePort(
+  host: string,
+  first: number,
+  span: number = PORT_FALLBACK_SPAN,
+  isFree: (host: string, port: number) => Promise<boolean> = isPortFree
+): Promise<number | null> {
+  const last = Math.min(first + span - 1, 65535);
+  for (let port = first; port <= last; port++) {
+    if (await isFree(host, port)) return port;
+  }
+  return null;
+}

@@ -43,9 +43,16 @@ describe("isPortableLayout", () => {
     assert.equal(isPortableLayout("/opt/app", exists), true);
   });
 
-  it("is on when a data folder sits beside the executable", () => {
-    const exists = (p: string) => p === path.join("/opt/app", "data");
+  it("is on when a data folder from an earlier portable run sits beside it", () => {
+    const exists = (p: string) => p === path.join("/opt/app", "data", "launcher.json");
     assert.equal(isPortableLayout("/opt/app", exists), true);
+  });
+
+  it("ignores a data folder that isn't ours", () => {
+    // Downloads and the Desktop are where this gets run from, and a folder
+    // called "data" there is far more likely to be someone else's.
+    const exists = (p: string) => p === path.join("/downloads", "data");
+    assert.equal(isPortableLayout("/downloads", exists), false);
   });
 });
 

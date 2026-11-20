@@ -37,6 +37,11 @@ export function initLogFile(dir: string): void {
   }
 }
 
+/** Where the log is being written, or null when it could not be opened. */
+export function logFile(): string | null {
+  return logFilePath;
+}
+
 function toFile(level: string, message: string): void {
   if (!logFilePath) return;
   try {

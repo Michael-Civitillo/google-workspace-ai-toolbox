@@ -128,7 +128,8 @@ export function usage(exeName: string): string {
 
 Usage: ${exeName} [options]
 
-  --port <n>           HTTP port (default 3000, remembered after first use)
+  --port <n>           HTTP port (default 3000, remembered after first use;
+                       without this flag a busy port moves to the next free one)
   --host <addr>        bind address (default 127.0.0.1 — this machine only)
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
