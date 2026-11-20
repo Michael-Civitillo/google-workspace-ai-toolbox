@@ -857,5 +857,25 @@ that built absolute URLs from the internal request, a `Dockerfile`, a Cloudflare
 Tunnel + Access deployment guide with a Compose file, and Linux and macOS
 binaries published from the same pipeline.
 
+**Built for the first release, from the point of view of someone who
+double-clicks and has no command line:**
+
+- *A busy port no longer ends the run.* §8 had the launcher exit with "start
+  with `--port 3001`", advice a double-click cannot follow. Without `--port`,
+  the launcher now takes the next free port for that run (not saved); an
+  explicit `--port` that is busy is still refused.
+- *A failed start keeps the window open on Windows.* The console a double-click
+  creates closes with the process, so every error message was unreadable in
+  exactly the case it was written for. The launcher waits for a key when it
+  exits non-zero with no arguments on an interactive console.
+- *A bare `data` folder no longer switches on portable mode* (§8.1 said it
+  would). The executable is run from Downloads or the Desktop, where an
+  unrelated `data` folder is common, and it would have received the password
+  file, tenants and keys. `portable.txt` is the switch; a `data` folder counts
+  only if it holds a `launcher.json`.
+- *Publishing needs no git.* The workflow takes a **Publish** tick-box on a
+  manual run and creates the tag itself, and checks first that the tag and
+  `package.json` agree.
+
 **Not built, still open:** a hashed admin password, `HTTPS_PROXY` for `fetch`,
-a tray or windowless mode, auto-update, Intel macOS binaries.
+a tray or windowless mode, auto-update, Intel macOS binaries, code signing.

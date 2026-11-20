@@ -2,7 +2,14 @@ name: Release builds
 
 # Builds the single-file executables for Windows, macOS and Linux and smoke-tests
 # each one on its own OS; builds the Docker image and probes a running container;
-# publishes the executables when a v* tag is pushed.
+# then publishes the executables as a GitHub release.
+#
+# Two ways to publish, both of which release the version in package.json:
+#   - Actions tab -> Release builds -> Run workflow, on the default branch, with
+#     "Publish" ticked. No git needed; the v<version> tag is created for you.
+#   - Push a v<version> tag.
+# Everything else (pull requests, a run without the box ticked) builds and tests
+# without publishing.
 
 on:
   push:
@@ -20,6 +27,11 @@ on:
       - "deploy/**"
       - ".github/workflows/release.yml"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish this build as a release, tagged v + the version in package.json"
+        type: boolean
+        default: false
 
 # Least privilege by default: every job gets a read-only GITHUB_TOKEN. The
 # publish job re-grants `contents: write` for itself, so a compromised build
@@ -38,12 +50,42 @@ jobs:
   linux:
     name: Linux x64 (lint, unit tests, build, smoke test)
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      # The executables carry the package.json version (the Windows one in its
+      # file properties), so that is the only version a release can truthfully
+      # be called. Checked here, in the first job, so a mismatch costs seconds
+      # rather than a full build on three operating systems.
+      - name: Work out the release tag
+        id: version
+        env:
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag="v$(node -p "require('./package.json').version")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "package.json says this is $tag"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME was pushed, but package.json is $tag. Bump \"version\" in package.json to match before tagging."
+            exit 1
+          fi
+          if [ "$PUBLISH" = "true" ]; then
+            if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+              echo "::error::Releases are published from $DEFAULT_BRANCH. This run is on $GITHUB_REF_NAME; run it again there, or leave Publish unticked to only build and test."
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+              echo "::error::$tag has already been released. Bump \"version\" in package.json, merge that, and run this again."
+              exit 1
+            fi
+          fi
       - run: npm ci
       - run: npm run lint
       - run: npm run test:launcher
@@ -157,7 +199,7 @@ jobs:
 
   release:
     name: Publish the release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs: [linux, macos, windows, docker]
     runs-on: ubuntu-latest
     permissions:
@@ -168,7 +210,39 @@ jobs:
           path: dist
           merge-multiple: true
       - run: ls -la dist
+      # The people this release is for are Workspace admins, not developers:
+      # the page opens with what to click, and the generated list of merged
+      # changes follows it.
+      - name: Write the download instructions
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'EOF'
+          ## Windows: download, double-click, done
+
+          1. Download **OpenAdmin-win-x64.exe** from **Assets** at the bottom of this page.
+          2. Double-click it. There is nothing to install, and you don't need administrator rights.
+          3. If Windows says **"Windows protected your PC"**, click **More info**, then **Run anyway**. The file isn't code-signed yet, so Windows doesn't recognise it.
+          4. A black window opens and asks you to choose a password (12 characters or more). Type it, press Enter, and type it once more to confirm.
+          5. Your browser opens. Sign in with that password.
+
+          Leave the black window open while you work, and close it when you're finished. Next time, double-click the same file: your settings are kept.
+
+          EOF
+          {
+            echo "**macOS and Linux:** \`open-admin-macos-arm64\` (Apple silicon) and \`open-admin-linux-x64\` are in the same list. Each needs two commands in a terminal, shown in the [README](https://github.com/$GITHUB_REPOSITORY#single-file-download-and-run)."
+            echo
+            echo "**Checking the download:** the SHA-256 of \`OpenAdmin-win-x64.exe\` is \`$(cut -d' ' -f1 dist/OpenAdmin-win-x64.exe.sha256)\`. Every file has a \`.sha256\` beside it."
+          } >> notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          # On a tag push this is the tag that was pushed (checked against
+          # package.json in the first job). On a run from the Actions tab the
+          # tag doesn't exist yet and is created at the commit that was built.
+          tag_name: ${{ needs.linux.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Open Admin ${{ needs.linux.outputs.tag }}
           files: dist/*
+          fail_on_unmatched_files: true
+          body_path: notes.md
           generate_release_notes: true

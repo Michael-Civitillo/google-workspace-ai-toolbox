@@ -10,9 +10,10 @@ import os from "node:os";
  *
  * Two roots are possible. Normally <root> is the per-user application-data
  * folder, so the exe can live in Downloads and be replaced freely. In
- * "portable" mode — a `portable.txt` file or an existing `data` folder beside
- * the executable — <root> is the executable's own folder, which is what makes
- * a USB stick or a shared network folder work.
+ * "portable" mode — a `portable.txt` file beside the executable, or a `data`
+ * folder there that an earlier portable run filled — <root> is the
+ * executable's own folder, which is what makes a USB stick or a shared network
+ * folder work.
  */
 
 export const APP_FOLDER_NAME = "GoogleWorkspaceOpenAdmin";
@@ -55,12 +56,25 @@ export function defaultRoot(
   return path.join(xdg, APP_FOLDER_NAME);
 }
 
-/** True when the executable's own folder should hold app + data. */
+/**
+ * True when the executable's own folder should hold app + data.
+ *
+ * `portable.txt` is the switch. A `data` folder counts only when it holds a
+ * `launcher.json`, which every run writes on its first start: that is what
+ * lets someone copy the executable and its `data` folder to another machine
+ * and carry on. A bare `data` folder proves nothing — most people run this
+ * from Downloads or the Desktop, where a folder with that name is likely to be
+ * somebody else's, and taking it for ours would put the password file, tenants
+ * and service-account keys in it.
+ */
 export function isPortableLayout(
   exeDir: string,
   exists: (p: string) => boolean
 ): boolean {
-  return exists(path.join(exeDir, "portable.txt")) || exists(path.join(exeDir, "data"));
+  return (
+    exists(path.join(exeDir, "portable.txt")) ||
+    exists(path.join(exeDir, "data", "launcher.json"))
+  );
 }
 
 export function resolvePaths(input: PathInputs): ResolvedPaths {

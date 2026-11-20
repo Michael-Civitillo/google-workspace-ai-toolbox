@@ -6,8 +6,8 @@
  * that packaging can plausibly break: the auth gate, the CSRF host rule (own
  * host, loopback spellings, and an operator-allow-listed public origin as a
  * reverse proxy would present), the static assets Next expects you to copy
- * yourself, where state is written, the warm restart, and the "already
- * running" shortcut.
+ * yourself, where state is written, what happens when the port is taken, the
+ * warm restart, and the "already running" shortcut.
  *
  * Usage: node packaging/smoke.mjs [path-to-binary]
  */
@@ -81,21 +81,33 @@ async function waitForReady(child, timeoutMs) {
   throw new Error(`server was not ready within ${timeoutMs} ms`);
 }
 
-function start(root, extraArgs = []) {
-  const child = spawn(
-    binary,
-    ["--no-browser", "--port", String(PORT), "--password", PASSWORD, "--root", root, ...extraArgs],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      // The launcher passes its environment through to the embedded server;
-      // this is how a tunnel or proxy deployment names its public URL.
-      env: { ...process.env, APP_ALLOWED_ORIGINS: PUBLIC_ORIGIN },
-    }
-  );
+function launch(args) {
+  const child = spawn(binary, ["--no-browser", ...args], {
+    stdio: ["ignore", "pipe", "pipe"],
+    // The launcher passes its environment through to the embedded server;
+    // this is how a tunnel or proxy deployment names its public URL.
+    env: { ...process.env, APP_ALLOWED_ORIGINS: PUBLIC_ORIGIN },
+  });
   let output = "";
   child.stdout.on("data", (b) => (output += b.toString()));
   child.stderr.on("data", (b) => (output += b.toString()));
   return { child, output: () => output };
+}
+
+function start(root, extraArgs = []) {
+  return launch(["--port", String(PORT), "--password", PASSWORD, "--root", root, ...extraArgs]);
+}
+
+/** Wait for a launcher to announce the address it ended up on. */
+async function waitForReadyUrl(handle, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const url = handle.output().match(/Ready: (http:\/\/localhost:\d+)/)?.[1];
+    if (url) return url;
+    if (handle.child.exitCode !== null) return null;
+    await sleep(250);
+  }
+  return null;
 }
 
 async function stop(child, timeoutMs = 10_000) {
@@ -141,6 +153,7 @@ async function main() {
   const first = start(root);
   let secondHandle = null;
   let thirdHandle = null;
+  let fallbackHandle = null;
 
   try {
     const coldStart = Date.now();
@@ -253,6 +266,66 @@ async function main() {
       fs.existsSync(path.join(root, "data", "launcher.lock"))
     );
 
+    // The first instance is still holding PORT, which makes it the "other
+    // program" for two launches that keep their state somewhere else.
+    console.log("\nA port that is already taken");
+    const refused = launch([
+      "--port", String(PORT),
+      "--password", PASSWORD,
+      "--root", root,
+      "--data-dir", path.join(root, "data-refused"),
+    ]);
+    const refusedExit = await new Promise((resolve) => refused.child.once("exit", resolve));
+    check(
+      "a busy port asked for with --port is refused",
+      refusedExit === 3 && /already in use/i.test(refused.output()),
+      `exit ${refusedExit}`
+    );
+
+    // What a double-click looks like: no --port, and the remembered port busy.
+    // Same --root so the unpacked application is reused; its own data folder,
+    // seeded the way a previous run would have left it.
+    const fallbackData = path.join(root, "data-fallback");
+    fs.mkdirSync(fallbackData, { recursive: true });
+    fs.writeFileSync(
+      path.join(fallbackData, "launcher.json"),
+      JSON.stringify({
+        version: 1,
+        port: PORT,
+        password: PASSWORD,
+        sessionSecret: "smoke".repeat(13),
+        openBrowser: false,
+      })
+    );
+    fallbackHandle = launch(["--root", root, "--data-dir", fallbackData]);
+    const fallbackUrl = await waitForReadyUrl(fallbackHandle, 60_000);
+    check(
+      "without --port, a busy port moves to the next free one",
+      fallbackUrl !== null && fallbackUrl !== BASE,
+      fallbackHandle.output().trim().split("\n").pop()
+    );
+    if (fallbackUrl) {
+      check(
+        "the launcher says which port it moved to",
+        /in use by another program, so this run uses port \d+/.test(fallbackHandle.output())
+      );
+      const moved = await fetch(`${fallbackUrl}/login`, { redirect: "manual" });
+      check("the app answers on the port it moved to", moved.status === 200);
+      const movedLogin = await fetch(`${fallbackUrl}/api/auth/login`, {
+        method: "POST",
+        redirect: "manual",
+        headers: { "content-type": "application/json", origin: fallbackUrl },
+        body: JSON.stringify({ password: PASSWORD }),
+      });
+      check("sign-in works on the port it moved to", movedLogin.status === 200);
+      const saved = JSON.parse(
+        fs.readFileSync(path.join(fallbackData, "launcher.json"), "utf-8")
+      );
+      check("the move is for this run only, not remembered", saved.port === PORT);
+    }
+    await stop(fallbackHandle.child, 5000);
+    fallbackHandle = null;
+
     console.log("\nSecond instance");
     thirdHandle = start(root);
     const secondExit = await new Promise((resolve) => thirdHandle.child.once("exit", resolve));
@@ -292,6 +365,7 @@ async function main() {
     );
     check("the saved password still works", reLogin.status === 200);
   } finally {
+    if (fallbackHandle) await stop(fallbackHandle.child, 5000);
     if (thirdHandle) await stop(thirdHandle.child, 5000);
     if (secondHandle) await stop(secondHandle.child, 5000);
     await stop(first.child, 5000);

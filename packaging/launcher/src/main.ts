@@ -21,8 +21,10 @@ import {
   type ExtractResult,
 } from "./extract.ts";
 import {
+  findFreePort,
   isPortFree,
   isProcessAlive,
+  PORT_FALLBACK_SPAN,
   probeHttp,
   readLock,
   removeLock,
@@ -38,7 +40,8 @@ import {
   startEmbeddedServer,
   waitUntilReady,
 } from "./server.ts";
-import { error, info, initLogFile, plain, warn } from "./log.ts";
+import { error, info, initLogFile, logFile, plain, warn } from "./log.ts";
+import { shouldHoldWindow, waitForKey } from "./window.ts";
 
 /** Replaced at build time by packaging/build-launcher.mjs. */
 declare const __APP_VERSION__: string;
@@ -233,16 +236,45 @@ async function run(userArgs: string[]): Promise<number | null> {
 
   // Before anything that could ask a question: nobody should be made to choose
   // a password only to be told afterwards that the port was taken.
-  const port = args.port ?? stored.port ?? DEFAULT_PORT;
-  if (!(await isPortFree(host, port))) {
-    error(
-      `Port ${port} on ${host} is already in use by another program. ` +
-        `Start with --port 3001 (or any free port) instead.`
+  //
+  // `preferredPort` is the one that is remembered; `port` is the one this run
+  // listens on. They differ only when the preferred port is busy and nobody
+  // asked for it by name: a double-click has no command line to add --port to,
+  // so that run moves to the next free port rather than refusing to start.
+  // The move is not saved, so the usual address comes back once it is free.
+  const preferredPort = args.port ?? stored.port ?? DEFAULT_PORT;
+  let port = preferredPort;
+  if (!(await isPortFree(host, preferredPort))) {
+    if (args.port !== null) {
+      error(
+        `Port ${preferredPort} on ${host} is already in use by another program. ` +
+          `Pick a different --port, or leave the flag off to use the next free one.`
+      );
+      return EXIT_PORT_BUSY;
+    }
+    const fallback = await findFreePort(host, preferredPort + 1);
+    if (fallback === null) {
+      error(
+        `Ports ${preferredPort} to ${preferredPort + PORT_FALLBACK_SPAN} on ${host} are all ` +
+          `in use by other programs. Close one of them and start again.`
+      );
+      return EXIT_PORT_BUSY;
+    }
+    warn(
+      `Port ${preferredPort} is in use by another program, so this run uses ` +
+        `port ${fallback} instead.`
     );
-    return EXIT_PORT_BUSY;
+    if (fs.existsSync(process.env.SSO_CONFIG_PATH ?? path.join(paths.dataDir, "sso.json"))) {
+      warn(
+        `Single sign-on is set up for the usual address and will not work on ` +
+          `port ${fallback}: sign in with the password, or free port ` +
+          `${preferredPort} and start again.`
+      );
+    }
+    port = fallback;
   }
 
-  const { config, dirty } = await resolveSettings(args, stored, port);
+  const { config, dirty } = await resolveSettings(args, stored, preferredPort);
   if (dirty) {
     try {
       writeConfigFile(configFile, config);
@@ -288,17 +320,17 @@ async function run(userArgs: string[]): Promise<number | null> {
     appDir: extractedAppDir,
     dataDir: paths.dataDir,
     host,
-    port: config.port,
+    port,
     password: config.password,
     sessionSecret: config.sessionSecret,
   });
 
-  const url = browsableUrl(host, config.port);
+  const url = browsableUrl(host, port);
   info(`Starting the server on ${url} ...`);
   startEmbeddedServer(extractedAppDir);
 
   try {
-    await waitUntilReady(host, config.port, READY_TIMEOUT_MS);
+    await waitUntilReady(host, port, READY_TIMEOUT_MS);
   } catch (e) {
     error(`The server didn't finish starting: ${describe(e)}`);
     return EXIT_NOT_READY;
@@ -306,7 +338,7 @@ async function run(userArgs: string[]): Promise<number | null> {
 
   writeLock(lockFile, {
     pid: process.pid,
-    port: config.port,
+    port,
     host,
     startedAt: new Date().toISOString(),
   });
@@ -316,7 +348,8 @@ async function run(userArgs: string[]): Promise<number | null> {
 
   plain("");
   info(`Ready: ${url}`);
-  plain("Sign in with the password you set. Press Ctrl+C to stop.");
+  plain("Sign in with the password you set.");
+  plain("Keep this window open while you work. Closing it, or Ctrl+C, stops Open Admin.");
   plain("");
 
   if (config.openBrowser && !args.noBrowser) openBrowser(url);
@@ -327,6 +360,32 @@ async function run(userArgs: string[]): Promise<number | null> {
 
 function describe(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Leave with `code`. When the start failed and this looks like a double-click
+ * on Windows, the console window is about to vanish along with the only copy
+ * of the explanation, so wait for a key first (see window.ts).
+ */
+async function finish(code: number, userArgCount: number): Promise<never> {
+  const hold = shouldHoldWindow({
+    platform: process.platform,
+    packaged: isSea(),
+    stdinIsTTY: Boolean(process.stdin.isTTY),
+    stdoutIsTTY: Boolean(process.stdout.isTTY),
+    userArgCount,
+    exitCode: code,
+  });
+  if (hold) {
+    const log = logFile();
+    plain("");
+    plain(`${APP_TITLE} could not start. The reason is shown above.`);
+    if (log) plain(`A copy is saved in ${log}`);
+    plain("");
+    plain("Press any key to close this window.");
+    await waitForKey();
+  }
+  process.exit(code);
 }
 
 /**
@@ -341,10 +400,11 @@ const userArgs = process.argv.slice(2);
 if (!maybeRunAsNode(userArgs)) {
   run(userArgs)
     .then((code) => {
-      if (code !== null) process.exit(code);
+      // null: the server is up and owns the process from here.
+      if (code !== null) return finish(code, userArgs.length);
     })
     .catch((e: unknown) => {
       error(`Fatal: ${describe(e)}`);
-      process.exit(1);
+      return finish(1, userArgs.length);
     });
 }

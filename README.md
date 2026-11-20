@@ -13,6 +13,8 @@ For years, [GAM](https://github.com/GAM-team/GAM) was *the* tool every Workspace
 
 This project takes `gws` and wraps it in a clean web UI with AI superpowers. Instead of memorizing command flags or digging through the Admin Console, just type what you need in plain English, paste a bulk list, or click through the forms. It's GAM for the AI era.
 
+> **Just want to use it on Windows?** [Download `OpenAdmin-win-x64.exe`](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest/download/OpenAdmin-win-x64.exe) and double-click it. Nothing to install, no command line. [Step by step ↓](#single-file-download-and-run)
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 ## ✨ What it does
@@ -115,7 +117,14 @@ Your configuration moves between all of them: **App Settings → Configuration b
 
 Grab the file for your OS from the [latest release](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest). Each has a `.sha256` next to it if you want to verify the download.
 
-**Windows** — double-click `OpenAdmin-win-x64.exe`. Windows may show "Windows protected your PC" for a new download: click **More info → Run anyway**.
+**Windows**
+
+1. Download [`OpenAdmin-win-x64.exe`](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest/download/OpenAdmin-win-x64.exe). If your browser holds it back as "not commonly downloaded", choose **Keep**.
+2. Double-click it. Nothing is installed and you don't need administrator rights. If Windows shows "Windows protected your PC", click **More info → Run anyway** — the file isn't code-signed yet, so Windows doesn't recognise it.
+3. A console window opens and asks you to choose a password: 12 characters or more, typed twice.
+4. Your browser opens the sign-in page. Sign in with that password.
+
+Keep the console window open while you work — closing it stops the app. Next time, double-click the same file; your settings are still there.
 
 **macOS** (Apple silicon) — in Terminal:
 
@@ -148,13 +157,20 @@ Everything is inside that one file — the runtime, the app, the lot. No Node.js
 
 **Upgrading:** download the new file and run it — your data is untouched and the old copy of the app is cleaned up. **Uninstalling:** delete the file and the `GoogleWorkspaceOpenAdmin` folder. **Stopping:** Ctrl+C in the console, or close it.
 
+**If something's off**
+
+- **Forgot the password?** Delete `launcher.json` from the data folder and start again; you'll be asked to choose a new one. Tenants, keys and the audit log aren't touched. (On Windows, paste `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data` into the File Explorer address bar to get there. The console window also prints the folder when it starts.)
+- **Port 3000 already in use?** The app moves to the next free port for that run and opens your browser there. Single sign-on, if you set it up, is tied to the usual port: sign in with the password that time, or close whatever has the port.
+- **It says it could not start?** On Windows the window stays open so you can read why; the same text is saved in `logs\launcher.log` in the data folder.
+
 <details>
 <summary>Command-line options and extras</summary>
 
 ```
 open-admin [options]
 
-  --port <n>           HTTP port (default 3000, remembered after first use)
+  --port <n>           HTTP port (default 3000, remembered after first use;
+                       without this flag a busy port moves to the next free one)
   --host <addr>        bind address (default 127.0.0.1 — this machine only)
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
