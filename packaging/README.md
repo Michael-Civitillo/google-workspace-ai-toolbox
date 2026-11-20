@@ -79,6 +79,25 @@ others: argv is readable by every other user through `ps` or Task Manager, and
 shells keep it in history. The launcher says so on stderr when you pass it, and
 deliberately not into `launcher.log`.
 
+Two behaviours exist for the person who double-clicked the file and has no
+command line to fall back on:
+
+- **A busy port moves to the next free one**, for that run only — the remembered
+  port isn't changed, so the usual address is back once it's free. Asking for a
+  port by name with `--port` is different: that is refused if it's taken (exit
+  code 3), because whoever typed it wants that port or an error.
+- **On Windows, a failed start waits for a key.** A double-clicked console
+  window closes the moment the process exits, taking the explanation with it.
+  "No arguments on an interactive console" is the stand-in for "double-clicked"
+  (`launcher/src/window.ts`); anything scripted passes arguments or has no
+  terminal, and never waits.
+
+**Portable mode** — everything beside the executable instead of in the user
+profile — is switched on by a `portable.txt` next to it. A `data` folder there
+counts too, but only if it holds a `launcher.json` from an earlier portable run.
+A bare `data` folder is ignored: the file is usually run from Downloads or the
+Desktop, where a folder with that name probably belongs to something else.
+
 ## Three things that will bite you
 
 **1. The bind address decides which URL works.** In a standalone build Next
@@ -110,7 +129,7 @@ against a real single-executable build. Don't "fix" `slice(2)` to `slice(1)`.
 | `build-bin.sh` | Linux/macOS equivalent, without the resource stamping |
 | `stamp-exe.mjs` | Icon and version resource, via `resedit` (pure JS, no native tool) |
 | `make-icon.mjs` | `public/logo.svg` → `assets/icon.ico` |
-| `smoke.mjs` | End-to-end test of a built binary (27 checks, one Windows-only skip) |
+| `smoke.mjs` | End-to-end test of a built binary (33 checks, one Windows-only skip) |
 | `launcher/src/` | The launcher itself — see below |
 | `launcher/test/` | `node --test` suites for the pure parts |
 
@@ -121,10 +140,11 @@ against a real single-executable build. Don't "fix" `slice(2)` to `slice(1)`.
 | `paths.ts` | Application-data vs portable layout, per-version app directory |
 | `config.ts` | `launcher.json`, `launcher.env`, the password prompt |
 | `extract.ts` | Zip extraction with a completion marker, retries and pruning |
-| `instance.ts` | Lock file, liveness probe, port availability |
+| `instance.ts` | Lock file, liveness probe, port availability and fallback |
 | `server.ts` | Environment contract, in-process start, readiness, shutdown |
 | `payload.ts` | Reading the archive out of the executable |
 | `browser.ts` | Opening the default browser |
+| `window.ts` | Keeping a double-clicked Windows console open when a start fails |
 | `log.ts` | Console plus a rotating file in the data folder |
 
 ## Code signing
@@ -148,17 +168,31 @@ release workflow.
 
 ## Releasing
 
-Bump `version` in `package.json`, commit, then push a tag:
+A release is always the version in `package.json` — that is what the executables
+are stamped with — so bump `version` there first and get it onto the default
+branch. Then either:
 
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
+- **From the browser:** Actions → *Release builds* → *Run workflow*, leave the
+  branch on `main`, tick **Publish**, run. The `v<version>` tag is created for
+  you at the commit that was built.
+- **From git:** `git tag v0.2.0 && git push origin v0.2.0`.
 
 `.github/workflows/release.yml` runs the Linux job first (lint, launcher unit
 tests, build, smoke test), then the macOS and Windows builds and a Docker image
 build in parallel — each executable smoke-tested on its own OS, the image probed
 as a running container — and finally publishes every binary with its `.sha256`
-to the release. `workflow_dispatch` runs the same pipeline without publishing.
+to the release, under download instructions written for the admins who will
+read that page.
+
+The first job refuses early, before anything is built, when the release could
+not be right: a pushed tag that doesn't match `package.json`, a Publish run from
+a branch other than the default one, or a version that already has a tag.
+Running the workflow with **Publish** unticked builds and tests everything and
+publishes nothing, which is how to try a branch on real Windows and macOS.
+
+The download link in the top-level README points at
+`releases/latest/download/OpenAdmin-win-x64.exe`, which only works because the
+file name carries no version. Keep it that way.
 
 Design rationale, alternatives considered, and the measurements behind these
 choices: [`docs/WINDOWS-SINGLE-EXE-ARCHITECTURE.md`](../docs/WINDOWS-SINGLE-EXE-ARCHITECTURE.md).
