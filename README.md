@@ -30,6 +30,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
 - 💾 **Mailbox Export** — Back up a user's entire Gmail mailbox to a portable file. Choose **NDJSON** for a full-fidelity backup (raw MIME with labels and dates preserved, restorable via Mailbox Import) or **mbox** for a standard mailbox file you can open in Thunderbird, Apple Mail, or convert to PST. Walks the mailbox page by page, streams straight to disk, cancellable mid-run (you keep what's gathered).
 - 📥 **Mailbox Import** — Restore a mailbox export into another user. Recreates the source's labels by name, then inserts every message via IMAP-style append (no re-delivery, no spam reclassification) with original dates intact — gated behind a typed confirmation since it writes into a live mailbox.
+- 🩺 **Security Check** — One read-only pass over the whole tenant for the four things that most often lead to trouble: accounts without 2-Step Verification (administrators first), active accounts nobody signs in to (30 days to a year, your pick), mailboxes forwarding mail outside your domains — by the forwarding setting or by a filter, with the ones that delete the original called out — and outside apps holding access to mail, Drive or admin settings, with who granted each. Paged and cancellable, CSV export, and it won't call a check clean if there were accounts it couldn't read.
 - 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export, and one-click "revoke external sharing" per file or in bulk — strips only external permissions, leaves internal collaborators alone.
 - 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Per-request tenant isolation — nothing carries over between tenants.
 
@@ -85,6 +86,9 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 
 ### Offboarding
 ![Offboarding](docs/screenshots/offboarding.png)
+
+### Security Check
+![Security Check](docs/screenshots/security-check.png)
 
 ### External Sharing Audit
 ![Sharing Audit](docs/screenshots/sharing-audit.png)
@@ -280,13 +284,13 @@ The app runs `gws` commands and `googleapis` SDK calls on the server side. For r
 2. Turn on domain-wide delegation in the Admin Console
 3. Add these OAuth scopes:
    - `https://www.googleapis.com/auth/gmail.settings.sharing`
-   - `https://www.googleapis.com/auth/gmail.settings.basic`
+   - `https://www.googleapis.com/auth/gmail.settings.basic` (also Security Check — forwarding and filters)
    - `https://www.googleapis.com/auth/gmail.readonly` (Mailbox Export)
    - `https://www.googleapis.com/auth/gmail.insert` (Mailbox Import)
    - `https://www.googleapis.com/auth/gmail.labels` (Mailbox Import — recreate labels)
    - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/admin.directory.user` (Domain Change, Offboarding)
-   - `https://www.googleapis.com/auth/admin.directory.user.security` (Offboarding — OAuth token revoke, sign-out)
+   - `https://www.googleapis.com/auth/admin.directory.user` (Domain Change, Offboarding, Security Check)
+   - `https://www.googleapis.com/auth/admin.directory.user.security` (Offboarding — OAuth token revoke, sign-out; Security Check — connected apps)
    - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (Domain Change, Sharing Audit)
    - `https://www.googleapis.com/auth/admin.datatransfer` (Offboarding — Drive ownership transfer)
    - `https://www.googleapis.com/auth/drive.metadata.readonly` (Sharing Audit)
@@ -411,6 +415,7 @@ npm run package:exe    # Windows: assemble OpenAdmin-win-x64.exe
 npm run package:bin    # Linux/macOS: assemble packaging/dist/open-admin
 npm run package:smoke  # start a built binary and check it end to end
 npm run test:launcher  # unit tests for the packaged launcher
+npm run test:lib       # unit tests for the app's own logic (src/**/*.test.ts)
 ```
 
 See [`packaging/README.md`](packaging/README.md) for how the single-file build
