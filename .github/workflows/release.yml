@@ -88,6 +88,7 @@ jobs:
           fi
       - run: npm ci
       - run: npm run lint
+      - run: npm run test:lib
       - run: npm run test:launcher
       - run: npm run package
       - run: npm run package:bin

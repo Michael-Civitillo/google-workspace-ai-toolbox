@@ -46,12 +46,12 @@ const REQUIRED_SCOPES: ReadonlyArray<{
   {
     scope: "https://www.googleapis.com/auth/admin.directory.user",
     label: "Directory user",
-    feature: "User lookup, suspension, primary-email change",
+    feature: "User lookup, suspension, primary-email change, Security Check (sign-in facts)",
   },
   {
     scope: "https://www.googleapis.com/auth/admin.directory.user.security",
     label: "Directory user security",
-    feature: "OAuth token revoke, force sign-out (offboarding)",
+    feature: "OAuth token revoke, force sign-out (offboarding), Security Check (connected apps)",
   },
   {
     scope: "https://www.googleapis.com/auth/admin.directory.domain.readonly",
@@ -91,7 +91,7 @@ const REQUIRED_SCOPES: ReadonlyArray<{
   {
     scope: "https://www.googleapis.com/auth/gmail.settings.basic",
     label: "Gmail settings (basic)",
-    feature: "Email delegation setup + delegate lookup",
+    feature: "Email delegation setup + delegate lookup, Security Check (forwarding)",
   },
   {
     scope: "https://www.googleapis.com/auth/gmail.readonly",

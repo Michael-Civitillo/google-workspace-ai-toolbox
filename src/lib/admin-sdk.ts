@@ -17,6 +17,18 @@ import {
   isValidUsername,
   emailDomain,
 } from "./validate";
+import {
+  forwardingFindings,
+  inactiveFinding,
+  isActiveAccount,
+  isAdminAccount,
+  twoStepFinding,
+  type AppGrant,
+  type DirectoryAccount,
+  type RawAutoForwarding,
+  type RawFilter,
+  type SecurityCheckPage,
+} from "./security-check";
 
 const ADMIN_API_TIMEOUT_MS = 30_000;
 
@@ -735,6 +747,261 @@ export async function findMailboxesDelegatedTo(
     unscanned,
     nextPageToken: page.nextPageToken,
   };
+}
+
+/**
+ * Reading Gmail's forwarding setting and filter list needs only the basic
+ * settings scope. Asked for on its own, not alongside the sharing scope the
+ * delegate routes use: domain-wide delegation authorises a requested set as a
+ * unit, and a read-only report should not fail for want of a scope it never
+ * exercises.
+ */
+const GMAIL_SETTINGS_READ_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.settings.basic",
+] as const;
+
+export const SECURITY_CHECK_DEFAULT_PAGE = 50;
+export const SECURITY_CHECK_MAX_PAGE = 100;
+// Accounts in flight at once. Each one costs two Gmail calls as that user (a
+// separate quota per user) and one Directory call as the admin (one quota for
+// the whole project), so the Directory side is what this number is sized for.
+const SECURITY_CHECK_CONCURRENCY = 6;
+const SECURITY_CHECK_ERROR_CHARS = 200;
+
+function errorText(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e);
+  return message.slice(0, SECURITY_CHECK_ERROR_CHARS);
+}
+
+/**
+ * One page of the tenant-wide Security Check.
+ *
+ * Lists a page of accounts with the sign-in facts the Directory API already
+ * holds, then, for every account someone can still sign in to, reads the two
+ * places a mailbox can send mail elsewhere (the auto-forwarding setting and
+ * any filter with a forward action) and the apps the account has granted
+ * access to. The rules that turn those facts into findings live in
+ * security-check.ts.
+ *
+ * Read-only against Google. Stateless and resumable like the delegate lookup:
+ * the caller chains on `nextPageToken`, which gives the browser progress and a
+ * way to stop.
+ *
+ * A failure on one account never fails the page. It is reported against that
+ * account (`mailboxErrors`, `appErrors`) so the operator knows where the answer
+ * is incomplete; a report that quietly skipped the accounts it could not read
+ * would say "nothing found" about exactly the ones worth a second look. A
+ * mailbox that answers one of its two questions still contributes what it
+ * answered.
+ *
+ * `verifiedDomains` decides what counts as outside the organisation, and `now`
+ * is passed in so the inactivity arithmetic can be tested.
+ */
+export async function scanSecurityPage(
+  tenant: Tenant | null,
+  opts: {
+    verifiedDomains: ReadonlySet<string>;
+    pageToken?: string;
+    pageSize?: number;
+    now?: number;
+    signal?: AbortSignal;
+  }
+): Promise<SecurityCheckPage> {
+  const pageSize = Math.min(
+    SECURITY_CHECK_MAX_PAGE,
+    Math.max(1, opts.pageSize ?? SECURITY_CHECK_DEFAULT_PAGE)
+  );
+  const now = opts.now ?? Date.now();
+  const { client } = getAdminClient(tenant);
+
+  const listed = await withGoogleRetry(
+    () =>
+      client.users.list(
+        {
+          customer: "my_customer",
+          maxResults: pageSize,
+          pageToken: opts.pageToken,
+          orderBy: "email",
+          projection: "basic",
+          fields:
+            "nextPageToken, users(primaryEmail, name/fullName, orgUnitPath, " +
+            "isAdmin, isDelegatedAdmin, suspended, archived, isEnrolledIn2Sv, " +
+            "isEnforcedIn2Sv, lastLoginTime, creationTime, isMailboxSetup)",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+      ),
+    { retryServerErrors: true, signal: opts.signal }
+  );
+
+  const accounts: DirectoryAccount[] = (listed.data.users || []).map((u) => ({
+    primaryEmail: (u.primaryEmail || "").toLowerCase(),
+    fullName: u.name?.fullName || "",
+    orgUnitPath: u.orgUnitPath || "/",
+    isAdmin: u.isAdmin || false,
+    isDelegatedAdmin: u.isDelegatedAdmin || false,
+    suspended: u.suspended || false,
+    archived: u.archived || false,
+    enrolledIn2Sv: u.isEnrolledIn2Sv || false,
+    enforcedIn2Sv: u.isEnforcedIn2Sv || false,
+    lastLoginTime: u.lastLoginTime || null,
+    creationTime: u.creationTime || null,
+    // Absent means Google did not say; only an explicit false skips the mailbox.
+    mailboxSetup: u.isMailboxSetup !== false,
+  }));
+  const active = accounts.filter(
+    (a) => a.primaryEmail && isActiveAccount(a)
+  );
+
+  const page: SecurityCheckPage = {
+    accounts: accounts.length,
+    skippedSuspended: accounts.length - active.length,
+    activeAccounts: active.length,
+    admins: active.filter(isAdminAccount).length,
+    withoutTwoStep: [],
+    inactive: [],
+    mailboxesChecked: 0,
+    withoutMailbox: 0,
+    externalForwarding: [],
+    internalForwards: 0,
+    mailboxErrors: [],
+    appsChecked: 0,
+    apps: [],
+    appErrors: [],
+    nextPageToken: listed.data.nextPageToken || null,
+  };
+
+  // The directory checks need nothing beyond the listing.
+  for (const account of active) {
+    const twoStep = twoStepFinding(account);
+    if (twoStep) page.withoutTwoStep.push(twoStep);
+    const inactive = inactiveFinding(account, now);
+    if (inactive) page.inactive.push(inactive);
+  }
+
+  const apps = new Map<string, AppGrant>();
+
+  const checkMailbox = async (account: DirectoryAccount) => {
+    if (!account.mailboxSetup) {
+      page.withoutMailbox++;
+      return;
+    }
+    const gmail = buildGmailClient(tenant, account.primaryEmail, [
+      ...GMAIL_SETTINGS_READ_SCOPES,
+    ]);
+    const call = { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal };
+    const retry = { retryServerErrors: true, signal: opts.signal };
+    const [forwarding, filters] = await Promise.allSettled([
+      withGoogleRetry(
+        () => gmail.users.settings.getAutoForwarding({ userId: "me" }, call),
+        retry
+      ),
+      withGoogleRetry(
+        () => gmail.users.settings.filters.list({ userId: "me" }, call),
+        retry
+      ),
+    ]);
+    // A cancelled request is the caller's doing, not a mailbox problem.
+    for (const result of [forwarding, filters]) {
+      if (result.status === "rejected" && isAbortError(result.reason)) {
+        throw result.reason;
+      }
+    }
+
+    const found = forwardingFindings(
+      account,
+      forwarding.status === "fulfilled"
+        ? (forwarding.value.data as RawAutoForwarding)
+        : null,
+      filters.status === "fulfilled"
+        ? ((filters.value.data.filter || []) as RawFilter[])
+        : [],
+      opts.verifiedDomains
+    );
+    page.externalForwarding.push(...found.external);
+    page.internalForwards += found.internal;
+
+    const failed: string[] = [];
+    if (forwarding.status === "rejected") {
+      failed.push(`forwarding setting: ${errorText(forwarding.reason)}`);
+    }
+    if (filters.status === "rejected") {
+      failed.push(`filters: ${errorText(filters.reason)}`);
+    }
+    if (failed.length > 0) {
+      page.mailboxErrors.push({
+        user: account.primaryEmail,
+        error: failed.join("; ").slice(0, SECURITY_CHECK_ERROR_CHARS * 2),
+      });
+    }
+    if (failed.length < 2) page.mailboxesChecked++;
+  };
+
+  const checkApps = async (account: DirectoryAccount) => {
+    try {
+      const res = await withGoogleRetry(
+        () =>
+          client.tokens.list(
+            {
+              userKey: account.primaryEmail,
+              fields: "items(clientId, displayText, scopes, anonymous, nativeApp)",
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+          ),
+        { retryServerErrors: true, signal: opts.signal }
+      );
+      page.appsChecked++;
+      for (const token of res.data.items || []) {
+        const clientId = token.clientId || "";
+        if (!clientId) continue;
+        const grant = apps.get(clientId) ?? {
+          clientId,
+          name: token.displayText || "",
+          scopes: [],
+          anonymous: false,
+          nativeApp: false,
+          users: [],
+        };
+        grant.scopes = [...new Set([...grant.scopes, ...(token.scopes || [])])];
+        grant.anonymous = grant.anonymous || token.anonymous === true;
+        grant.nativeApp = grant.nativeApp || token.nativeApp === true;
+        if (!grant.name && token.displayText) grant.name = token.displayText;
+        grant.users.push(account.primaryEmail);
+        apps.set(clientId, grant);
+      }
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      page.appErrors.push({ user: account.primaryEmail, error: errorText(e) });
+    }
+  };
+
+  let next = 0;
+  const worker = async () => {
+    while (next < active.length) {
+      if (opts.signal?.aborted) throw new RequestAbortedError();
+      const account = active[next++];
+      await Promise.all([checkMailbox(account), checkApps(account)]);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(SECURITY_CHECK_CONCURRENCY, active.length) },
+      worker
+    )
+  );
+
+  // Workers finish in whatever order Google answers; present stable lists.
+  const byUser = <T extends { user: string }>(a: T, b: T) =>
+    a.user.localeCompare(b.user);
+  page.externalForwarding.sort(
+    (a, b) => byUser(a, b) || a.target.localeCompare(b.target)
+  );
+  page.mailboxErrors.sort(byUser);
+  page.appErrors.sort(byUser);
+  page.apps = [...apps.values()]
+    .map((g) => ({ ...g, scopes: [...g.scopes].sort(), users: [...g.users].sort() }))
+    .sort((a, b) => a.clientId.localeCompare(b.clientId));
+
+  return page;
 }
 
 /**
