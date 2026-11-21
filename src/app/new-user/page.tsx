@@ -291,7 +291,10 @@ export default function NewUser() {
             error = result.error || `The server answered ${res.status}`;
             // A group that doesn't exist won't start existing; only the new
             // account itself is worth waiting for.
-            if (/groupKey/i.test(error)) break;
+            if (/groupKey/i.test(error)) {
+              error = "There is no group with this address.";
+              break;
+            }
           }
         } catch {
           error = "Could not reach the server.";

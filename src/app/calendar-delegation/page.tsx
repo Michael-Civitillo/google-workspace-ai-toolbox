@@ -279,7 +279,16 @@ export default function CalendarDelegation() {
 
             <div className="space-y-2">
               <Label>Permission Level</Label>
-              <Select value={role} onValueChange={(v) => v && setRole(v)}>
+              <Select
+                value={role}
+                onValueChange={(v) => v && setRole(v)}
+                items={{
+                  freeBusyReader: "Free/Busy Only",
+                  reader: "View All Details",
+                  writer: "Edit Events",
+                  owner: "Full Control (Owner)",
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>

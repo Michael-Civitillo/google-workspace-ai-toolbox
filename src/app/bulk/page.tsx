@@ -44,6 +44,11 @@ import {
   type OperationId,
 } from "@/lib/bulk-operations";
 
+/** What the operation picker shows for each choice once it is picked. */
+const OPERATION_LABELS = Object.fromEntries(
+  Object.entries(OPERATIONS).map(([id, def]) => [id, def.label])
+);
+
 const MAX_ROWS = 500;
 const MAX_FILE_BYTES = 1024 * 1024;
 
@@ -333,7 +338,11 @@ export default function BulkOperations() {
           <CardContent className="space-y-4">
             <div className="space-y-2 max-w-md">
               <Label>Operation</Label>
-              <Select value={operation} onValueChange={changeOperation}>
+              <Select
+                value={operation}
+                onValueChange={changeOperation}
+                items={OPERATION_LABELS}
+              >
                 <SelectTrigger
                   className="w-full"
                   aria-label="Bulk operation"
@@ -451,7 +460,7 @@ export default function BulkOperations() {
                 {rows.map((r) => (
                   <div
                     key={r.index}
-                    className="flex items-center gap-3 px-3 py-2 rounded-lg border bg-muted/30"
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 rounded-lg border bg-muted/30"
                   >
                     {statusIcon(r.status)}
                     <span className="text-xs text-muted-foreground w-8 shrink-0">
@@ -469,7 +478,8 @@ export default function BulkOperations() {
                       </Badge>
                     )}
                     {r.error && (
-                      <span className="ml-auto text-xs text-danger truncate max-w-[40%]">
+                      // On its own line, in full: a cut-off reason is no reason.
+                      <span className="basis-full pl-[3.25rem] text-xs text-danger break-words">
                         {r.error}
                       </span>
                     )}
