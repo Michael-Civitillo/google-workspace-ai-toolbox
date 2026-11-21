@@ -72,7 +72,9 @@ function downloadCsv(filename: string, content: string) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Released later, not straight after click(): some browsers start reading
+  // the blob only after the click handler returns.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export default function ActivityReports() {
@@ -107,10 +109,14 @@ export default function ActivityReports() {
   const eventsSeqRef = useRef(0);
   // The filters the current listing was fetched with. "Load more" reuses
   // them — a Reports pageToken belongs to the query it came from, so pairing
-  // it with live (possibly edited) inputs returns the wrong window.
+  // it with live (possibly edited) inputs returns the wrong window. That
+  // includes the start of the window: "Load more" sends the startTime the
+  // first page used, not the number of days, which the server would turn
+  // into a later start a few minutes on.
   const [listedFilters, setListedFilters] = useState<{
     user: string;
     days: number | null;
+    startTime: string | null;
   } | null>(null);
 
   // Events fetched for tenant A must not survive a switch to tenant B.
@@ -147,11 +153,13 @@ export default function ActivityReports() {
         : {
             user: userFilter.trim(),
             days: Number.isInteger(d) && d >= 1 ? d : null,
+            startTime: null,
           };
     try {
       const params = new URLSearchParams({ app: pinnedTab, pageSize: "100" });
       if (filters.user) params.set("user", filters.user);
-      if (filters.days !== null) params.set("days", String(filters.days));
+      if (filters.startTime) params.set("startTime", filters.startTime);
+      else if (filters.days !== null) params.set("days", String(filters.days));
       if (append && pageToken) params.set("pageToken", pageToken);
 
       const res = await tfetch(
@@ -168,7 +176,15 @@ export default function ActivityReports() {
       if (eventsSeqRef.current !== seq) return;
 
       if (result.success) {
-        if (!append) setListedFilters(filters);
+        if (!append) {
+          setListedFilters({
+            ...filters,
+            startTime:
+              typeof result.data.startTime === "string"
+                ? result.data.startTime
+                : null,
+          });
+        }
         setEvents((prev) =>
           append ? [...prev, ...result.data.events] : result.data.events
         );
@@ -383,15 +399,18 @@ export default function ActivityReports() {
                   <Button
                     variant="secondary"
                     onClick={() =>
+                      // While more pages exist the file holds only what has
+                      // been loaded: say so in its name, so it is never taken
+                      // for the whole window.
                       downloadCsv(
-                        `activity-${tab}-${new Date().toISOString().slice(0, 10)}.csv`,
+                        `activity-${tab}-${new Date().toISOString().slice(0, 10)}${pageToken ? "-PARTIAL" : ""}.csv`,
                         toCsv(events)
                       )
                     }
                     disabled={events.length === 0}
                   >
                     <Download className="h-4 w-4" />
-                    Export CSV
+                    {pageToken ? "Export CSV (loaded so far)" : "Export CSV"}
                   </Button>
                 </div>
 
@@ -406,6 +425,7 @@ export default function ActivityReports() {
                     <p className="text-xs text-muted-foreground">
                       {events.length.toLocaleString()} event
                       {events.length === 1 ? "" : "s"} loaded
+                      {pageToken ? " — more in this window, not loaded yet" : ""}
                     </p>
                     {events.map((e, i) => (
                       <div key={i} className="rounded-lg border bg-muted/30">
