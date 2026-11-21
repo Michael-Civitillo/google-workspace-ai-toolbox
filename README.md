@@ -24,20 +24,25 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama. If Google refuses because the owner (or the delegate) is suspended, the dialog says so and offers to re-enable the account and retry, behind a typed confirmation.
 - 🔎 **Delegate Lookup** — The reverse question: which mailboxes can *this person* read, and since when? Gmail only lists delegates per mailbox, so the lookup walks every active mailbox in the tenant (paged, cancellable; suspended accounts are counted but skipped, since Google won't read their settings) and shows every match with a one-click remove. Grants made through Open Admin show their exact date and operator from the audit log; everything else shows how long Open Admin has known about it, because Google doesn't record when a delegate was added.
 - 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
+- 👥 **Groups** — Browse and search groups, see who's in each one and change it (member, manager or owner), and look up every group a user belongs to.
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. External-domain transfers require explicit confirmation.
+- 🗂️ **Drive Transfer** — Pick folders in a user's Drive and hand ownership of each folder, and everything inside it, to another user in the same tenant. Behind a typed confirmation.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Server-side preflight + read-after-write verification.
-- 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
+- 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, removal from every group, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
+- 🧮 **Bulk Operations** — Paste or upload a CSV and run one operation across many users: add or remove a mailbox delegate, or set up forwarding. Every row is validated before anything fires, each row reports its own result, and the results export as a CSV.
 - 💾 **Mailbox Export** — Back up a user's entire Gmail mailbox to a portable file. Choose **NDJSON** for a full-fidelity backup (raw MIME with labels and dates preserved, restorable via Mailbox Import) or **mbox** for a standard mailbox file you can open in Thunderbird, Apple Mail, or convert to PST. Walks the mailbox page by page, streams straight to disk, cancellable mid-run (you keep what's gathered).
 - 📥 **Mailbox Import** — Restore a mailbox export into another user. Recreates the source's labels by name, then inserts every message via IMAP-style append (no re-delivery, no spam reclassification) with original dates intact — gated behind a typed confirmation since it writes into a live mailbox.
 - 🩺 **Security Check** — One read-only pass over the whole tenant for the four things that most often lead to trouble: accounts without 2-Step Verification (administrators first), active accounts nobody signs in to (30 days to a year, your pick), mailboxes forwarding mail outside your domains — by the forwarding setting or by a filter, with the ones that delete the original called out — and outside apps holding access to mail, Drive or admin settings, with who granted each. Paged and cancellable, CSV export, and it won't call a check clean if there were accounts it couldn't read.
+- 📈 **Activity Reports** — Sign-in and Admin Console activity straight from Google's Reports API, by user and period, with CSV export.
 - 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export, and one-click "revoke external sharing" per file or in bulk — strips only external permissions, leaves internal collaborators alone.
 - 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Per-request tenant isolation — nothing carries over between tenants.
 
 ### AI-powered (Gemini)
 
 - ✨ **AI Command** (right on the dashboard) — Type what you need in plain English. *"Give sarah access to john's mailbox"* → it parses the intent, validates the params, shows you what it'll do, and waits for your OK. No menu hunting, no extra clicks.
-- 🛡️ **User Audit** — Enter a user's email and get a full AI-generated report: who has access to their mailbox, calendar sharing rules, forwarding config, and security flags.
+- 🛡️ **User Audit** — Enter a user's email and get a full AI-generated report: who has access to their mailbox, calendar sharing rules, forwarding config, group memberships, recent sign-ins, and security flags.
+- 🧾 **Security Digest** — On the Activity Reports page: a Gemini summary of the last few days of sign-in and admin activity, so you read a paragraph instead of a log.
 
 ### Safety & ops
 
@@ -47,7 +52,7 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 💼 **Portable configuration** — Export everything — single sign-on settings, tenants, and the service-account key files themselves — to one JSON bundle from **App Settings**, and restore it on another server in one click. Keys are written back to disk automatically (relocated if the original path doesn't exist there), with a preview first and a typed confirmation only when overwriting an already-configured server.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
 - ⚠️ **Confirmation dialogs, enforced server-side** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension, Drive transfer, mailbox import, bulk un-share) shows a before→after diff and requires you to type the target email or identifier. The API re-checks that typed value, so the guard holds for anything calling the routes directly, not just the browser.
-- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location). Rotates at 8 MB keeping three older files, so a long-running install stays bounded at ~32 MB.
+- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location). Rotates at 8 MB keeping three older files, so a long-running install stays bounded at ~32 MB. The **Audit Log** page reads it in the app: filter by action, outcome, tenant and date, and export what you see as CSV.
 - 🧪 **Atomic config writes** — `tenants.json`, `sso.json` and `app-config.json` share one store implementation: tmp-file + fsync + rename with an in-process mutex, so a crash mid-write can't corrupt your config.
 
 ### Polish
@@ -66,20 +71,31 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 <details>
 <summary>📸 More screenshots</summary>
 
-### User Audit
-![User Audit](docs/screenshots/audit.png)
+Every page, in sidebar order. They show a sample tenant (`example.com`), not real data.
+
+### Get Started
+![Get Started](docs/screenshots/get-started.png)
 
 ### Email Delegation
 ![Email Delegation](docs/screenshots/email-delegation.png)
 
+### Delegate Lookup
+![Delegate Lookup](docs/screenshots/delegation-lookup.png)
+
 ### Calendar Delegation
 ![Calendar Delegation](docs/screenshots/calendar-delegation.png)
+
+### Groups
+![Groups](docs/screenshots/groups.png)
+
+### Email Transfer
+![Email Transfer](docs/screenshots/email-transfer.png)
 
 ### Calendar Transfer
 ![Calendar Transfer](docs/screenshots/calendar-transfer.png)
 
-### Email Transfer
-![Email Transfer](docs/screenshots/email-transfer.png)
+### Drive Transfer
+![Drive Transfer](docs/screenshots/drive-transfer.png)
 
 ### Domain Change
 ![Domain Change](docs/screenshots/domain-change.png)
@@ -87,20 +103,44 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 ### Offboarding
 ![Offboarding](docs/screenshots/offboarding.png)
 
+### Bulk Operations
+![Bulk Operations](docs/screenshots/bulk.png)
+
+### Mailbox Export
+![Mailbox Export](docs/screenshots/mailbox-export.png)
+
+### Mailbox Import
+![Mailbox Import](docs/screenshots/mailbox-import.png)
+
 ### Security Check
 ![Security Check](docs/screenshots/security-check.png)
 
 ### External Sharing Audit
-![Sharing Audit](docs/screenshots/sharing-audit.png)
+![External Sharing Audit](docs/screenshots/sharing-audit.png)
 
-### Tenants
-![Tenants](docs/screenshots/tenants.png)
+### User Audit
+![User Audit](docs/screenshots/audit.png)
+
+### Activity Reports
+![Activity Reports](docs/screenshots/activity-reports.png)
+
+### Audit Log
+![Audit Log](docs/screenshots/audit-log.png)
 
 ### Setup
 ![Setup](docs/screenshots/setup.png)
 
+### Tenants
+![Tenants](docs/screenshots/tenants.png)
+
 ### Single Sign-On
 ![Single Sign-On](docs/screenshots/sso.png)
+
+### App Settings
+![App Settings](docs/screenshots/settings.png)
+
+### Sign-in
+![Sign-in](docs/screenshots/login.png)
 
 </details>
 
@@ -292,9 +332,13 @@ The app runs `gws` commands and `googleapis` SDK calls on the server side. For r
    - `https://www.googleapis.com/auth/admin.directory.user` (Domain Change, Offboarding, Security Check)
    - `https://www.googleapis.com/auth/admin.directory.user.security` (Offboarding — OAuth token revoke, sign-out; Security Check — connected apps)
    - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (Domain Change, Sharing Audit)
+   - `https://www.googleapis.com/auth/admin.directory.group` (Groups, Offboarding — removal from groups)
+   - `https://www.googleapis.com/auth/admin.reports.audit.readonly` (Activity Reports, Security Digest, recent sign-ins in User Audit)
    - `https://www.googleapis.com/auth/admin.datatransfer` (Offboarding — Drive ownership transfer)
    - `https://www.googleapis.com/auth/drive.metadata.readonly` (Sharing Audit)
    - `https://www.googleapis.com/auth/drive` (Sharing Audit — revoke external sharing)
+
+   Not sure you got them all? Once the tenant is added, **Tenants → Test scopes** asks Google about each one and tells you which are missing.
 4. Set an admin email for impersonation (Domain Change and Admin SDK calls need this):
    ```bash
    export GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@yourdomain.com
