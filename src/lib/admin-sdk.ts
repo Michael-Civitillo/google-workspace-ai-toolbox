@@ -8,6 +8,7 @@ import { admin_datatransfer_v1 } from "googleapis/build/src/apis/admin/datatrans
 import { gmail_v1 } from "googleapis/build/src/apis/gmail/v1";
 import { drive_v3 } from "googleapis/build/src/apis/drive/v3";
 import { calendar_v3 } from "googleapis/build/src/apis/calendar/v3";
+import { licensing_v1 } from "googleapis/build/src/apis/licensing/v1";
 import { JWT } from "google-auth-library";
 import { readFileSync, statSync, type Stats } from "fs";
 import type { Tenant } from "./tenant-types";
@@ -18,6 +19,11 @@ import {
   emailDomain,
   ValidationError,
 } from "./validate";
+import {
+  isKnownProduct,
+  isValidSkuId,
+  type LicenseAssignment,
+} from "./licenses";
 import {
   DELEGATION_WINDOW_DAYS,
   forwardingFindings,
@@ -74,6 +80,7 @@ const SCOPES = {
   // scope for permission management — `drive.file` only covers files the app
   // itself created, which doesn't help an admin tool acting on existing files.
   DRIVE_FULL: "https://www.googleapis.com/auth/drive",
+  LICENSING: "https://www.googleapis.com/auth/apps.licensing",
 } as const;
 
 interface ServiceAccountCreds {
@@ -297,6 +304,23 @@ function getReportsClient(
   const auth = buildAuth(tenant, subject, [SCOPES.REPORTS_AUDIT_READONLY]);
   return {
     client: new admin_reports_v1.Admin({ ...CLIENT_DEFAULTS, auth }),
+    impersonatedAdmin: subject.toLowerCase(),
+  };
+}
+
+/**
+ * Enterprise License Manager client (impersonating the tenant admin). Its own
+ * client for the same reason the groups one is: the scope was added later,
+ * and a tenant that hasn't authorised it yet must keep everything else.
+ */
+function getLicensingClient(tenant: Tenant | null): {
+  client: licensing_v1.Licensing;
+  impersonatedAdmin: string;
+} {
+  const subject = impersonatedAdminFor(tenant);
+  const auth = buildAuth(tenant, subject, [SCOPES.LICENSING]);
+  return {
+    client: new licensing_v1.Licensing({ ...CLIENT_DEFAULTS, auth }),
     impersonatedAdmin: subject.toLowerCase(),
   };
 }
@@ -808,6 +832,279 @@ function errorText(e: unknown): string {
   return message.slice(0, SECURITY_CHECK_ERROR_CHARS);
 }
 
+// ---------------------------------------------------------------- Licences
+
+/** The scope the licence calls need, for messages that name it. */
+export const LICENSING_SCOPE = SCOPES.LICENSING;
+
+/** The most licence assignments asked for per request. */
+const LICENSE_PAGE_SIZE = 500;
+
+/**
+ * Why licences could not be read or changed, when the reason is setup and not
+ * a fault: the tenant hasn't authorised the licensing scope for the key, or
+ * the licensing API is switched off in the key's Google Cloud project. Both
+ * have a fix the operator can make, so the route names it instead of passing
+ * on Google's wording.
+ */
+export type LicensingSetupProblem = "scope_missing" | "api_disabled";
+
+export function licensingSetupProblem(e: unknown): LicensingSetupProblem | null {
+  const message = e instanceof Error ? e.message : String(e ?? "");
+  if (/unauthorized_client/i.test(message)) return "scope_missing";
+  const { reasons } = googleErrorInfo(e);
+  if (
+    reasons.includes("accessnotconfigured") ||
+    reasons.includes("service_disabled") ||
+    /has not been used in project|it is disabled/i.test(message)
+  ) {
+    return "api_disabled";
+  }
+  return null;
+}
+
+// The customer id never changes for a tenant, so it is looked up once.
+const customerIdCache = new Map<string, string>();
+
+/**
+ * The organisation's customer id ("C01abc234"), which the licensing API wants
+ * in place of the "my_customer" shorthand the Directory API accepts. Read off
+ * the admin's own account, which needs no permission beyond the ones already
+ * in use.
+ */
+async function customerIdFor(tenant: Tenant | null, signal?: AbortSignal): Promise<string> {
+  const { client, impersonatedAdmin } = getAdminClient(tenant);
+  const cacheKey = `${tenant?.id ?? "env"}|${tenant?.credentialsFile ?? ""}|${impersonatedAdmin}`;
+  const cached = customerIdCache.get(cacheKey);
+  if (cached) return cached;
+  const res = await withGoogleRetry(
+    () =>
+      client.users.get(
+        { userKey: impersonatedAdmin, projection: "basic", fields: "customerId" },
+        { timeout: ADMIN_API_TIMEOUT_MS, signal }
+      ),
+    { retryServerErrors: true, signal }
+  );
+  const id = res.data.customerId;
+  if (!id) {
+    throw new Error(
+      `Google did not return a customer id for ${impersonatedAdmin}, so licences can't be looked up.`
+    );
+  }
+  customerIdCache.set(cacheKey, id);
+  return id;
+}
+
+function toAssignment(a: licensing_v1.Schema$LicenseAssignment): LicenseAssignment {
+  return {
+    user: (a.userId || "").toLowerCase(),
+    productId: a.productId || "",
+    productName: a.productName || a.productId || "",
+    skuId: a.skuId || "",
+    skuName: a.skuName || a.skuId || "",
+  };
+}
+
+/**
+ * One page of the accounts holding a licence of one product.
+ *
+ * `unavailable` is true when Google doesn't recognise the product for this
+ * organisation (400 or 404). The list of products asked about is fixed and
+ * most organisations have only one or two of them, so that is an ordinary
+ * answer, not an error.
+ */
+export async function listLicenseAssignments(
+  tenant: Tenant | null,
+  opts: { productId: string; pageToken?: string; signal?: AbortSignal }
+): Promise<{
+  assignments: LicenseAssignment[];
+  nextPageToken: string | null;
+  unavailable: boolean;
+}> {
+  if (!isKnownProduct(opts.productId)) {
+    throw new ValidationError("product is not one Open Admin asks about");
+  }
+  const customerId = await customerIdFor(tenant, opts.signal);
+  const { client } = getLicensingClient(tenant);
+  try {
+    const res = await withGoogleRetry(
+      () =>
+        client.licenseAssignments.listForProduct(
+          {
+            productId: opts.productId,
+            customerId,
+            maxResults: LICENSE_PAGE_SIZE,
+            pageToken: opts.pageToken,
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+        ),
+      { retryServerErrors: true, signal: opts.signal }
+    );
+    return {
+      assignments: (res.data.items || []).map(toAssignment).filter((a) => a.user && a.skuId),
+      nextPageToken: res.data.nextPageToken || null,
+      unavailable: false,
+    };
+  } catch (e) {
+    const status = googleHttpStatus(e);
+    // Only on the first page: a 400 further in is a bad page token, a fault.
+    if (!opts.pageToken && (status === 400 || status === 404) && !licensingSetupProblem(e)) {
+      return { assignments: [], nextPageToken: null, unavailable: true };
+    }
+    throw e;
+  }
+}
+
+/** What a licence change was about to act on is no longer what was confirmed. */
+export class LicenseChangedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LicenseChangedError";
+  }
+}
+
+function requireLicenseTarget(input: { user: string; productId: string; skuId: string }) {
+  const user = String(input.user ?? "").trim().toLowerCase();
+  if (!isValidEmail(user)) throw new ValidationError("user must be a valid email address");
+  if (!isKnownProduct(input.productId)) {
+    throw new ValidationError("productId is not one Open Admin asks about");
+  }
+  if (!isValidSkuId(input.skuId)) throw new ValidationError("skuId is not a licence id");
+  return { user, productId: input.productId, skuId: input.skuId };
+}
+
+/**
+ * Give an account a licence. Never retried on a server error: the first
+ * attempt may have gone through, and a licence is something that is paid for.
+ */
+export async function assignLicense(
+  tenant: Tenant | null,
+  input: { user: string; productId: string; skuId: string }
+): Promise<LicenseAssignment> {
+  const { user, productId, skuId } = requireLicenseTarget(input);
+  const { client } = getLicensingClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.licenseAssignments.insert(
+        { productId, skuId, requestBody: { userId: user } },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: false }
+  );
+  const assigned = toAssignment(res.data);
+  return {
+    user: assigned.user || user,
+    productId: assigned.productId || productId,
+    productName: assigned.productName || productId,
+    skuId: assigned.skuId || skuId,
+    skuName: assigned.skuName || skuId,
+  };
+}
+
+/**
+ * Take a licence away from an account.
+ *
+ * The account Open Admin acts as is refused: without its licence it loses the
+ * services this tool reaches through it. The licence is read first, and if
+ * the account no longer holds exactly this one the request is refused rather
+ * than removing something nobody confirmed.
+ */
+export async function removeLicense(
+  tenant: Tenant | null,
+  input: { user: string; productId: string; skuId: string }
+): Promise<{ user: string; skuName: string }> {
+  const { user, productId, skuId } = requireLicenseTarget(input);
+  const { client, impersonatedAdmin } = getLicensingClient(tenant);
+  if (user === impersonatedAdmin) {
+    throw new ValidationError(
+      `${user} is the admin account Open Admin acts as. Removing its licence would cut off the services this tool works through.`
+    );
+  }
+  let held: LicenseAssignment;
+  try {
+    const res = await withGoogleRetry(
+      () =>
+        client.licenseAssignments.get(
+          { productId, skuId, userId: user },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    held = toAssignment(res.data);
+  } catch (e) {
+    if (isNotFoundError(e)) {
+      throw new LicenseChangedError(
+        `${user} doesn't hold that licence any more. Check licences again to see the current state.`
+      );
+    }
+    throw e;
+  }
+  // Deleting what is already gone changes nothing, so a server error can retry.
+  await withGoogleRetry(
+    () =>
+      client.licenseAssignments.delete(
+        { productId, skuId, userId: user },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { user, skuName: held.skuName || skuId };
+}
+
+/** The most accounts one directory page may hold (Google's own limit). */
+export const DIRECTORY_MAX_PAGE = 500;
+
+/**
+ * One page of the directory, with the facts about each account that the
+ * audits reason from: whether it is suspended or archived, its admin roles,
+ * its 2-Step Verification state and when it was last signed in to.
+ *
+ * Read-only. Suspended and archived accounts are included; callers decide
+ * what to make of them.
+ */
+export async function listDirectoryAccounts(
+  tenant: Tenant | null,
+  opts: { pageToken?: string; pageSize?: number; signal?: AbortSignal } = {}
+): Promise<{ accounts: DirectoryAccount[]; nextPageToken: string | null }> {
+  const { client } = getAdminClient(tenant);
+  const pageSize = Math.min(DIRECTORY_MAX_PAGE, Math.max(1, opts.pageSize ?? DIRECTORY_MAX_PAGE));
+  const listed = await withGoogleRetry(
+    () =>
+      client.users.list(
+        {
+          customer: "my_customer",
+          maxResults: pageSize,
+          pageToken: opts.pageToken,
+          orderBy: "email",
+          projection: "basic",
+          fields:
+            "nextPageToken, users(primaryEmail, name/fullName, orgUnitPath, " +
+            "isAdmin, isDelegatedAdmin, suspended, archived, isEnrolledIn2Sv, " +
+            "isEnforcedIn2Sv, lastLoginTime, creationTime, isMailboxSetup)",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+      ),
+    { retryServerErrors: true, signal: opts.signal }
+  );
+
+  const accounts: DirectoryAccount[] = (listed.data.users || []).map((u) => ({
+    primaryEmail: (u.primaryEmail || "").toLowerCase(),
+    fullName: u.name?.fullName || "",
+    orgUnitPath: u.orgUnitPath || "/",
+    isAdmin: u.isAdmin || false,
+    isDelegatedAdmin: u.isDelegatedAdmin || false,
+    suspended: u.suspended || false,
+    archived: u.archived || false,
+    enrolledIn2Sv: u.isEnrolledIn2Sv || false,
+    enforcedIn2Sv: u.isEnforcedIn2Sv || false,
+    lastLoginTime: u.lastLoginTime || null,
+    creationTime: u.creationTime || null,
+    // Absent means Google did not say; only an explicit false skips the mailbox.
+    mailboxSetup: u.isMailboxSetup !== false,
+  }));
+  return { accounts, nextPageToken: listed.data.nextPageToken || null };
+}
+
 /**
  * One page of the tenant-wide Security Check.
  *
@@ -849,40 +1146,11 @@ export async function scanSecurityPage(
   const now = opts.now ?? Date.now();
   const { client } = getAdminClient(tenant);
 
-  const listed = await withGoogleRetry(
-    () =>
-      client.users.list(
-        {
-          customer: "my_customer",
-          maxResults: pageSize,
-          pageToken: opts.pageToken,
-          orderBy: "email",
-          projection: "basic",
-          fields:
-            "nextPageToken, users(primaryEmail, name/fullName, orgUnitPath, " +
-            "isAdmin, isDelegatedAdmin, suspended, archived, isEnrolledIn2Sv, " +
-            "isEnforcedIn2Sv, lastLoginTime, creationTime, isMailboxSetup)",
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
-      ),
-    { retryServerErrors: true, signal: opts.signal }
-  );
-
-  const accounts: DirectoryAccount[] = (listed.data.users || []).map((u) => ({
-    primaryEmail: (u.primaryEmail || "").toLowerCase(),
-    fullName: u.name?.fullName || "",
-    orgUnitPath: u.orgUnitPath || "/",
-    isAdmin: u.isAdmin || false,
-    isDelegatedAdmin: u.isDelegatedAdmin || false,
-    suspended: u.suspended || false,
-    archived: u.archived || false,
-    enrolledIn2Sv: u.isEnrolledIn2Sv || false,
-    enforcedIn2Sv: u.isEnforcedIn2Sv || false,
-    lastLoginTime: u.lastLoginTime || null,
-    creationTime: u.creationTime || null,
-    // Absent means Google did not say; only an explicit false skips the mailbox.
-    mailboxSetup: u.isMailboxSetup !== false,
-  }));
+  const { accounts, nextPageToken } = await listDirectoryAccounts(tenant, {
+    pageToken: opts.pageToken,
+    pageSize,
+    signal: opts.signal,
+  });
   const active = accounts.filter(
     (a) => a.primaryEmail && isActiveAccount(a)
   );
@@ -902,7 +1170,7 @@ export async function scanSecurityPage(
     appsChecked: 0,
     apps: [],
     appErrors: [],
-    nextPageToken: listed.data.nextPageToken || null,
+    nextPageToken,
   };
 
   // The directory checks need nothing beyond the listing.

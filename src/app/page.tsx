@@ -28,6 +28,7 @@ import {
   ShieldCheck,
   UserSearch,
   UserPlus,
+  Ticket,
 } from "lucide-react";
 
 interface GwsStatus {
@@ -115,6 +116,12 @@ const taskGroups: TaskGroup[] = [
         description: "Create an account with a temporary password and groups, or reset a password.",
         href: "/new-user",
         icon: UserPlus,
+      },
+      {
+        title: "Licences",
+        description: "Who holds each licence, which sit on suspended or idle accounts, assign and remove.",
+        href: "/licenses",
+        icon: Ticket,
       },
       {
         title: "Domain Change",

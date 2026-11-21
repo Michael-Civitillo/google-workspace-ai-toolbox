@@ -1,3 +1,4 @@
+import { REQUIRED_SCOPES } from "./required-scopes";
 import { JWT } from "google-auth-library";
 import { readFileSync } from "fs";
 import type { Tenant } from "./tenant-types";
@@ -33,88 +34,6 @@ export interface PreflightResult {
   serviceAccountClientId: string | null;
   results: ScopePreflightResult[];
 }
-
-/**
- * The full set of OAuth scopes Open Admin impersonates with. Adding a new
- * feature that needs a new scope? Add it here so the preflight catches it.
- */
-const REQUIRED_SCOPES: ReadonlyArray<{
-  scope: string;
-  label: string;
-  feature: string;
-}> = [
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.user",
-    label: "Directory user",
-    feature: "User lookup, suspension, primary-email change, Security Check (sign-in facts)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.user.security",
-    label: "Directory user security",
-    feature: "OAuth token revoke, force sign-out (offboarding), Security Check (connected apps)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.domain.readonly",
-    label: "Directory domains (read)",
-    feature: "Verified-domain listing (drives external-sharing classification)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.group",
-    label: "Directory groups",
-    feature: "Group membership management + offboarding group removal",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.reports.audit.readonly",
-    label: "Reports (audit, read)",
-    feature:
-      "Sign-in/admin activity reports + AI security digest, Security Check (domain-wide delegation)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.datatransfer",
-    label: "Data transfer",
-    feature: "Drive ownership transfer during offboarding",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/drive.metadata.readonly",
-    label: "Drive metadata (read)",
-    feature: "External-sharing audit",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/drive",
-    label: "Drive (full)",
-    feature: "Revoke external sharing on files (un-share)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.settings.sharing",
-    label: "Gmail settings (sharing)",
-    feature: "Email forwarding setup",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.settings.basic",
-    label: "Gmail settings (basic)",
-    feature: "Email delegation setup + delegate lookup, Security Check (forwarding)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.readonly",
-    label: "Gmail (read)",
-    feature: "Mailbox export (backup)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.insert",
-    label: "Gmail (insert)",
-    feature: "Mailbox import (restore)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.labels",
-    label: "Gmail (labels)",
-    feature: "Mailbox import — recreate labels",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/calendar",
-    label: "Calendar",
-    feature: "Calendar delegation and transfer",
-  },
-] as const;
 
 /** Every scope Open Admin asks Google for, and no others. */
 export function usedScopes(): string[] {
