@@ -376,6 +376,12 @@ export interface DomainInfo {
   domainName: string;
   isPrimary: boolean;
   verified: boolean;
+  /**
+   * A domain alias: every user automatically has an address at it, but no
+   * account's primary address can live there. It is part of the organisation
+   * for "is this address ours?", and not a domain a user can be moved to.
+   */
+  isAlias: boolean;
 }
 
 /** Look up a user by their email address. */
@@ -475,11 +481,35 @@ export async function listDomains(
     { retryServerErrors: true }
   );
 
-  const domains = (res.data.domains || []).map((d) => ({
-    domainName: (d.domainName || "").toLowerCase(),
-    isPrimary: d.isPrimary || false,
-    verified: d.verified || false,
-  }));
+  // Domain aliases come nested under the domain they mirror. They are listed
+  // alongside it: mail to someone@alias.example reaches the same mailbox as
+  // mail to their primary address, so treating an alias as outside the
+  // organisation flagged internal forwards, shares and transfers as external.
+  const domains: DomainInfo[] = [];
+  const seen = new Set<string>();
+  const add = (info: DomainInfo) => {
+    if (!info.domainName || seen.has(info.domainName)) return;
+    seen.add(info.domainName);
+    domains.push(info);
+  };
+  for (const d of res.data.domains || []) {
+    add({
+      domainName: (d.domainName || "").toLowerCase(),
+      isPrimary: d.isPrimary || false,
+      verified: d.verified || false,
+      isAlias: false,
+    });
+  }
+  for (const d of res.data.domains || []) {
+    for (const alias of d.domainAliases || []) {
+      add({
+        domainName: (alias.domainAliasName || "").toLowerCase(),
+        isPrimary: false,
+        verified: alias.verified || false,
+        isAlias: true,
+      });
+    }
+  }
   if (domainsCache.size >= DOMAINS_CACHE_MAX) {
     const oldest = domainsCache.keys().next().value;
     if (oldest !== undefined) domainsCache.delete(oldest);
@@ -1324,6 +1354,11 @@ export async function changePrimaryDomain(
   }
   if (!targetDomain.verified) {
     throw new Error(`Domain "${newDomain}" is not verified — refusing to change primary email to an unverified domain`);
+  }
+  if (targetDomain.isAlias) {
+    throw new Error(
+      `Domain "${newDomain}" is a domain alias. Every user already has an address there, but a primary email can only be on a full domain of the tenant.`
+    );
   }
 
   // `userKey` resolves aliases to the same account, so the string compare above

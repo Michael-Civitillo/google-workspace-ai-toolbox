@@ -55,6 +55,8 @@ interface DomainInfo {
   domainName: string;
   isPrimary: boolean;
   verified: boolean;
+  /** A domain alias: users have addresses there, but can't be moved to it. */
+  isAlias?: boolean;
 }
 
 export default function DomainChange() {
@@ -203,8 +205,10 @@ export default function DomainChange() {
   const currentDomain = user?.primaryEmail.split("@")[1] || "";
   const previewEmail = `${newUsername || user?.primaryEmail.split("@")[0] || "user"}@${selectedDomain || "domain.com"}`;
 
+  // A domain alias is never a destination: every user already has an address
+  // there, and Google does not allow a primary email on one.
   const availableDomains = domains.filter(
-    (d) => d.domainName !== currentDomain && d.verified
+    (d) => d.domainName !== currentDomain && d.verified && !d.isAlias
   );
 
   return (
@@ -442,6 +446,14 @@ export default function DomainChange() {
                       </span>
                     </div>
                     <div className="flex gap-1.5">
+                      {d.isAlias && (
+                        <Badge
+                          variant="outline"
+                          className="border-border bg-muted text-muted-foreground text-xs"
+                        >
+                          Alias
+                        </Badge>
+                      )}
                       {d.isPrimary && (
                         <Badge
                           variant="outline"

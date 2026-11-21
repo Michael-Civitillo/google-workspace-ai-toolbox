@@ -11,9 +11,12 @@
 import assert from "node:assert/strict";
 import { before, beforeEach, describe, it } from "node:test";
 import {
+  changePrimaryDomain,
   deleteForwardingFilter,
   disableAutoForwarding,
   isAbortError,
+  isExternalTarget,
+  listDomains,
   listDelegationChanges,
   revokeAppForUser,
   scanSecurityPage,
@@ -825,5 +828,68 @@ describe("revokeAppForUser", () => {
       await assert.rejects(revokeAppForUser(tenant, "bob@example.com", id), /malformed/);
     }
     assert.equal(google.calls.length, 0);
+  });
+});
+
+describe("listDomains and domain aliases", () => {
+  const DOMAINS_PATH = "/admin/directory/v1/customer/my_customer/domains";
+  const tenantDomains = () =>
+    json({
+      domains: [
+        {
+          domainName: "Example.com",
+          isPrimary: true,
+          verified: true,
+          domainAliases: [
+            { domainAliasName: "example.net", parentDomainName: "example.com", verified: true },
+            { domainAliasName: "pending.example", parentDomainName: "example.com", verified: false },
+          ],
+        },
+        { domainName: "example.org", isPrimary: false, verified: true },
+      ],
+    });
+  // The list is cached per tenant for a minute; a fresh id per test keeps them apart.
+  let n = 0;
+  const freshTenant = () => ({ ...tenant, id: `alias-test-${++n}` });
+
+  beforeEach(() =>
+    google.reset((call) => (call.url.pathname === DOMAINS_PATH ? tenantDomains() : undefined))
+  );
+
+  it("lists aliases beside the domains they mirror, marked as aliases", async () => {
+    assert.deepEqual(await listDomains(freshTenant()), [
+      { domainName: "example.com", isPrimary: true, verified: true, isAlias: false },
+      { domainName: "example.org", isPrimary: false, verified: true, isAlias: false },
+      { domainName: "example.net", isPrimary: false, verified: true, isAlias: true },
+      { domainName: "pending.example", isPrimary: false, verified: false, isAlias: true },
+    ]);
+  });
+
+  it("treats an address at a verified alias as inside the organisation", async () => {
+    const t = freshTenant();
+    assert.equal(await isExternalTarget(t, "pat@example.net"), false);
+    assert.equal(await isExternalTarget(t, "pat@example.org"), false);
+  });
+
+  it("still treats an unverified alias, and everything else, as outside", async () => {
+    const t = freshTenant();
+    assert.equal(await isExternalTarget(t, "pat@pending.example"), true);
+    assert.equal(await isExternalTarget(t, "pat@gmail.com"), true);
+  });
+
+  it("stays fail-closed when the domains can't be listed", async () => {
+    google.reset(() => googleError(403, "Not Authorized to access this resource/api", "forbidden"));
+    assert.equal(await isExternalTarget(freshTenant(), "pat@example.com"), true);
+  });
+
+  it("refuses to move a user's primary email onto an alias", async () => {
+    await assert.rejects(
+      changePrimaryDomain(freshTenant(), "pat@example.com", "example.net"),
+      /domain alias/
+    );
+    assert.ok(
+      google.calls.every((c) => c.method === "GET"),
+      "refused before anything was written"
+    );
   });
 });
