@@ -55,6 +55,14 @@ describe("REQUIRED_SCOPES", () => {
     assert.deepEqual([...missing], []);
   });
 
+  it("is the list the README tells people to authorise", () => {
+    const readme = fs.readFileSync(path.resolve(process.cwd(), "README.md"), "utf-8");
+    const inReadme = new Set(
+      [...readme.matchAll(/https:\/\/www\.googleapis\.com\/auth\/[a-z._]+/g)].map((m) => m[0])
+    );
+    assert.deepEqual([...inReadme].sort(), REQUIRED_SCOPES.map((s) => s.scope).sort());
+  });
+
   it("no page keeps a list of its own", () => {
     for (const page of ["app/setup/page.tsx", "app/onboarding/page.tsx"]) {
       const text = fs.readFileSync(path.join(SRC, page), "utf-8");

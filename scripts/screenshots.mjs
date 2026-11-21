@@ -82,6 +82,10 @@ async function captureForTheme(browser, theme) {
     await page.goto(`${BASE_URL}${path}`, { waitUntil: "networkidle0" });
     // Re-apply theme after navigation in case localStorage was cleared.
     await setTheme(page, theme);
+    // Park the pointer in the top-right margin. Left where the sign-in button
+    // was, it sits over whichever card lands there and lights it up as if it
+    // had been picked out on purpose.
+    await page.mouse.move(1396, 4);
     await new Promise((r) => setTimeout(r, delay));
     await page.addStyleTag({
       content: `
