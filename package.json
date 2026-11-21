@@ -11,6 +11,7 @@
     "screenshots": "node scripts/screenshots.mjs",
     "test:lib": "node scripts/test-lib.mjs",
     "test:launcher": "node --test \"packaging/launcher/test/*.test.ts\"",
+    "test:e2e": "node scripts/e2e/run.mjs",
     "package": "npm run build && npm run package:payload && npm run package:launcher",
     "package:payload": "node packaging/build-payload.mjs",
     "package:launcher": "node packaging/build-launcher.mjs",

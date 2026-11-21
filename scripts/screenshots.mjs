@@ -13,8 +13,9 @@ const THEMES = (process.env.SCREENSHOT_THEMES || "light,dark").split(",");
 // Every page in the sidebar, in sidebar order, so a page added to the app has an
 // obvious place here. Three are deliberately absent: security-check.png and
 // licenses.png show a finished scan, and signatures.png shows a preview. None
-// of those can be produced by loading a URL, so they are captured separately
-// (sample data) and left alone here.
+// of those can be produced by loading a URL, so scripts/e2e/screenshots.mjs
+// takes them, and they are left alone here. scripts/e2e/README.md has the
+// whole routine, including the sample organisation the pictures show.
 const pages = [
   { name: "dashboard", path: "/", delay: 1500 },
   { name: "get-started", path: "/onboarding", delay: 1500 },
