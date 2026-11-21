@@ -25,6 +25,7 @@ import {
   Layers,
   KeyRound,
   Settings2,
+  ShieldCheck,
   UserSearch,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -93,6 +94,7 @@ const navigation: NavGroup[] = [
   {
     label: "Audits",
     items: [
+      { name: "Security Check", href: "/security-check", icon: ShieldCheck },
       { name: "Sharing Audit", href: "/sharing-audit", icon: Share2 },
       { name: "User Audit", href: "/audit", icon: Shield },
       { name: "Activity Reports", href: "/activity-reports", icon: Activity },

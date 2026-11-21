@@ -1,6 +1,6 @@
 {
   "name": "google-workspace-open-admin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "eslint",
     "screenshots": "node scripts/screenshots.mjs",
+    "test:lib": "node scripts/test-lib.mjs",
     "test:launcher": "node --test \"packaging/launcher/test/*.test.ts\"",
     "package": "npm run build && npm run package:payload && npm run package:launcher",
     "package:payload": "node packaging/build-payload.mjs",

@@ -25,6 +25,7 @@ import {
   Layers,
   Activity,
   ScrollText,
+  ShieldCheck,
   UserSearch,
 } from "lucide-react";
 
@@ -142,6 +143,12 @@ const taskGroups: TaskGroup[] = [
         description: "Restore a mailbox export into another user, labels and dates intact.",
         href: "/mailbox-import",
         icon: Upload,
+      },
+      {
+        title: "Security Check",
+        description: "One scan for missing 2-Step Verification, idle accounts, outside forwarding and risky apps.",
+        href: "/security-check",
+        icon: ShieldCheck,
       },
       {
         title: "Sharing Audit",
