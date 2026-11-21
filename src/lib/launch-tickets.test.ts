@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
 import {
   clearLaunchTickets,
+  INSTANCE_PROOF_LABEL,
+  instanceProof,
   issueLaunchTicket,
   LAUNCH_TICKET_TTL_MS,
   launchTicketsSupported,
@@ -52,5 +55,37 @@ describe("launch tickets", () => {
     const rest = Array.from({ length: 8 }, () => issueLaunchTicket());
     assert.equal(redeemLaunchTicket(first), false, "pushed out by newer tickets");
     assert.equal(redeemLaunchTicket(rest[rest.length - 1]), true);
+  });
+});
+
+describe("instanceProof", () => {
+  const token = "a".repeat(64);
+  const env = { OPEN_ADMIN_PACKAGED: "1", OPEN_ADMIN_INSTANCE_TOKEN: token };
+  const challenge = "0123456789abcdef".repeat(4);
+
+  it("answers HMAC-SHA256 of the labelled challenge, keyed by the instance token", () => {
+    const want = createHmac("sha256", token)
+      .update(INSTANCE_PROOF_LABEL + challenge)
+      .digest("hex");
+    assert.equal(instanceProof(challenge, env), want);
+  });
+
+  it("differs for another token, so a program that doesn't know it can't answer", () => {
+    assert.notEqual(
+      instanceProof(challenge, { ...env, OPEN_ADMIN_INSTANCE_TOKEN: "b".repeat(64) }),
+      instanceProof(challenge, env)
+    );
+  });
+
+  it("refuses when not started by the launcher, with no token, or a short one", () => {
+    assert.equal(instanceProof(challenge, { OPEN_ADMIN_INSTANCE_TOKEN: token }), null);
+    assert.equal(instanceProof(challenge, { OPEN_ADMIN_PACKAGED: "1" }), null);
+    assert.equal(instanceProof(challenge, { ...env, OPEN_ADMIN_INSTANCE_TOKEN: "short" }), null);
+  });
+
+  it("refuses a challenge that isn't 64 lower-case hex characters", () => {
+    for (const bad of ["", "abc", challenge.toUpperCase(), challenge + "0", challenge.slice(1) + "g"]) {
+      assert.equal(instanceProof(bad, env), null, bad);
+    }
   });
 });
