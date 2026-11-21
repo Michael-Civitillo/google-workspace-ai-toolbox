@@ -2369,6 +2369,376 @@ export async function listExternallySharedFiles(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shared drives
+// ---------------------------------------------------------------------------
+
+/**
+ * A shared drive, and what the audit could learn about it without opening it.
+ *
+ * Files in a shared drive belong to the drive, not to a person, so the
+ * per-user scan above ('me' in owners) never sees them. They are also where an
+ * organisation keeps what it shares most widely.
+ */
+export interface SharedDriveSummary {
+  id: string;
+  name: string;
+  /** People, groups and domains outside the organisation that are members. */
+  externalMembers: ExternalSharedFile["external"];
+  memberCount: number;
+  /**
+   * Internal people who are members, best-placed first. The drive's files can
+   * only be listed by a member, so the file scan runs as one of these; empty
+   * when the drive has none (its members are all groups, or all external).
+   */
+  scanCandidates: string[];
+  /** Set when the drive's members could not be read. */
+  error: string | null;
+}
+
+export const SHARED_DRIVES_DEFAULT_PAGE = 20;
+export const SHARED_DRIVES_MAX_PAGE = 50;
+const SHARED_DRIVE_CONCURRENCY = 4;
+const SHARED_DRIVE_MAX_CANDIDATES = 3;
+const SHARED_DRIVE_ID_RE = /^[A-Za-z0-9_-]{5,100}$/;
+
+// Which member the file listing should run as: someone who can see the whole
+// drive, with the most senior first because they are the least likely to have
+// had individual folders hidden from them.
+const MEMBER_ROLE_RANK: Record<string, number> = {
+  organizer: 5,
+  fileOrganizer: 4,
+  writer: 3,
+  commenter: 2,
+  reader: 1,
+};
+
+/**
+ * One page of the tenant's shared drives, each with its external members.
+ *
+ * Runs as the admin with domain admin access, which is what lets it see every
+ * drive and its membership without being a member. That takes the full Drive
+ * scope (the narrower metadata scope does not cover the drives collection);
+ * nothing here writes.
+ *
+ * A drive whose members can't be read is returned with `error` set rather
+ * than failing the page.
+ */
+export async function listSharedDrives(
+  tenant: Tenant | null,
+  opts: { pageToken?: string; pageSize?: number; signal?: AbortSignal } = {}
+): Promise<{ drives: SharedDriveSummary[]; nextPageToken: string | null }> {
+  const verifiedDomains = await internalDomainsOrThrow(tenant, "list shared drives");
+  const drive = getDriveClientAsAdmin(tenant);
+  const pageSize = Math.min(
+    SHARED_DRIVES_MAX_PAGE,
+    Math.max(1, opts.pageSize ?? SHARED_DRIVES_DEFAULT_PAGE)
+  );
+  const call = { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal };
+  const retry = { retryServerErrors: true, signal: opts.signal };
+
+  const listed = await withGoogleRetry(
+    () =>
+      drive.drives.list(
+        {
+          useDomainAdminAccess: true,
+          pageSize,
+          pageToken: opts.pageToken,
+          fields: "nextPageToken, drives(id, name)",
+        },
+        call
+      ),
+    retry
+  );
+  const found = (listed.data.drives || []).filter((d) => d.id);
+
+  const summarise = async (d: drive_v3.Schema$Drive): Promise<SharedDriveSummary> => {
+    const summary: SharedDriveSummary = {
+      id: d.id || "",
+      name: d.name || "(unnamed drive)",
+      externalMembers: [],
+      memberCount: 0,
+      scanCandidates: [],
+      error: null,
+    };
+    try {
+      const members: drive_v3.Schema$Permission[] = [];
+      let pageToken: string | undefined;
+      do {
+        const r = await withGoogleRetry(
+          () =>
+            drive.permissions.list(
+              {
+                fileId: summary.id,
+                supportsAllDrives: true,
+                useDomainAdminAccess: true,
+                pageSize: 100,
+                pageToken,
+                fields:
+                  "nextPageToken, permissions(type, role, emailAddress, domain, deleted, allowFileDiscovery)",
+              },
+              call
+            ),
+          retry
+        );
+        members.push(...(r.data.permissions || []));
+        pageToken = r.data.nextPageToken ?? undefined;
+      } while (pageToken);
+
+      summary.memberCount = members.length;
+      const candidates: Array<{ email: string; rank: number }> = [];
+      for (const m of members) {
+        const external = classifyPermission(m, verifiedDomains);
+        if (external) {
+          summary.externalMembers.push(external);
+        } else if (m.type === "user" && m.emailAddress && !m.deleted) {
+          candidates.push({
+            email: m.emailAddress.toLowerCase(),
+            rank: MEMBER_ROLE_RANK[m.role || ""] ?? 0,
+          });
+        }
+      }
+      summary.scanCandidates = candidates
+        .sort((a, b) => b.rank - a.rank || a.email.localeCompare(b.email))
+        .slice(0, SHARED_DRIVE_MAX_CANDIDATES)
+        .map((c) => c.email);
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      summary.error = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+    }
+    return summary;
+  };
+
+  const drives: SharedDriveSummary[] = new Array(found.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < found.length) {
+      if (opts.signal?.aborted) throw new RequestAbortedError();
+      const i = next++;
+      drives[i] = await summarise(found[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SHARED_DRIVE_CONCURRENCY, found.length) }, worker)
+  );
+
+  return { drives, nextPageToken: listed.data.nextPageToken || null };
+}
+
+/** A file-scan result that also says which member it was read as. */
+export interface SharedDriveFilesResult extends SharingAuditResult {
+  driveId: string;
+}
+
+/**
+ * Scan one shared drive for files shared outside the organisation on top of
+ * the drive's own membership.
+ *
+ * Only a member can list a shared drive's files, so this runs as one of
+ * `asUsers` (the candidates from listSharedDrives), trying each in turn when
+ * starting and failing only if none can read it. A continuation must name the
+ * single user the first call reported in `user`: Drive's page tokens belong to
+ * whoever was issued them.
+ *
+ * Drive does not return permissions inline for shared-drive items. It does
+ * say which files have permissions of their own (`hasAugmentedPermissions`),
+ * so only those are looked up, and of their permissions only the ones set on
+ * the file itself count: what a file inherits from the drive is the drive's
+ * membership, already reported once for the drive.
+ *
+ * Same caps and resume contract as the per-user scan. Metadata only.
+ */
+export async function listExternallySharedDriveFiles(
+  tenant: Tenant | null,
+  opts: {
+    driveId: string;
+    asUsers: string[];
+    pageToken?: string;
+    signal?: AbortSignal;
+  }
+): Promise<SharedDriveFilesResult> {
+  if (!SHARED_DRIVE_ID_RE.test(opts.driveId)) {
+    throw new Error("driveId is malformed");
+  }
+  const verifiedDomains = await internalDomainsOrThrow(tenant, "scan a shared drive");
+  const asUsers = [...new Set(opts.asUsers.map((u) => u.trim().toLowerCase()))].filter(Boolean);
+  if (asUsers.length === 0) {
+    throw new Error("No internal member to read this shared drive as");
+  }
+  for (const user of asUsers) {
+    if (!isValidEmail(user)) throw new Error("asUsers must be valid email addresses");
+    // Never impersonate someone outside the organisation, whatever a caller sends.
+    if (!verifiedDomains.has(emailDomain(user))) {
+      throw new Error(`${user} is not in one of this tenant's domains`);
+    }
+  }
+  if (opts.pageToken && asUsers.length !== 1) {
+    throw new Error("A continued scan must name the one user it started as");
+  }
+
+  const call = { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal };
+  const retry = { retryServerErrors: true, signal: opts.signal };
+  const listPage = (drive: drive_v3.Drive, pageToken: string | undefined, pageSize: number) =>
+    withGoogleRetry(
+      () =>
+        drive.files.list(
+          {
+            corpora: "drive",
+            driveId: opts.driveId,
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+            q: "trashed = false",
+            pageSize,
+            pageToken,
+            fields:
+              "nextPageToken, files(id, name, mimeType, webViewLink, hasAugmentedPermissions)",
+          },
+          call
+        ),
+      retry
+    );
+
+  // Find a member who can actually read the drive. A suspended account, or one
+  // removed since the members were listed, fails here and the next is tried.
+  let drive: drive_v3.Drive | null = null;
+  let scannedAs = "";
+  let firstPage: { data: drive_v3.Schema$FileList } | null = null;
+  let lastError: unknown = null;
+  for (const user of asUsers) {
+    try {
+      const candidate = getDriveClient(tenant, user);
+      firstPage = await listPage(candidate, opts.pageToken, 100);
+      drive = candidate;
+      scannedAs = user;
+      break;
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      lastError = e;
+    }
+  }
+  if (!drive || !firstPage) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("No member could read this shared drive");
+  }
+
+  const matches: ExternalSharedFile[] = [];
+  let scanned = 0;
+  let pagesFetched = 1;
+  let page: { data: drive_v3.Schema$FileList } = firstPage;
+  let pageToken: string | undefined;
+  const SHARED_DRIVE_MAX_PAGES = 50;
+
+  const ownExternalPermissions = async (
+    fileId: string
+  ): Promise<ExternalSharedFile["external"]> => {
+    const out: ExternalSharedFile["external"] = [];
+    let permPageToken: string | undefined;
+    do {
+      const r = await withGoogleRetry(
+        () =>
+          drive.permissions.list(
+            {
+              fileId,
+              supportsAllDrives: true,
+              pageSize: 100,
+              pageToken: permPageToken,
+              fields:
+                "nextPageToken, permissions(type, role, emailAddress, domain, allowFileDiscovery, permissionDetails(inherited))",
+            },
+            call
+          ),
+        retry
+      );
+      for (const p of r.data.permissions || []) {
+        // Set on this file (or a folder below the drive), not handed down
+        // from the drive's membership. No details at all means Drive did not
+        // say, and an unexplained external permission is reported.
+        const details = p.permissionDetails || [];
+        const ownGrant = details.length === 0 || details.some((d) => d.inherited !== true);
+        if (!ownGrant) continue;
+        const external = classifyPermission(p, verifiedDomains);
+        if (external) out.push(external);
+      }
+      permPageToken = r.data.nextPageToken ?? undefined;
+    } while (permPageToken);
+    return out;
+  };
+
+  for (;;) {
+    const files = page.data.files || [];
+    scanned += files.length;
+    const augmented = files.filter((f) => f.id && f.hasAugmentedPermissions);
+    let next = 0;
+    const worker = async () => {
+      while (next < augmented.length) {
+        if (opts.signal?.aborted) throw new RequestAbortedError();
+        const f = augmented[next++];
+        let externals: ExternalSharedFile["external"];
+        try {
+          externals = await ownExternalPermissions(f.id as string);
+        } catch (e) {
+          if (isAbortError(e)) throw e;
+          // One unreadable file must not hide the rest of the drive.
+          continue;
+        }
+        if (externals.length > 0) {
+          matches.push({
+            id: f.id || "",
+            name: f.name || "(untitled)",
+            webViewLink: f.webViewLink || null,
+            mimeType: f.mimeType || "",
+            ownedByMe: false,
+            externalCount: externals.length,
+            external: externals,
+          });
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SHARED_DRIVE_CONCURRENCY, augmented.length) }, worker)
+    );
+
+    pageToken = page.data.nextPageToken ?? undefined;
+    if (!pageToken) break;
+    if (scanned >= SHARING_AUDIT_FILE_CAP || pagesFetched >= SHARED_DRIVE_MAX_PAGES) break;
+    pagesFetched++;
+    page = await listPage(drive, pageToken, Math.min(100, SHARING_AUDIT_FILE_CAP - scanned));
+  }
+
+  matches.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return {
+    driveId: opts.driveId,
+    user: scannedAs,
+    scannedFiles: scanned,
+    truncated: !!pageToken,
+    nextPageToken: pageToken ?? null,
+    files: matches,
+  };
+}
+
+/**
+ * The tenant's verified domains (aliases included), or an error rather than
+ * an empty set: with nothing to compare against, every collaborator would be
+ * classified as external.
+ */
+async function internalDomainsOrThrow(
+  tenant: Tenant | null,
+  doing: string
+): Promise<Set<string>> {
+  const verified = new Set(
+    (await listDomains(tenant))
+      .filter((d) => d.verified)
+      .map((d) => d.domainName.toLowerCase())
+  );
+  if (verified.size === 0) {
+    throw new Error(
+      `No verified domains resolved for this tenant — refusing to ${doing}, as every collaborator would be misclassified as external. Check the tenant's domain configuration and try again.`
+    );
+  }
+  return verified;
+}
+
 /**
  * Per-batch cap for path resolution. Each file might trigger N
  * `files.get` calls for ancestor folders, but the per-tenant folder cache

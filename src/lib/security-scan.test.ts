@@ -18,6 +18,8 @@ import {
   isExternalTarget,
   listDomains,
   listDelegationChanges,
+  listExternallySharedDriveFiles,
+  listSharedDrives,
   revokeAppForUser,
   scanSecurityPage,
   SecurityFixStaleError,
@@ -891,5 +893,368 @@ describe("listDomains and domain aliases", () => {
       google.calls.every((c) => c.method === "GET"),
       "refused before anything was written"
     );
+  });
+});
+
+const DRIVE_FULL = "https://www.googleapis.com/auth/drive";
+const DRIVE_METADATA = "https://www.googleapis.com/auth/drive.metadata.readonly";
+const DOMAINS_PATH = "/admin/directory/v1/customer/my_customer/domains";
+const oneDomain = () =>
+  json({ domains: [{ domainName: "example.com", isPrimary: true, verified: true }] });
+
+describe("listSharedDrives", () => {
+  // The domain list is cached per tenant; a fresh id keeps each test's own.
+  let n = 0;
+  const t = () => ({ ...tenant, id: `drives-test-${++n}` });
+  beforeEach(() => google.reset(() => undefined));
+
+  /** A tenant with the given drives and their members. */
+  const drives = (
+    list: Array<{ id: string; name: string }>,
+    members: Record<string, unknown[] | (() => Response)>,
+    nextPageToken?: string
+  ): Handler => (call) => {
+    const p = call.url.pathname;
+    if (p === DOMAINS_PATH) return oneDomain();
+    if (p === "/drive/v3/drives") return json({ drives: list, nextPageToken });
+    const perms = p.match(/^\/drive\/v3\/files\/([^/]+)\/permissions$/);
+    if (perms) {
+      const answer = members[perms[1]];
+      return typeof answer === "function" ? answer() : json({ permissions: answer ?? [] });
+    }
+    return undefined;
+  };
+
+  it("reports who outside the organisation is a member of each drive", async () => {
+    google.reset(
+      drives(
+        [
+          { id: "drive-sales", name: "Sales" },
+          { id: "drive-legal", name: "Legal" },
+        ],
+        {
+          "drive-sales": [
+            { type: "user", role: "organizer", emailAddress: "Lead@Example.com" },
+            { type: "user", role: "writer", emailAddress: "agency@partner.example" },
+            { type: "group", role: "reader", emailAddress: "everyone@example.com" },
+            { type: "domain", role: "reader", domain: "partner.example" },
+          ],
+          "drive-legal": [{ type: "user", role: "reader", emailAddress: "counsel@example.com" }],
+        }
+      )
+    );
+    const page = await listSharedDrives(t());
+    assert.equal(page.nextPageToken, null);
+    assert.deepEqual(page.drives, [
+      {
+        id: "drive-sales",
+        name: "Sales",
+        externalMembers: [
+          { type: "user", role: "writer", target: "agency@partner.example" },
+          { type: "domain", role: "reader", target: "partner.example", allowFileDiscovery: null },
+        ],
+        memberCount: 4,
+        scanCandidates: ["lead@example.com"],
+        error: null,
+      },
+      {
+        id: "drive-legal",
+        name: "Legal",
+        externalMembers: [],
+        memberCount: 1,
+        scanCandidates: ["counsel@example.com"],
+        error: null,
+      },
+    ]);
+  });
+
+  it("offers the most senior internal people to scan as, never groups or outsiders", async () => {
+    google.reset(
+      drives([{ id: "drive-x", name: "X" }], {
+        "drive-x": [
+          { type: "user", role: "reader", emailAddress: "a-reader@example.com" },
+          { type: "user", role: "organizer", emailAddress: "z-manager@example.com" },
+          { type: "user", role: "writer", emailAddress: "m-writer@example.com" },
+          { type: "user", role: "fileOrganizer", emailAddress: "c-content@example.com" },
+          { type: "user", role: "organizer", emailAddress: "outsider@partner.example" },
+          { type: "group", role: "organizer", emailAddress: "admins@example.com" },
+          { type: "user", role: "organizer", emailAddress: "gone@example.com", deleted: true },
+        ],
+      })
+    );
+    const [drive] = (await listSharedDrives(t())).drives;
+    assert.deepEqual(drive.scanCandidates, [
+      "z-manager@example.com",
+      "c-content@example.com",
+      "m-writer@example.com",
+    ]);
+  });
+
+  it("has no one to scan as when a drive's members are all groups", async () => {
+    google.reset(
+      drives([{ id: "drive-g", name: "Groups only" }], {
+        "drive-g": [{ type: "group", role: "organizer", emailAddress: "team@example.com" }],
+      })
+    );
+    assert.deepEqual((await listSharedDrives(t())).drives[0].scanCandidates, []);
+  });
+
+  it("asks as the admin with domain admin access, and only reads", async () => {
+    google.reset(drives([{ id: "drive-x", name: "X" }], { "drive-x": [] }, "more"));
+    const page = await listSharedDrives(t(), { pageToken: "p2", pageSize: 500 });
+    assert.equal(page.nextPageToken, "more");
+    const listing = google.callsTo("/drive/v3/drives")[0];
+    assert.equal(listing.url.searchParams.get("useDomainAdminAccess"), "true");
+    assert.equal(listing.url.searchParams.get("pageToken"), "p2");
+    assert.equal(listing.url.searchParams.get("pageSize"), "50", "capped");
+    const members = google.callsTo("/permissions")[0];
+    assert.equal(members.url.searchParams.get("useDomainAdminAccess"), "true");
+    assert.equal(members.url.searchParams.get("supportsAllDrives"), "true");
+    for (const call of google.calls.filter((c) => c.url.pathname.startsWith("/drive/"))) {
+      assert.equal(call.method, "GET");
+      assert.equal(call.subject, ADMIN);
+      assert.deepEqual(call.scopes, [DRIVE_FULL]);
+    }
+  });
+
+  it("reports a drive whose members can't be read without losing the others", async () => {
+    google.reset(
+      drives(
+        [
+          { id: "drive-bad", name: "Bad" },
+          { id: "drive-ok", name: "OK" },
+        ],
+        {
+          "drive-bad": () => googleError(403, "The user does not have sufficient permissions", "forbidden"),
+          "drive-ok": [{ type: "user", role: "reader", emailAddress: "x@partner.example" }],
+        }
+      )
+    );
+    const { drives: result } = await listSharedDrives(t());
+    assert.match(result[0].error ?? "", /sufficient permissions/);
+    assert.equal(result[1].externalMembers.length, 1);
+  });
+
+  it("follows a long member list across pages", async () => {
+    google.reset((call) => {
+      const p = call.url.pathname;
+      if (p === DOMAINS_PATH) return oneDomain();
+      if (p === "/drive/v3/drives") return json({ drives: [{ id: "drive-x", name: "X" }] });
+      if (p.endsWith("/permissions")) {
+        return call.url.searchParams.get("pageToken")
+          ? json({ permissions: [{ type: "user", role: "reader", emailAddress: "late@partner.example" }] })
+          : json({
+              permissions: [{ type: "user", role: "reader", emailAddress: "a@example.com" }],
+              nextPageToken: "m2",
+            });
+      }
+      return undefined;
+    });
+    const [drive] = (await listSharedDrives(t())).drives;
+    assert.equal(drive.memberCount, 2);
+    assert.deepEqual(drive.externalMembers.map((m) => m.target), ["late@partner.example"]);
+  });
+
+  it("refuses when the tenant's domains can't be told", async () => {
+    google.reset((call) =>
+      call.url.pathname === DOMAINS_PATH ? json({ domains: [] }) : undefined
+    );
+    await assert.rejects(listSharedDrives(t()), /No verified domains/);
+    assert.equal(google.callsTo("/drive/v3/drives").length, 0);
+  });
+});
+
+describe("listExternallySharedDriveFiles", () => {
+  let n = 0;
+  const t = () => ({ ...tenant, id: `drive-files-test-${++n}` });
+  beforeEach(() => google.reset(() => undefined));
+
+  const inherited = { permissionDetails: [{ inherited: true }] };
+  const own = { permissionDetails: [{ inherited: false }] };
+
+  /** One drive's files and each file's permissions; `readableBy` limits who can list it. */
+  const driveWith = (
+    files: unknown[],
+    permissions: Record<string, unknown[]>,
+    opts: { readableBy?: string[]; nextPageToken?: string } = {}
+  ): Handler => (call) => {
+    const p = call.url.pathname;
+    if (p === DOMAINS_PATH) return oneDomain();
+    if (p === "/drive/v3/files") {
+      if (opts.readableBy && !opts.readableBy.includes(call.subject ?? "")) {
+        return googleError(404, "Shared drive not found: drive-x", "notFound");
+      }
+      return json({ files, nextPageToken: opts.nextPageToken });
+    }
+    const perms = p.match(/^\/drive\/v3\/files\/([^/]+)\/permissions$/);
+    if (perms) return json({ permissions: permissions[perms[1]] ?? [] });
+    return undefined;
+  };
+  const scan = (overrides: Partial<Parameters<typeof listExternallySharedDriveFiles>[1]> = {}) =>
+    listExternallySharedDriveFiles(t(), {
+      driveId: "drive-x",
+      asUsers: ["lead@example.com"],
+      ...overrides,
+    });
+
+  it("reports files shared outside on top of the drive's membership", async () => {
+    google.reset(
+      driveWith(
+        [
+          { id: "f-plain", name: "Plain", mimeType: "text/plain", hasAugmentedPermissions: false },
+          { id: "f-link", name: "Price list", mimeType: "application/pdf", webViewLink: "https://drive.example/f-link", hasAugmentedPermissions: true },
+          { id: "f-person", name: "Contract", mimeType: "application/pdf", hasAugmentedPermissions: true },
+          { id: "f-internal", name: "Internal", mimeType: "text/plain", hasAugmentedPermissions: true },
+        ],
+        {
+          "f-link": [{ type: "anyone", role: "reader", allowFileDiscovery: false, ...own }],
+          "f-person": [
+            { type: "user", role: "writer", emailAddress: "counsel@lawfirm.example", ...own },
+            { type: "user", role: "reader", emailAddress: "agency@partner.example", ...inherited },
+          ],
+          "f-internal": [{ type: "user", role: "writer", emailAddress: "colleague@example.com", ...own }],
+        }
+      )
+    );
+    const result = await scan();
+    assert.equal(result.driveId, "drive-x");
+    assert.equal(result.user, "lead@example.com");
+    assert.equal(result.scannedFiles, 4);
+    assert.equal(result.nextPageToken, null);
+    assert.deepEqual(result.files, [
+      {
+        id: "f-person",
+        name: "Contract",
+        webViewLink: null,
+        mimeType: "application/pdf",
+        ownedByMe: false,
+        externalCount: 1,
+        external: [{ type: "user", role: "writer", target: "counsel@lawfirm.example" }],
+      },
+      {
+        id: "f-link",
+        name: "Price list",
+        webViewLink: "https://drive.example/f-link",
+        mimeType: "application/pdf",
+        ownedByMe: false,
+        externalCount: 1,
+        external: [{ type: "anyone", role: "reader", target: "*", allowFileDiscovery: false }],
+      },
+    ]);
+  });
+
+  it("does not repeat the drive's own external members against every file", async () => {
+    google.reset(
+      driveWith([{ id: "f1", name: "Doc", hasAugmentedPermissions: true }], {
+        f1: [{ type: "user", role: "reader", emailAddress: "agency@partner.example", ...inherited }],
+      })
+    );
+    assert.deepEqual((await scan()).files, []);
+  });
+
+  it("looks up permissions only for files that have their own", async () => {
+    google.reset(
+      driveWith(
+        [
+          { id: "f1", name: "A", hasAugmentedPermissions: false },
+          { id: "f2", name: "B", hasAugmentedPermissions: false },
+          { id: "f3", name: "C", hasAugmentedPermissions: true },
+        ],
+        { f3: [] }
+      )
+    );
+    await scan();
+    assert.deepEqual(
+      google.callsTo("/permissions").map((c) => c.url.pathname),
+      ["/drive/v3/files/f3/permissions"]
+    );
+  });
+
+  it("lists the drive as a member, with the metadata scope, and only reads", async () => {
+    google.reset(driveWith([{ id: "f1", name: "A", hasAugmentedPermissions: true }], { f1: [] }));
+    await scan();
+    const listing = google.callsTo("/drive/v3/files")[0];
+    assert.equal(listing.url.searchParams.get("corpora"), "drive");
+    assert.equal(listing.url.searchParams.get("driveId"), "drive-x");
+    assert.equal(listing.url.searchParams.get("includeItemsFromAllDrives"), "true");
+    assert.equal(listing.url.searchParams.get("supportsAllDrives"), "true");
+    for (const call of google.calls.filter((c) => c.url.pathname.startsWith("/drive/"))) {
+      assert.equal(call.method, "GET");
+      assert.equal(call.subject, "lead@example.com");
+      assert.deepEqual(call.scopes, [DRIVE_METADATA]);
+    }
+  });
+
+  it("falls back to the next member when the first can't read the drive", async () => {
+    google.reset(driveWith([], {}, { readableBy: ["second@example.com"] }));
+    const result = await scan({ asUsers: ["first@example.com", "second@example.com"] });
+    assert.equal(result.user, "second@example.com");
+  });
+
+  it("fails with Google's reason when no member can read it", async () => {
+    google.reset(driveWith([], {}, { readableBy: [] }));
+    await assert.rejects(scan({ asUsers: ["first@example.com", "second@example.com"] }), /not found/i);
+  });
+
+  it("hands back a token to continue, and continues as the same member", async () => {
+    google.reset(driveWith([{ id: "f1", name: "A", hasAugmentedPermissions: false }], {}, { nextPageToken: "more" }));
+    // One page is under the per-call cap, so the scan keeps going until it is told there is no more.
+    let pages = 0;
+    google.reset((call) => {
+      const p = call.url.pathname;
+      if (p === DOMAINS_PATH) return oneDomain();
+      if (p === "/drive/v3/files") {
+        pages++;
+        return json({
+          files: Array.from({ length: 100 }, (_, i) => ({ id: `f${pages}-${i}`, name: "x", hasAugmentedPermissions: false })),
+          nextPageToken: `page-${pages + 1}`,
+        });
+      }
+      return undefined;
+    });
+    const result = await scan();
+    assert.equal(result.scannedFiles, 1000, "stops at the per-call cap");
+    assert.equal(result.truncated, true);
+    assert.equal(result.nextPageToken, "page-11");
+    await assert.rejects(
+      scan({ pageToken: "page-11", asUsers: ["a@example.com", "b@example.com"] }),
+      /one user it started as/
+    );
+  });
+
+  it("never impersonates someone outside the organisation", async () => {
+    google.reset(driveWith([], {}));
+    await assert.rejects(scan({ asUsers: ["agency@partner.example"] }), /not in one of this tenant's domains/);
+    assert.equal(google.callsTo("/drive/v3/files").length, 0);
+  });
+
+  it("rejects a malformed drive id or an empty member list before calling Drive", async () => {
+    google.reset(driveWith([], {}));
+    await assert.rejects(scan({ driveId: "../etc" }), /malformed/);
+    await assert.rejects(scan({ asUsers: [] }), /No internal member/);
+    assert.equal(google.callsTo("/drive/v3/files").length, 0);
+  });
+
+  it("skips a file whose permissions can't be read instead of failing the drive", async () => {
+    google.reset((call) => {
+      const p = call.url.pathname;
+      if (p === DOMAINS_PATH) return oneDomain();
+      if (p === "/drive/v3/files") {
+        return json({
+          files: [
+            { id: "f-locked", name: "Locked", hasAugmentedPermissions: true },
+            { id: "f-open", name: "Open", hasAugmentedPermissions: true },
+          ],
+        });
+      }
+      if (p === "/drive/v3/files/f-locked/permissions") {
+        return googleError(403, "Insufficient permissions for this file", "forbidden");
+      }
+      if (p === "/drive/v3/files/f-open/permissions") {
+        return json({ permissions: [{ type: "anyone", role: "reader", ...own }] });
+      }
+      return undefined;
+    });
+    assert.deepEqual((await scan()).files.map((f) => f.id), ["f-open"]);
   });
 });

@@ -31,6 +31,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { SharedDrivesAudit } from "./shared-drives";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
 interface ExternalPermission {
@@ -1269,6 +1270,9 @@ export default function SharingAudit() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Shared drives: files nobody owns, which the audits above can't see. */}
+        <SharedDrivesAudit tenantId={tenantId} />
 
         {/* Tenant-wide progress + results */}
         {(tenantLoading || perUser.length > 0) && (
