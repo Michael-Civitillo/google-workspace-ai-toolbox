@@ -7,15 +7,15 @@ import { dataPath } from "./data-dir";
 import type { AppConfig } from "./app-config-types";
 
 /**
- * Application-level configuration store (app-config.json): today just the
- * onboarding state. Lives next to tenants.json and sso.json, written with the
+ * Application-level configuration store (app-config.json): the onboarding
+ * state and whether to check for updates. Lives next to tenants.json and sso.json, written with the
  * same atomic tmp-file + fsync + rename machinery, and gitignored.
  */
 
 const STORE_PATH = dataPath("app-config.json");
 
 function emptyConfig(): AppConfig {
-  return { version: 1, onboardingCompletedAt: null };
+  return { version: 1, onboardingCompletedAt: null, updateCheck: false };
 }
 
 /**
@@ -28,6 +28,8 @@ function normalize(parsed: Record<string, unknown> | null): AppConfig {
   if (parsed && typeof parsed.onboardingCompletedAt === "string") {
     config.onboardingCompletedAt = parsed.onboardingCompletedAt;
   }
+  // Only an explicit true turns it on; anything else on disk is "off".
+  config.updateCheck = parsed?.updateCheck === true;
   return config;
 }
 
@@ -55,5 +57,11 @@ export async function setOnboardingCompleted(
 ): Promise<AppConfig> {
   return updateAppConfig((config) => {
     config.onboardingCompletedAt = completed ? new Date().toISOString() : null;
+  });
+}
+
+export async function setUpdateCheck(enabled: boolean): Promise<AppConfig> {
+  return updateAppConfig((config) => {
+    config.updateCheck = enabled;
   });
 }
