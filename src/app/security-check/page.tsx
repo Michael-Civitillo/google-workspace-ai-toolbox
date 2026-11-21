@@ -36,14 +36,18 @@ import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import {
   compareApps,
   delegationNeedsReview,
+  findingKey,
   INACTIVE_DEFAULT_DAYS,
   INACTIVE_THRESHOLDS,
   isInactiveAt,
   mergeAppGrants,
   REVOKE_APP_BATCH,
+  SNAPSHOT_MAX_KEYS,
+  snapshotKeys,
   summariseAccess,
   type AccessLevel,
   type AppGrant,
+  type CheckName,
   type DelegatedClient,
   type DelegationReport,
   type ForwardingFinding,
@@ -253,6 +257,7 @@ function Tile({
   value,
   note,
   status,
+  fresh = 0,
   selected,
   onSelect,
 }: {
@@ -261,6 +266,8 @@ function Tile({
   value: string;
   note: string;
   status: Status;
+  /** Findings in this check that the previous scan did not have. */
+  fresh?: number;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -281,7 +288,10 @@ function Tile({
         <Icon className="mt-0.5 h-4 w-4 shrink-0" />
         {label}
       </span>
-      <span className="text-3xl font-semibold tabular-nums tracking-tight">{value}</span>
+      <span className="flex items-center gap-2">
+        <span className="text-3xl font-semibold tabular-nums tracking-tight">{value}</span>
+        {fresh > 0 && <Badge variant="accent">{fresh.toLocaleString()} new</Badge>}
+      </span>
       <span className="text-xs text-muted-foreground">{note}</span>
       <span
         className={cn("mt-auto flex items-center gap-1.5 text-xs font-medium", s.className)}
@@ -335,8 +345,19 @@ export default function SecurityCheck() {
   const [fix, setFix] = useState<Fix | null>(null);
   const [fixBusy, setFixBusy] = useState(false);
   const [fixError, setFixError] = useState<string | null>(null);
+  // The scan before this one, read when a scan starts: what "new" is measured
+  // against. null means there is nothing to compare with.
+  const [baseline, setBaseline] = useState<{
+    completedAt: string;
+    keys: Set<string>;
+    covered: Set<string>;
+  } | null>(null);
+  const [onlyNew, setOnlyNew] = useState(false);
 
   const cancelRef = useRef(false);
+  // The run whose result has been stored as the next baseline, so a finished
+  // scan is remembered once however often the page re-renders afterwards.
+  const savedRunRef = useRef<AbortController | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
@@ -361,6 +382,8 @@ export default function SecurityCheck() {
     setFix(null);
     setFixBusy(false);
     setFixError(null);
+    setBaseline(null);
+    setOnlyNew(false);
   };
 
   // Findings from tenant A must never be read as tenant B's: stop any scan in
@@ -426,6 +449,27 @@ export default function SecurityCheck() {
     let pages = 0;
 
     try {
+      // What the last finished scan found, so this one can mark what is new.
+      // Local and quick; if it can't be read the scan simply has no markers.
+      try {
+        const res = await tfetch(
+          "/api/admin/security-check/history",
+          { signal: ac.signal },
+          pinnedTenantId
+        );
+        const result = await res.json();
+        if (tenantIdRef.current !== pinnedTenantId) return;
+        if (result.success && result.data) {
+          setBaseline({
+            completedAt: result.data.completedAt,
+            keys: new Set<string>(result.data.keys),
+            covered: new Set<string>(result.data.covered),
+          });
+        }
+      } catch {
+        if (ac.signal.aborted) throw new Error("aborted");
+      }
+
       while (true) {
         const qs = new URLSearchParams();
         if (pageToken) qs.set("pageToken", pageToken);
@@ -687,12 +731,87 @@ export default function SecurityCheck() {
     [apps]
   );
 
+  const delegatedAll = useMemo(() => delegation?.clients ?? [], [delegation]);
+
+  // Remember a scan that covered the whole tenant as the baseline for the next
+  // one. Waits for the delegation request, which runs beside the account scan.
+  useEffect(() => {
+    if (!done || scanning || stopped !== null || delegationLoading) return;
+    const run = abortRef.current;
+    if (!run || savedRunRef.current === run) return;
+    savedRunRef.current = run;
+    const keys = snapshotKeys({
+      twoStep,
+      inactive,
+      forwarding,
+      apps,
+      delegated: delegatedAll,
+    });
+    if (keys.length > SNAPSHOT_MAX_KEYS) return;
+    const covered: CheckName[] = ["twoStep", "inactive", "forwarding", "apps"];
+    if (delegation) covered.push("delegation");
+    tfetch(
+      "/api/admin/security-check/history",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completedAt: new Date().toISOString(), keys, covered }),
+      },
+      tenantId
+    ).catch(() => {
+      // Losing the baseline costs the next scan its "new" markers, nothing more.
+    });
+  }, [
+    done,
+    scanning,
+    stopped,
+    delegationLoading,
+    delegation,
+    delegatedAll,
+    twoStep,
+    inactive,
+    forwarding,
+    apps,
+    tenantId,
+  ]);
+
+  /** New since the previous scan, for a check that scan actually covered. */
+  const isNew = (check: CheckName, key: string) =>
+    baseline !== null && baseline.covered.has(check) && !baseline.keys.has(key);
+  const newTwoStep = (f: TwoStepFinding) => isNew("twoStep", findingKey.twoStep(f));
+  const newInactive = (f: InactiveFinding) =>
+    isNew("inactive", findingKey.inactive(f, threshold));
+  const newForwarding = (f: ForwardingFinding) =>
+    isNew("forwarding", findingKey.forwarding(f));
+  const newApp = (app: AppGrant) => isNew("apps", findingKey.app(app));
+  const newClient = (client: DelegatedClient) =>
+    isNew("delegation", findingKey.delegation(client));
+
   const adminsWithoutTwoStep = twoStep.filter((f) => f.admin).length;
   const forwardingMailboxes = new Set(forwarding.map((f) => f.user)).size;
   const hiddenForwards = forwarding.filter((f) => f.hidesOriginal).length;
   const broadApps = appRows.filter((r) => r.access.level === "high").length;
-  const delegatedClients = delegation?.clients ?? [];
-  const delegationToReview = delegatedClients.filter(delegationNeedsReview).length;
+  const delegationToReview = delegatedAll.filter(delegationNeedsReview).length;
+
+  // The lists as shown: everything, or only what the last scan didn't have.
+  const twoStepList = onlyNew ? twoStepSorted.filter(newTwoStep) : twoStepSorted;
+  const inactiveList = onlyNew ? inactiveShown.filter(newInactive) : inactiveShown;
+  const forwardingList = onlyNew ? forwarding.filter(newForwarding) : forwarding;
+  const appList = onlyNew ? appRows.filter((r) => newApp(r.app)) : appRows;
+  const delegatedClients = onlyNew ? delegatedAll.filter(newClient) : delegatedAll;
+  const freshCount = {
+    twoStep: twoStepSorted.filter(newTwoStep).length,
+    inactive: inactiveShown.filter(newInactive).length,
+    forwarding: new Set(forwarding.filter(newForwarding).map((f) => f.user)).size,
+    apps: appRows.filter((r) => r.access.level === "high" && newApp(r.app)).length,
+    delegation: delegatedAll.filter((c) => delegationNeedsReview(c) && newClient(c)).length,
+  };
+  const anythingNew =
+    twoStepSorted.some(newTwoStep) ||
+    inactiveShown.some(newInactive) ||
+    forwarding.some(newForwarding) ||
+    apps.some(newApp) ||
+    delegatedAll.some(newClient);
   const hasResults = totals !== null;
   const partial = stopped !== null;
 
@@ -755,7 +874,7 @@ export default function SecurityCheck() {
   const exportCsv = () => {
     downloadCsv(
       `security-check-${new Date().toISOString().slice(0, 10)}.csv`,
-      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedClients)
+      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedAll)
     );
   };
 
@@ -777,7 +896,9 @@ export default function SecurityCheck() {
   const emptyText = (clean: string) =>
     !hasResults
       ? "Run the check to see results."
-      : scanning
+      : onlyNew
+        ? "Nothing new here since the last scan."
+        : scanning
         ? "Nothing found yet…"
         : partial
           ? "Nothing found in the part of the tenant that was checked."
@@ -788,7 +909,7 @@ export default function SecurityCheck() {
       inactive.length +
       forwarding.length +
       apps.length +
-      delegatedClients.length >
+      delegatedAll.length >
     0;
   const unreadTotal = (totals?.mailboxErrors ?? 0) + (totals?.appErrors ?? 0);
 
@@ -848,6 +969,7 @@ export default function SecurityCheck() {
                 : `of ${plural(totals.activeAccounts, "active account")}`
           }
           status={status.twoStep}
+          fresh={freshCount.twoStep}
           selected={selected === "twoStep"}
           onSelect={() => select("twoStep")}
         />
@@ -857,6 +979,7 @@ export default function SecurityCheck() {
           value={hasResults ? inactiveShown.length.toLocaleString() : "–"}
           note={`No sign-in for ${threshold} days or more`}
           status={status.inactive}
+          fresh={freshCount.inactive}
           selected={selected === "inactive"}
           onSelect={() => select("inactive")}
         />
@@ -872,6 +995,7 @@ export default function SecurityCheck() {
                 : `of ${plural(totals.mailboxesChecked, "mailbox", "mailboxes")} read`
           }
           status={status.forwarding}
+          fresh={freshCount.forwarding}
           selected={selected === "forwarding"}
           onSelect={() => select("forwarding")}
         />
@@ -885,6 +1009,7 @@ export default function SecurityCheck() {
               : `of ${plural(apps.length, "connected app")}`
           }
           status={status.apps}
+          fresh={freshCount.apps}
           selected={selected === "apps"}
           onSelect={() => select("apps")}
         />
@@ -900,10 +1025,46 @@ export default function SecurityCheck() {
                 : "Granted or changed in the last 6 months"
           }
           status={status.delegation}
+          fresh={freshCount.delegation}
           selected={selected === "delegation"}
           onSelect={() => select("delegation")}
         />
       </div>
+
+      {hasResults && (baseline || (done && !partial)) && (
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
+          {baseline ? (
+            <>
+              <span>
+                Compared with the scan on {formatDate(baseline.completedAt)}:{" "}
+                {anythingNew
+                  ? "what it didn't have is marked new."
+                  : scanning
+                    ? "nothing new so far."
+                    : "nothing new."}
+              </span>
+              {(anythingNew || onlyNew) && (
+                <Button
+                  size="xs"
+                  variant={onlyNew ? "default" : "outline"}
+                  aria-pressed={onlyNew}
+                  onClick={() => {
+                    setOnlyNew((v) => !v);
+                    setShowAll(false);
+                  }}
+                >
+                  Only show what&apos;s new
+                </Button>
+              )}
+            </>
+          ) : (
+            <span>
+              First scan on this install. The next one will mark what has
+              changed since today.
+            </span>
+          )}
+        </div>
+      )}
 
       <Card className="mt-6">
         {selected === "twoStep" && (
@@ -929,13 +1090,13 @@ export default function SecurityCheck() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {twoStepSorted.length === 0 ? (
+              {twoStepList.length === 0 ? (
                 <Empty>
                   {emptyText("Every active account is enrolled in 2-Step Verification.")}
                 </Empty>
               ) : (
                 <>
-                  {limited(twoStepSorted).map((f) => (
+                  {limited(twoStepList).map((f) => (
                     <div
                       key={f.user}
                       className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3"
@@ -948,10 +1109,13 @@ export default function SecurityCheck() {
                           </p>
                         )}
                       </div>
-                      {f.admin && <Badge variant="destructive">administrator</Badge>}
+                      <div className="flex shrink-0 items-center gap-2">
+                        {newTwoStep(f) && <Badge variant="accent">new</Badge>}
+                        {f.admin && <Badge variant="destructive">administrator</Badge>}
+                      </div>
                     </div>
                   ))}
-                  {more(twoStepSorted.length)}
+                  {more(twoStepList.length)}
                 </>
               )}
             </CardContent>
@@ -1001,7 +1165,7 @@ export default function SecurityCheck() {
                   </Button>
                 ))}
               </div>
-              {inactiveShown.length === 0 ? (
+              {inactiveList.length === 0 ? (
                 <Empty>
                   {emptyText(
                     `Every active account has been signed in to within the last ${threshold} days.`
@@ -1009,7 +1173,7 @@ export default function SecurityCheck() {
                 </Empty>
               ) : (
                 <>
-                  {limited(inactiveShown).map((f) => (
+                  {limited(inactiveList).map((f) => (
                     <div
                       key={f.user}
                       className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3"
@@ -1033,6 +1197,7 @@ export default function SecurityCheck() {
                         </p>
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
+                        {newInactive(f) && <Badge variant="accent">new</Badge>}
                         {f.admin && <Badge variant="warning">administrator</Badge>}
                         <Link
                           href={`/offboarding?user=${encodeURIComponent(f.user)}`}
@@ -1043,7 +1208,7 @@ export default function SecurityCheck() {
                       </div>
                     </div>
                   ))}
-                  {more(inactiveShown.length)}
+                  {more(inactiveList.length)}
                 </>
               )}
             </CardContent>
@@ -1081,11 +1246,11 @@ export default function SecurityCheck() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {forwarding.length === 0 ? (
+              {forwardingList.length === 0 ? (
                 <Empty>{emptyText("No mailbox forwards mail outside the organisation.")}</Empty>
               ) : (
                 <>
-                  {limited(forwarding).map((f, i) => (
+                  {limited(forwardingList).map((f, i) => (
                     <div
                       key={`${f.user}|${f.kind}|${f.target}|${i}`}
                       className="flex items-start justify-between gap-3 rounded-lg border bg-muted/30 p-3"
@@ -1099,6 +1264,7 @@ export default function SecurityCheck() {
                           {f.hidesOriginal && (
                             <Badge variant="destructive">hides the original</Badge>
                           )}
+                          {newForwarding(f) && <Badge variant="accent">new</Badge>}
                         </div>
                         <p className="text-sm">
                           <span className="text-muted-foreground">to </span>
@@ -1119,7 +1285,7 @@ export default function SecurityCheck() {
                       )}
                     </div>
                   ))}
-                  {more(forwarding.length)}
+                  {more(forwardingList.length)}
                 </>
               )}
             </CardContent>
@@ -1151,11 +1317,11 @@ export default function SecurityCheck() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {appRows.length === 0 ? (
+              {appList.length === 0 ? (
                 <Empty>{emptyText("Nobody has connected an outside app.")}</Empty>
               ) : (
                 <>
-                  {limited(appRows).map(({ app, access }) => {
+                  {limited(appList).map(({ app, access }) => {
                     const open = openApp === app.clientId;
                     return (
                       <div key={app.clientId} className="rounded-lg border bg-muted/30">
@@ -1174,6 +1340,7 @@ export default function SecurityCheck() {
                                 {ACCESS[access.level].label}
                               </Badge>
                               {app.anonymous && <Badge variant="warning">anonymous</Badge>}
+                              {newApp(app) && <Badge variant="accent">new</Badge>}
                             </div>
                             <p className="text-xs text-muted-foreground">
                               {access.areas.length > 0
@@ -1254,7 +1421,7 @@ export default function SecurityCheck() {
                       </div>
                     );
                   })}
-                  {more(appRows.length)}
+                  {more(appList.length)}
                 </>
               )}
             </CardContent>
@@ -1313,8 +1480,9 @@ export default function SecurityCheck() {
                 <Empty>The check was stopped before the admin log was read.</Empty>
               ) : delegatedClients.length === 0 ? (
                 <Empty>
-                  No delegation was granted, changed or removed in the last six
-                  months. That says nothing about older entries.
+                  {onlyNew
+                    ? "Nothing new here since the last scan."
+                    : "No delegation was granted, changed or removed in the last six months. That says nothing about older entries."}
                 </Empty>
               ) : (
                 <>
@@ -1343,6 +1511,7 @@ export default function SecurityCheck() {
                               ) : (
                                 <Badge variant="outline">removed</Badge>
                               )}
+                              {newClient(client) && <Badge variant="accent">new</Badge>}
                               {client.unusedScopes.length > 0 && (
                                 <Badge variant="warning">
                                   {`${plural(client.unusedScopes.length, "permission")} it doesn't use`}

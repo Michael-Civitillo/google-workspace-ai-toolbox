@@ -613,6 +613,94 @@ export interface DelegationReport {
 }
 
 // ---------------------------------------------------------------------------
+// What changed since the last scan
+// ---------------------------------------------------------------------------
+
+/** The five checks, by the name the page and the history file use for them. */
+export const CHECK_IDS = ["twoStep", "inactive", "forwarding", "apps", "delegation"] as const;
+export type CheckName = (typeof CHECK_IDS)[number];
+
+/**
+ * A finished scan, reduced to what the next one needs in order to say what is
+ * new: one short key per finding, and which checks actually ran. No names, no
+ * scopes, nothing a key isn't.
+ */
+export interface ScanSnapshot {
+  /** When the scan finished (ISO). */
+  completedAt: string;
+  keys: string[];
+  /**
+   * Checks that covered the tenant in that scan. A check that could not run
+   * then has no baseline, and everything it finds now would look new; only
+   * the checks listed here are compared.
+   */
+  covered: CheckName[];
+}
+
+/** More findings than this and the scan is not remembered at all. */
+export const SNAPSHOT_MAX_KEYS = 200_000;
+
+export const findingKey = {
+  twoStep: (f: TwoStepFinding) => `2sv|${f.user}`,
+  /**
+   * One key per threshold the account has crossed, so "new" means new at the
+   * threshold being looked at: an account that drifts from 80 to 95 idle days
+   * is new at 90 without having been new at 30.
+   */
+  inactive: (f: InactiveFinding, thresholdDays: number) =>
+    `idle${thresholdDays}|${f.user}`,
+  forwarding: (f: ForwardingFinding) => `fwd|${f.user}|${f.kind}|${f.target}`,
+  /** Includes how far the app reaches, so one that gains access counts as new. */
+  app: (app: AppGrant) => `app|${app.clientId}|${summariseAccess(app.scopes).level}`,
+  /** Includes the time of the change, so every grant or removal is new once. */
+  delegation: (client: DelegatedClient) =>
+    `dwd|${client.clientId}|${client.status}|${client.lastChange}`,
+};
+
+/** Every key a finished scan should be remembered by. */
+export function snapshotKeys(found: {
+  twoStep: readonly TwoStepFinding[];
+  inactive: readonly InactiveFinding[];
+  forwarding: readonly ForwardingFinding[];
+  apps: readonly AppGrant[];
+  delegated: readonly DelegatedClient[];
+}): string[] {
+  const keys = new Set<string>();
+  for (const f of found.twoStep) keys.add(findingKey.twoStep(f));
+  for (const f of found.inactive) {
+    for (const days of INACTIVE_THRESHOLDS) {
+      if (isInactiveAt(f, days)) keys.add(findingKey.inactive(f, days));
+    }
+  }
+  for (const f of found.forwarding) keys.add(findingKey.forwarding(f));
+  for (const app of found.apps) keys.add(findingKey.app(app));
+  for (const client of found.delegated) keys.add(findingKey.delegation(client));
+  return [...keys].sort();
+}
+
+/**
+ * A snapshot read back from disk or from a request body, or null if it is not
+ * one. Everything in it is treated as untrusted text.
+ */
+export function parseSnapshot(raw: unknown): ScanSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.completedAt !== "string" || Number.isNaN(Date.parse(r.completedAt))) {
+    return null;
+  }
+  if (!Array.isArray(r.keys) || r.keys.length > SNAPSHOT_MAX_KEYS) return null;
+  const keys: string[] = [];
+  for (const key of r.keys) {
+    if (typeof key !== "string" || key.length === 0 || key.length > 600) return null;
+    keys.push(key);
+  }
+  const covered = Array.isArray(r.covered)
+    ? CHECK_IDS.filter((id) => (r.covered as unknown[]).includes(id))
+    : [];
+  return { completedAt: new Date(r.completedAt).toISOString(), keys, covered };
+}
+
+// ---------------------------------------------------------------------------
 // One page of a scan
 // ---------------------------------------------------------------------------
 

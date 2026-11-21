@@ -65,6 +65,7 @@ const nextConfig: NextConfig = {
       "sso.json*",
       "app-config.json*",
       "delegation-sightings.json*",
+      "security-check-history.json*",
       "session-secret",
       "audit.log",
       "credentials/**",

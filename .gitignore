@@ -46,6 +46,9 @@ audit.log
 # First-seen record of mailbox delegations (feeds Delegate Lookup) — local to this install
 delegation-sightings.json*
 
+# What the last Security Check found, per tenant (for "new since last scan") — local to this install
+security-check-history.json*
+
 # Auto-generated key that signs session cookies when APP_SESSION_SECRET is unset
 session-secret
 

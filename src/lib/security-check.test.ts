@@ -5,6 +5,7 @@ import {
   compareApps,
   delegationNeedsReview,
   describeFilterCriteria,
+  findingKey,
   forwardingFindings,
   inactiveFinding,
   isExternalAddress,
@@ -12,6 +13,8 @@ import {
   mergeAppGrants,
   parseScopeList,
   parseSignInTime,
+  parseSnapshot,
+  snapshotKeys,
   summariseAccess,
   summariseDelegation,
   twoStepFinding,
@@ -704,5 +707,124 @@ describe("delegationNeedsReview", () => {
 
   it("flags Open Admin's own client when it was granted more than it uses", () => {
     assert.equal(delegationNeedsReview(one([change({ scopes: [CALENDAR, GMAIL] })], "111")), true);
+  });
+});
+
+describe("snapshotKeys", () => {
+  const idle = (user: string, idleDays: number | null) => ({
+    user,
+    name: "",
+    orgUnitPath: "/",
+    admin: false,
+    lastLoginTime: null,
+    creationTime: null,
+    idleDays,
+  });
+
+  it("is empty for a scan that found nothing", () => {
+    assert.deepEqual(
+      snapshotKeys({ twoStep: [], inactive: [], forwarding: [], apps: [], delegated: [] }),
+      []
+    );
+  });
+
+  it("gives an inactive account one key per threshold it has crossed", () => {
+    const keys = snapshotKeys({
+      twoStep: [],
+      inactive: [idle("a@example.com", 95), idle("b@example.com", 400), idle("c@example.com", null)],
+      forwarding: [],
+      apps: [],
+      delegated: [],
+    });
+    assert.deepEqual(keys.filter((k) => k.endsWith("|a@example.com")), [
+      "idle30|a@example.com",
+      "idle90|a@example.com",
+    ]);
+    assert.equal(keys.filter((k) => k.endsWith("|b@example.com")).length, 4);
+    assert.equal(
+      keys.filter((k) => k.endsWith("|c@example.com")).length,
+      4,
+      "an account of unknown age counts at every threshold"
+    );
+  });
+
+  it("so an account drifting past a threshold is new there and nowhere else", () => {
+    const before = new Set(
+      snapshotKeys({ twoStep: [], inactive: [idle("a@example.com", 80)], forwarding: [], apps: [], delegated: [] })
+    );
+    const now = idle("a@example.com", 95);
+    assert.equal(before.has(findingKey.inactive(now, 30)), true, "not new at 30 days");
+    assert.equal(before.has(findingKey.inactive(now, 90)), false, "new at 90 days");
+  });
+
+  it("treats an app that gains broader access as new", () => {
+    const narrow = grant({ clientId: "x", scopes: ["openid"] });
+    const broad = grant({ clientId: "x", scopes: ["openid", GMAIL] });
+    assert.notEqual(findingKey.app(narrow), findingKey.app(broad));
+    assert.equal(
+      findingKey.app(narrow),
+      findingKey.app(grant({ clientId: "x", scopes: ["openid", "email"], users: ["z@example.com"] })),
+      "more people or another sign-in scope is not a change in reach"
+    );
+  });
+
+  it("treats every delegation change as new once", () => {
+    const [first] = summariseDelegation([change({ time: "2026-10-01T00:00:00.000Z" })], NOT_OURS);
+    const [regranted] = summariseDelegation(
+      [change({ time: "2026-10-01T00:00:00.000Z" }), change({ time: "2026-11-01T00:00:00.000Z" })],
+      NOT_OURS
+    );
+    assert.notEqual(findingKey.delegation(first), findingKey.delegation(regranted));
+  });
+
+  it("keeps two forwards from one mailbox apart", () => {
+    const base = { user: "a@example.com", name: "", detail: "", hidesOriginal: false, filterId: null };
+    const keys = snapshotKeys({
+      twoStep: [],
+      inactive: [],
+      forwarding: [
+        { ...base, kind: "auto-forward", target: "x@evil.net" },
+        { ...base, kind: "filter", target: "x@evil.net" },
+        { ...base, kind: "filter", target: "y@evil.net" },
+      ],
+      apps: [],
+      delegated: [],
+    });
+    assert.equal(keys.length, 3);
+  });
+
+  it("returns each key once, in a stable order", () => {
+    const f = { user: "a@example.com", name: "", orgUnitPath: "/", admin: false };
+    const keys = snapshotKeys({ twoStep: [f, f], inactive: [], forwarding: [], apps: [], delegated: [] });
+    assert.deepEqual(keys, ["2sv|a@example.com"]);
+  });
+});
+
+describe("parseSnapshot", () => {
+  const good = { completedAt: "2026-11-01T10:00:00.000Z", keys: ["2sv|a@example.com"], covered: ["twoStep", "apps"] };
+
+  it("accepts a well-formed snapshot", () => {
+    assert.deepEqual(parseSnapshot(good), good);
+  });
+
+  it("drops check names it doesn't know and tolerates none at all", () => {
+    assert.deepEqual(parseSnapshot({ ...good, covered: ["apps", "made-up", 7] })?.covered, ["apps"]);
+    assert.deepEqual(parseSnapshot({ ...good, covered: undefined })?.covered, []);
+  });
+
+  it("rejects anything that isn't a snapshot", () => {
+    for (const bad of [
+      null,
+      "text",
+      [],
+      {},
+      { ...good, completedAt: "yesterday" },
+      { ...good, keys: "2sv|a" },
+      { ...good, keys: [1, 2] },
+      { ...good, keys: [""] },
+      { ...good, keys: ["x".repeat(601)] },
+    ]) {
+      assert.equal(parseSnapshot(bad), null, JSON.stringify(bad)?.slice(0, 60));
+    }
   });
 });
