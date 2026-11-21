@@ -6,16 +6,10 @@
  * which endpoints are called, as whom and with which scope, how a page is put
  * together, and what happens when one account's calls fail.
  *
- * The stand-in is installed as `window.fetch` because that is the one hook the
- * Google HTTP client (gaxios) offers without changing production code: it uses
- * `window.fetch` when a `window` exists and its own bundled fetch otherwise.
+ * The stand-in lives in test-support/fake-google.ts.
  */
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { before, beforeEach, describe, it } from "node:test";
 import {
   deleteForwardingFilter,
   disableAutoForwarding,
@@ -27,8 +21,14 @@ import {
   serviceAccountClientId,
 } from "./admin-sdk";
 import type { Tenant } from "./tenant-types";
+import {
+  ADMIN,
+  googleError,
+  json,
+  installFakeGoogle,
+  type Handler,
+} from "./test-support/fake-google";
 
-const ADMIN = "admin@example.com";
 const BASIC_SETTINGS = "https://www.googleapis.com/auth/gmail.settings.basic";
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 10, 20, 12);
@@ -36,121 +36,11 @@ const daysAgo = (n: number) => new Date(NOW - n * DAY).toISOString();
 const NEVER = "1970-01-01T00:00:00.000Z";
 const DOMAINS = new Set(["example.com"]);
 
-interface Call {
-  method: string;
-  url: URL;
-  /** The parsed JSON body of a write, when there is one. */
-  body: unknown;
-  /** Who the access token on this request was minted for. */
-  subject: string | null;
-  /** The scopes that token was minted with. */
-  scopes: string[];
-}
-
-type Handler = (call: Call) => Response | Promise<Response> | undefined;
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-
-/** A Google-shaped error body. */
-const googleError = (status: number, message: string, reason: string) =>
-  json({ error: { code: status, message, errors: [{ message, reason }] } }, status);
-
-class FakeGoogle {
-  calls: Call[] = [];
-  /** Token grants seen: who was impersonated, with which scopes. */
-  grants: Array<{ subject: string; scopes: string[] }> = [];
-  private tokens = new Map<string, { subject: string; scopes: string[] }>();
-  handler: Handler = () => undefined;
-
-  reset(handler: Handler): void {
-    this.calls = [];
-    this.grants = [];
-    this.handler = handler;
-  }
-
-  fetch = async (input: unknown, init: RequestInit = {}): Promise<Response> => {
-    const url = new URL(String(input));
-    const method = (init.method ?? "GET").toUpperCase();
-    if (init.signal?.aborted) {
-      throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
-    }
-
-    if (url.host === "oauth2.googleapis.com" || url.pathname.endsWith("/token")) {
-      const assertion = new URLSearchParams(String(init.body)).get("assertion") ?? "";
-      const claims = JSON.parse(
-        Buffer.from(assertion.split(".")[1] ?? "", "base64url").toString("utf-8")
-      ) as { sub: string; scope: string };
-      const grant = { subject: claims.sub, scopes: claims.scope.split(" ").sort() };
-      this.grants.push(grant);
-      const token = `token-${this.tokens.size + 1}`;
-      this.tokens.set(token, grant);
-      return json({ access_token: token, expires_in: 3600, token_type: "Bearer" });
-    }
-
-    const bearer = new Headers(init.headers).get("authorization")?.replace(/^Bearer /i, "");
-    const grant = bearer ? this.tokens.get(bearer) : undefined;
-    let parsedBody: unknown = null;
-    if (init.body !== undefined && init.body !== null) {
-      try {
-        parsedBody = JSON.parse(String(init.body));
-      } catch {
-        parsedBody = String(init.body);
-      }
-    }
-    const call: Call = {
-      method,
-      url,
-      body: parsedBody,
-      subject: grant?.subject ?? null,
-      scopes: grant?.scopes ?? [],
-    };
-    this.calls.push(call);
-    const response = await this.handler(call);
-    if (!response) {
-      return googleError(404, `no fake for ${method} ${url.pathname}`, "notFound");
-    }
-    return response;
-  };
-
-  callsTo(pathSuffix: string): Call[] {
-    return this.calls.filter((c) => c.url.pathname.endsWith(pathSuffix));
-  }
-}
-
-const google = new FakeGoogle();
-let tmpDir: string;
+const fake = installFakeGoogle();
+const google = fake.google;
 let tenant: Tenant;
-
 before(() => {
-  (globalThis as unknown as { window: unknown }).window = { fetch: google.fetch };
-  const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "security-scan-test-"));
-  const keyFile = path.join(tmpDir, "key.json");
-  fs.writeFileSync(
-    keyFile,
-    JSON.stringify({
-      type: "service_account",
-      client_email: "scanner@test-project.iam.gserviceaccount.com",
-      client_id: "100200300400500600700",
-      private_key: privateKey.export({ type: "pkcs8", format: "pem" }),
-    })
-  );
-  tenant = {
-    id: "t1",
-    name: "Test",
-    color: "blue",
-    credentialsFile: keyFile,
-    adminEmail: ADMIN,
-  };
-});
-
-after(() => {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  delete (globalThis as unknown as { window?: unknown }).window;
+  tenant = fake.tenant();
 });
 
 /** A directory user as the Admin SDK returns it. */

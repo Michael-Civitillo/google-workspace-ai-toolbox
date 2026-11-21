@@ -58,6 +58,7 @@ import {
   type TwoStepFinding,
   type UnreadAccount,
 } from "@/lib/security-check";
+import type { OwnKeyResult } from "@/lib/preflight";
 import {
   emailAuthIncomplete,
   emailAuthNeedsReview,
@@ -379,6 +380,10 @@ export default function SecurityCheck() {
   const [emailAuthError, setEmailAuthError] = useState<string | null>(null);
   const [emailAuthLoading, setEmailAuthLoading] = useState(false);
   const [openDomain, setOpenDomain] = useState<string | null>(null);
+  // The direct test of Open Admin's own key, run only when asked for.
+  const [ownKey, setOwnKey] = useState<OwnKeyResult | null>(null);
+  const [ownKeyError, setOwnKeyError] = useState<string | null>(null);
+  const [ownKeyBusy, setOwnKeyBusy] = useState(false);
   const [message, setMessage] = useState<Feedback | null>(null);
 
   const [selected, setSelected] = useState<CheckId>("twoStep");
@@ -424,6 +429,9 @@ export default function SecurityCheck() {
     setEmailAuthError(null);
     setEmailAuthLoading(false);
     setOpenDomain(null);
+    setOwnKey(null);
+    setOwnKeyError(null);
+    setOwnKeyBusy(false);
     setShowAll(false);
     setOpenApp(null);
     setOpenClient(null);
@@ -755,6 +763,29 @@ export default function SecurityCheck() {
         ? `Revoked ${name}'s access to ${users[0]}`
         : `Revoked ${name}'s access for ${plural(revoked.length, "account")}`,
     });
+  };
+
+  const testOwnKey = async () => {
+    const pinnedTenantId = tenantId;
+    setOwnKeyBusy(true);
+    setOwnKeyError(null);
+    try {
+      const res = await tfetch(
+        "/api/admin/security-check/own-key",
+        { method: "POST" },
+        pinnedTenantId
+      );
+      const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
+      if (result.success) setOwnKey(result.data as OwnKeyResult);
+      else setOwnKeyError(result.error || "The key could not be tested");
+    } catch {
+      if (tenantIdRef.current === pinnedTenantId) {
+        setOwnKeyError("Failed to connect to the API");
+      }
+    } finally {
+      if (tenantIdRef.current === pinnedTenantId) setOwnKeyBusy(false);
+    }
   };
 
   const confirmFix = () => {
@@ -1704,6 +1735,70 @@ export default function SecurityCheck() {
                   )}
                 </>
               )}
+              <div className="rounded-lg border border-dashed p-3 text-xs">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 max-w-3xl space-y-1">
+                    <p className="text-sm font-medium">Test Open Admin&apos;s own key</p>
+                    <p className="text-muted-foreground">
+                      The admin log only reaches back six months. This asks
+                      Google directly whether Open Admin&apos;s service account
+                      has been given broad access it never uses: full Gmail,
+                      sending mail, admin roles, Google Cloud, Vault. It asks
+                      for a token for each and throws it away, so nothing is
+                      read or changed, but each request is recorded in
+                      Google&apos;s logs as coming from this app.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    disabled={ownKeyBusy}
+                    onClick={() => void testOwnKey()}
+                  >
+                    {ownKeyBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {ownKey ? "Test again" : "Run the test"}
+                  </Button>
+                </div>
+                {ownKeyError && (
+                  <p className="mt-2 text-danger-fg break-words">{ownKeyError}</p>
+                )}
+                {ownKey && (
+                  <ul className="mt-3 space-y-1.5">
+                    {ownKey.probes.map((probe) => {
+                      const v =
+                        probe.granted === true
+                          ? VERDICT.warn
+                          : probe.granted === false
+                            ? VERDICT.ok
+                            : VERDICT.error;
+                      const ProbeIcon = v.icon;
+                      return (
+                        <li key={probe.scope} className="grid grid-cols-[1rem_1fr] gap-x-2">
+                          <ProbeIcon className={cn("mt-0.5 h-3.5 w-3.5", v.className)} />
+                          <span>
+                            <span className={cn("font-medium", v.className)}>
+                              {probe.label}:{" "}
+                              {probe.granted === true
+                                ? "granted, and not needed"
+                                : probe.granted === false
+                                  ? "not granted"
+                                  : "couldn't tell"}
+                            </span>
+                            <span className="block text-muted-foreground">
+                              {probe.granted === true
+                                ? `Whoever holds this key could ${probe.meaning}. Remove ${probe.scope} from the app's entry in the Admin console.`
+                                : probe.granted === false
+                                  ? `The key cannot ${probe.meaning}.`
+                                  : probe.error}
+                            </span>
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
             </CardContent>
           </>
         )}
