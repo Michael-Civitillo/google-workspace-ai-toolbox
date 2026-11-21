@@ -16,6 +16,17 @@ const eslintConfig = defineConfig([
     // and node --test suite (npm run test:launcher).
     "packaging/**",
   ]),
+  {
+    // eslint-config-next 16.4 turns on three rules written for the React
+    // Compiler, which this app does not use. The patterns they flag are
+    // deliberate here: clearing a page's state in an effect when the tenant
+    // changes, and keeping the live tenant id in a ref that async work checks
+    // after each await. Kept visible as warnings rather than rewritten.
+    rules: {
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/refs": "warn",
+    },
+  },
 ]);
 
 export default eslintConfig;

@@ -370,6 +370,14 @@ export default function SharingAudit() {
 
   const [error, setError] = useState<string | null>(null);
 
+  // Revoke-flow state
+  const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null);
+  const [revokeBusy, setRevokeBusy] = useState(false);
+  const [revokeNotice, setRevokeNotice] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
+
   // Results, selections, and resume tokens are tenant-scoped: revoking,
   // continuing, or exporting a tenant-A snapshot after switching to tenant B
   // would run against the wrong tenant. Cancel anything in flight and clear
@@ -393,13 +401,6 @@ export default function SharingAudit() {
     setError(null);
   }, [tenantId]);
 
-  // Revoke-flow state
-  const [revokeTarget, setRevokeTarget] = useState<RevokeTarget | null>(null);
-  const [revokeBusy, setRevokeBusy] = useState(false);
-  const [revokeNotice, setRevokeNotice] = useState<{
-    tone: "success" | "error";
-    message: string;
-  } | null>(null);
   // Which permission categories to strip on the next revoke. All on by default
   // because the most common workflow is a full lockdown.
   const [categoryFilter, setCategoryFilter] = useState<
