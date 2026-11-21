@@ -178,12 +178,18 @@ const MAX_CLAIM_CHARS = 254;
 
 /**
  * Sessions revoked before their expiry (sign-out), keyed by the token's nonce
- * and kept only until the token would have expired anyway. Lives on
- * globalThis so the proxy bundle and the route bundles — separate module
- * graphs in the same process — share one list.
+ * and kept until the token would have expired anyway. Lives on globalThis so
+ * the proxy bundle and the route bundles — separate module graphs in the same
+ * process — share one list.
+ *
+ * Only a genuine, unexpired session is ever recorded (revokeSessionToken
+ * checks the signature first), and an entry is only ever dropped once its
+ * token has expired. Together those keep the list small and make a sign-out
+ * permanent: before, any well-formed string was recorded and the oldest
+ * entries were evicted past a size cap, so a flood of made-up cookies pushed
+ * a real sign-out out of the list and the signed-out cookie worked again.
  */
 const REVOKED_KEY = "__openAdminRevokedSessions";
-const MAX_REVOKED = 10_000;
 
 function revokedSessions(): Map<string, number> {
   const g = globalThis as unknown as Record<string, Map<string, number> | undefined>;
@@ -196,28 +202,30 @@ function pruneRevoked(map: Map<string, number>): void {
   for (const [nonce, exp] of map) {
     if (exp < now) map.delete(nonce);
   }
-  while (map.size > MAX_REVOKED) {
-    const oldest = map.keys().next().value;
-    if (oldest === undefined) break;
-    map.delete(oldest);
-  }
 }
 
 /**
- * Mark a session token as signed out. Only a well-formed v2 token is
- * recorded; there is no need to verify it here, because a forged nonce can
- * only ever revoke a session that does not exist.
+ * Mark a session token as signed out. Does nothing unless the token is a
+ * genuine session of this server that has not expired: the sign-out route is
+ * public (a stale cookie must still be clearable), so anything it is handed
+ * has to prove itself before it may take up space.
  */
-export function revokeSessionToken(token: string | undefined | null): void {
+export async function revokeSessionToken(token: string | undefined | null): Promise<void> {
   if (!token) return;
   const parts = token.split(".");
   if (parts.length !== 5 || parts[0] !== TOKEN_V2) return;
-  const exp = Number(parts[1]);
-  const nonce = parts[2];
-  if (!Number.isFinite(exp) || !/^[0-9a-f]{32}$/.test(nonce)) return;
+  const [, expiresAt, nonce, encoded, sigHex] = parts;
+  if (!/^[0-9a-f]{32}$/.test(nonce)) return;
+  if (!(await hmacMatches(`${TOKEN_V2}.${expiresAt}.${nonce}.${encoded}`, sigHex))) return;
+  if (!notExpired(expiresAt)) return;
   const map = revokedSessions();
-  map.set(nonce, exp);
   pruneRevoked(map);
+  map.set(nonce, Number(expiresAt));
+}
+
+/** Forget every sign-out. For tests. */
+export function clearRevokedSessions(): void {
+  revokedSessions().clear();
 }
 
 function encodeIdentity(identity: SessionIdentity): string {

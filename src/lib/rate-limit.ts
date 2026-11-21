@@ -12,6 +12,12 @@
 interface Bucket {
   /** Timestamps of attempts within the current window (ms since epoch). */
   hits: number[];
+  /**
+   * This bucket's own window. Different callers use different windows (15
+   * minutes for sign-in, one minute for issuer checks), so a bucket can only
+   * be judged expired by its own.
+   */
+  windowMs: number;
 }
 
 const buckets = new Map<string, Bucket>();
@@ -33,14 +39,17 @@ export interface RateLimitResult {
 }
 
 /**
- * Prune buckets whose most recent hit is older than `cutoff`, then enforce the
- * size cap. Runs on every call — deterministic rather than probabilistic, so a
- * burst can't outrun the collector — and is cheap because expired hits are
- * dropped and empty buckets removed each pass.
+ * Drop buckets whose most recent hit has left that bucket's own window, then
+ * enforce the size cap. Runs on every call — deterministic rather than
+ * probabilistic, so a burst can't outrun the collector.
+ *
+ * Each bucket is aged by its own window. Ageing every bucket by the caller's
+ * window let any short-window call (an issuer check, one minute) delete the
+ * sign-in failure count (15 minutes) and the AI budget, resetting both.
  */
-function sweep(cutoff: number): void {
+function sweep(now: number): void {
   for (const [k, b] of buckets) {
-    if (b.hits.length === 0 || b.hits[b.hits.length - 1] < cutoff) {
+    if (b.hits.length === 0 || b.hits[b.hits.length - 1] <= now - b.windowMs) {
       buckets.delete(k);
     }
   }
@@ -51,30 +60,6 @@ function sweep(cutoff: number): void {
     if (oldest === undefined) break;
     buckets.delete(oldest);
   }
-}
-
-/**
- * Report whether `key` is within `limit` per sliding `windowMs` without
- * recording anything. The login route consults this BEFORE checking a
- * password so an exhausted bucket refuses every attempt, right or wrong —
- * otherwise the limiter would only ever change the status code of a wrong
- * guess and a brute force could stream candidates at full speed.
- */
-export function peekRateLimit(
-  key: string,
-  limit: number,
-  windowMs: number
-): RateLimitResult {
-  const now = Date.now();
-  const cutoff = now - windowMs;
-  const bucket = buckets.get(key);
-  const hits = bucket ? bucket.hits.filter((t) => t > cutoff) : [];
-  if (hits.length >= limit) {
-    const oldest = hits[0];
-    const retryAfter = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
-    return { allowed: false, retryAfter, remaining: 0 };
-  }
-  return { allowed: true, retryAfter: 0, remaining: limit - hits.length };
 }
 
 /**
@@ -90,26 +75,50 @@ export function rateLimit(
 ): RateLimitResult {
   const now = Date.now();
   const cutoff = now - windowMs;
-  const bucket = buckets.get(key) ?? { hits: [] };
+  const bucket = buckets.get(key) ?? { hits: [], windowMs };
+  bucket.windowMs = windowMs;
   bucket.hits = bucket.hits.filter((t) => t > cutoff);
 
   if (bucket.hits.length >= limit) {
     const oldest = bucket.hits[0];
     const retryAfter = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
     buckets.set(key, bucket);
-    sweep(cutoff);
+    sweep(now);
     return { allowed: false, retryAfter, remaining: 0 };
   }
 
   bucket.hits.push(now);
   buckets.set(key, bucket);
-  sweep(cutoff);
+  sweep(now);
 
   return {
     allowed: true,
     retryAfter: 0,
     remaining: Math.max(0, limit - bucket.hits.length),
   };
+}
+
+/**
+ * Take one attempt from `key`'s allowance before doing something slow, such
+ * as comparing a password. Same as rateLimit(); the separate name is for call
+ * sites where the order matters.
+ *
+ * Recording the attempt first is what makes the limit hold under concurrency:
+ * the check and the record happen together, synchronously, so a burst of
+ * simultaneous requests can't all read "under the limit" before any of them
+ * is counted. The caller clears the key on success (clearRateLimit).
+ */
+export function reserveAttempt(
+  key: string,
+  limit: number,
+  windowMs: number
+): RateLimitResult {
+  return rateLimit(key, limit, windowMs);
+}
+
+/** Forget every tracked key. For tests. */
+export function resetRateLimits(): void {
+  buckets.clear();
 }
 
 /**

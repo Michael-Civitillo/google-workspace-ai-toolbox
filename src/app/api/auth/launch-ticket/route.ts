@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authConfigured, passwordMatches } from "@/lib/auth";
 import { instanceProof, issueLaunchTicket, launchTicketsSupported } from "@/lib/launch-tickets";
-import { rateLimit, peekRateLimit, clearRateLimit, clientKey } from "@/lib/rate-limit";
+import { reserveAttempt, clearRateLimit, clientKey } from "@/lib/rate-limit";
 import { passwordLoginEnabled, readSsoConfig } from "@/lib/sso-server";
 import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
@@ -82,7 +82,11 @@ export async function POST(req: NextRequest) {
   // Same bucket as /api/auth/login: this must not be a second, unthrottled
   // place to guess the password.
   const key = `login:${clientKey(req)}`;
-  const gate = peekRateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
+  // Take the attempt from the allowance BEFORE comparing. Checking first and
+  // recording only after a wrong answer let a burst of simultaneous guesses
+  // all pass the check before any of them was counted. A correct password
+  // clears the count below.
+  const gate = reserveAttempt(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
   if (!gate.allowed) {
     return NextResponse.json(
       { error: `Too many failed attempts. Try again in ${gate.retryAfter}s.` },
@@ -90,7 +94,6 @@ export async function POST(req: NextRequest) {
     );
   }
   if (!(await passwordMatches(body.password))) {
-    rateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
     await new Promise((r) => setTimeout(r, FAILED_ATTEMPT_DELAY_MS));
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }
