@@ -34,147 +34,18 @@ import {
   Circle,
 } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
-import { isValidEmail } from "@/lib/validate-email";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
-
-type OperationId = "delegation_add" | "delegation_remove" | "set_forwarding";
-
-interface OperationDef {
-  label: string;
-  endpoint: string;
-  method: "POST" | "DELETE";
-  columns: [string, string, ...string[]];
-  hint: string;
-  /** Map a parsed row's cells to the request body. */
-  toBody: (cells: string[]) => Record<string, string>;
-  /** Row-level validation beyond the two-emails baseline; returns an error or null. */
-  validateRow: (cells: string[]) => string | null;
-}
-
-const FORWARD_ACTIONS = new Set(["keep", "archive", "trash", "markRead"]);
-
-const OPERATIONS: Record<OperationId, OperationDef> = {
-  delegation_add: {
-    label: "Add email delegate",
-    endpoint: "/api/gws/email-delegation",
-    method: "POST",
-    columns: ["user", "delegate"],
-    hint: "One row per grant: the mailbox owner, then the delegate to add.",
-    toBody: (c) => ({ user: c[0], delegate: c[1] }),
-    validateRow: (c) => baselineEmails(c, "user", "delegate"),
-  },
-  delegation_remove: {
-    label: "Remove email delegate",
-    endpoint: "/api/gws/email-delegation",
-    method: "DELETE",
-    columns: ["user", "delegate"],
-    hint: "One row per removal: the mailbox owner, then the delegate to remove.",
-    toBody: (c) => ({ user: c[0], delegate: c[1] }),
-    validateRow: (c) => baselineEmails(c, "user", "delegate"),
-  },
-  set_forwarding: {
-    label: "Set up email forwarding",
-    endpoint: "/api/gws/email-transfer",
-    method: "POST",
-    columns: ["sourceUser", "targetUser", "action (optional)"],
-    hint: "One row per mailbox: source, forward-to target, and optionally what happens to originals (keep, archive, trash, markRead — defaults to keep).",
-    toBody: (c) => ({
-      sourceUser: c[0],
-      targetUser: c[1],
-      action: c[2] || "keep",
-    }),
-    validateRow: (c) => {
-      const base = baselineEmails(c, "sourceUser", "targetUser");
-      if (base) return base;
-      if (c[2] && !FORWARD_ACTIONS.has(c[2])) {
-        return `action must be one of: ${[...FORWARD_ACTIONS].join(", ")}`;
-      }
-      return null;
-    },
-  },
-};
-
-function baselineEmails(
-  cells: string[],
-  firstName: string,
-  secondName: string
-): string | null {
-  if (cells.length < 2 || !cells[0] || !cells[1]) {
-    return `needs two columns: ${firstName}, ${secondName}`;
-  }
-  if (!isValidEmail(cells[0])) return `${firstName} is not a valid email`;
-  if (!isValidEmail(cells[1])) return `${secondName} is not a valid email`;
-  if (cells[0].toLowerCase() === cells[1].toLowerCase()) {
-    return `${firstName} and ${secondName} must be different`;
-  }
-  return null;
-}
+import {
+  confirmPhraseFor,
+  duplicateRows,
+  OPERATIONS,
+  parseCsv,
+  type OperationDef,
+  type OperationId,
+} from "@/lib/bulk-operations";
 
 const MAX_ROWS = 500;
 const MAX_FILE_BYTES = 1024 * 1024;
-
-/**
- * Minimal RFC 4180-style CSV parser: quoted cells, doubled quotes as escapes,
- * commas inside quotes, and CR/LF/CRLF row endings. Unquoted cells are
- * trimmed; fully empty rows are dropped.
- */
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-  let cellWasQuoted = false;
-
-  const endCell = () => {
-    row.push(cellWasQuoted ? cell : cell.trim());
-    cell = "";
-    cellWasQuoted = false;
-  };
-  const endRow = () => {
-    endCell();
-    if (row.some((c) => c !== "")) rows.push(row);
-    row = [];
-  };
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') {
-          cell += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        cell += ch;
-      }
-      continue;
-    }
-    if (ch === '"' && cell.trim() === "") {
-      quoted = true;
-      cellWasQuoted = true;
-      cell = "";
-      continue;
-    }
-    if (ch === ",") {
-      endCell();
-      continue;
-    }
-    if (ch === "\n") {
-      endRow();
-      continue;
-    }
-    if (ch === "\r") {
-      if (text[i + 1] === "\n") i++;
-      endRow();
-      continue;
-    }
-    cell += ch;
-  }
-  if (cell !== "" || row.length > 0) endRow();
-  return rows;
-}
 
 type RowStatus = "invalid" | "pending" | "running" | "success" | "error";
 
@@ -281,9 +152,12 @@ export default function BulkOperations() {
       );
       return;
     }
+    const repeats = duplicateRows(parsed, def);
     setRows(
       parsed.map((cells, index) => {
-        const error = def.validateRow(cells);
+        const error =
+          def.validateRow(cells) ??
+          (repeats.has(index) ? "same as an earlier row" : null);
         return {
           index,
           cells,
@@ -487,7 +361,7 @@ export default function BulkOperations() {
               <Textarea
                 id="csv-input"
                 rows={6}
-                placeholder={`${op.columns.map((c) => c.split(" ")[0]).join(",")}\nalice@yourdomain.com,bob@yourdomain.com`}
+                placeholder={`${op.columns.map((c) => c.split(" ")[0]).join(",")}\n${op.example}`}
                 value={csvText}
                 onChange={(e) => {
                   setCsvText(e.target.value);
@@ -616,7 +490,7 @@ export default function BulkOperations() {
           tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null
         }
         severity="high"
-        confirmPhrase={`RUN ${validCount}`}
+        confirmPhrase={confirmPhraseFor(op, validCount)}
         confirmLabel="Start run"
         busy={running}
         changes={[
@@ -628,16 +502,7 @@ export default function BulkOperations() {
           },
           { label: "Rows skipped (invalid)", after: String(invalidCount) },
         ]}
-        warnings={
-          operation === "set_forwarding" ? (
-            <>
-              Rows that forward to an address outside this tenant&apos;s
-              verified domains are rejected by the server (they need the
-              dedicated Email Transfer page&apos;s external confirmation) and
-              will show as failed.
-            </>
-          ) : undefined
-        }
+        warnings={op.warning}
         onConfirm={run}
       />
     </>
