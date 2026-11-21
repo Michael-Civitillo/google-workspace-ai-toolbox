@@ -204,7 +204,9 @@ describe("applySignature", () => {
   it("changes nothing for an address that reaches no account", async () => {
     await assert.rejects(
       applySignature(tenant, "nobody@example.com", DEFAULT_SIGNATURE_TEMPLATE),
-      /Resource Not Found/
+      (e) =>
+        e instanceof Error &&
+        e.message === "There is no account with the address nobody@example.com."
     );
     assert.equal(writes().length, 0);
   });

@@ -42,8 +42,15 @@ export function UpdateSettingsPanel() {
   }, []);
 
   async function send(body: { enabled?: boolean; check?: true }) {
+    const before = status;
     setBusy(true);
     setFailure(null);
+    // Tick or untick straight away. Switching on also asks GitHub, which can
+    // take seconds, and a box that ignores a click for that long looks broken.
+    if (typeof body.enabled === "boolean") {
+      const enabled = body.enabled;
+      setStatus((prev) => (prev ? { ...prev, enabled } : prev));
+    }
     try {
       const res = await fetch("/api/config/update", {
         method: "POST",
@@ -56,9 +63,11 @@ export function UpdateSettingsPanel() {
         // The sidebar shows the same answer; tell it there is a new one.
         window.dispatchEvent(new Event(UPDATE_STATUS_EVENT));
       } else {
+        setStatus(before);
         setFailure(d?.error || "The setting could not be saved.");
       }
     } catch {
+      setStatus(before);
       setFailure("Could not reach the server.");
     } finally {
       setBusy(false);
@@ -115,7 +124,7 @@ export function UpdateSettingsPanel() {
           ) : status.latest ? (
             <p>{`You have the newest version (${status.latest} is the latest release).`}</p>
           ) : (
-            <p className="text-muted-foreground">Not checked yet.</p>
+            <p className="text-muted-foreground">{busy ? "Checking..." : "Not checked yet."}</p>
           )}
           {status.updateAvailable && (
             <p className="text-xs text-muted-foreground">

@@ -873,7 +873,9 @@ export async function getSignatureProfile(
         { timeout: ADMIN_API_TIMEOUT_MS }
       ),
     { retryServerErrors: true }
-  );
+  ).catch((e) => {
+    throw isNotFoundError(e) ? new NoSuchAccountError(userEmail.toLowerCase()) : e;
+  });
   const u = res.data;
   const org = primaryOf<{ primary?: boolean; title?: string; department?: string }>(u.organizations);
   const phones = Array.isArray(u.phones)
@@ -2025,6 +2027,17 @@ export async function createUser(
   return { primaryEmail, orgUnitPath, temporaryPassword };
 }
 
+/**
+ * An address that reaches no account. Said in a sentence, because the people
+ * using this are not going to know what "Resource Not Found: userKey" means.
+ */
+export class NoSuchAccountError extends Error {
+  constructor(email: string) {
+    super(`There is no account with the address ${email}.`);
+    this.name = "NoSuchAccountError";
+  }
+}
+
 /** The address a new account was to be created with is already taken. */
 export class UserAlreadyExistsError extends Error {
   constructor(message: string) {
@@ -2049,7 +2062,9 @@ export async function resetUserPassword(
   }
   // Resolve first: the key may be an alias, and the caller should be told
   // which account was actually changed.
-  const target = await getUser(tenant, userEmail);
+  const target = await getUser(tenant, userEmail).catch((e) => {
+    throw isNotFoundError(e) ? new NoSuchAccountError(userEmail.toLowerCase()) : e;
+  });
   const primaryEmail = target.primaryEmail.toLowerCase();
   // The account Open Admin acts as. If its temporary password were lost (a
   // closed tab is enough) and it is the only super admin, nobody could get

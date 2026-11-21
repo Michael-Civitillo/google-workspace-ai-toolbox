@@ -5,6 +5,7 @@ import {
   googleHttpStatus,
   isAbortError,
   LicenseChangedError,
+  NoSuchAccountError,
   SecurityFixStaleError,
   UserAlreadyExistsError,
 } from "./admin-sdk";
@@ -29,6 +30,7 @@ export function errorStatusFor(e: unknown): number {
   if (e instanceof SecurityFixStaleError) return 409;
   if (e instanceof UserAlreadyExistsError) return 409;
   if (e instanceof LicenseChangedError) return 409;
+  if (e instanceof NoSuchAccountError) return 404;
   if (isAbortError(e)) return 499;
   const upstream = googleHttpStatus(e);
   if (upstream !== null) {

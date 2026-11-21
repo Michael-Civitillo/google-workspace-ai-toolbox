@@ -6,6 +6,7 @@ import { before, beforeEach, describe, it } from "node:test";
 import {
   createUser,
   generateTemporaryPassword,
+  NoSuchAccountError,
   resetUserPassword,
   TEMP_PASSWORD_LENGTH,
   UserAlreadyExistsError,
@@ -234,7 +235,12 @@ describe("resetUserPassword", () => {
   });
 
   it("changes nothing for an address that reaches no account", async () => {
-    await assert.rejects(resetUserPassword(tenant, "nobody@example.com"), /Resource Not Found/);
+    await assert.rejects(
+      resetUserPassword(tenant, "Nobody@example.com"),
+      (e) =>
+        e instanceof NoSuchAccountError &&
+        e.message === "There is no account with the address nobody@example.com."
+    );
     assert.equal(writes().length, 0);
   });
 

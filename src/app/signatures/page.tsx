@@ -415,8 +415,8 @@ export default function Signatures() {
                 <p className="text-xs text-muted-foreground">
                   A line is left out for anyone who has nothing for it, so a
                   person with no phone number gets no empty line. Put{" "}
-                  <code className="font-mono">**</code> either side of text to
-                  make it bold. Web and email addresses become links. Job title,
+                  <code className="font-mono">**</code>
+                  {" "}either side of text to make it bold. Web and email addresses become links. Job title,
                   department and phone come from each person&apos;s directory
                   profile in the Admin console.
                 </p>

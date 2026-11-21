@@ -200,7 +200,7 @@ branch. Then either:
 - **From the browser:** Actions → *Release builds* → *Run workflow*, leave the
   branch on `main`, tick **Publish**, run. The `v<version>` tag is created for
   you at the commit that was built.
-- **From git:** `git tag v0.2.0 && git push origin v0.2.0`.
+- **From git:** `git tag v0.3.0 && git push origin v0.3.0`.
 
 `.github/workflows/release.yml` runs the Linux job first (lint, launcher unit
 tests, build, smoke test), then the macOS and Windows builds and a Docker image

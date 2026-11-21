@@ -11,9 +11,10 @@ const PASSWORD = process.env.APP_PASSWORD || "";
 const THEMES = (process.env.SCREENSHOT_THEMES || "light,dark").split(",");
 
 // Every page in the sidebar, in sidebar order, so a page added to the app has an
-// obvious place here. One page is deliberately absent: security-check.png shows
-// a finished scan (sample data), which this script cannot produce by loading a
-// URL, so it is captured separately and left alone here.
+// obvious place here. Three are deliberately absent: security-check.png and
+// licenses.png show a finished scan, and signatures.png shows a preview. None
+// of those can be produced by loading a URL, so they are captured separately
+// (sample data) and left alone here.
 const pages = [
   { name: "dashboard", path: "/", delay: 1500 },
   { name: "get-started", path: "/onboarding", delay: 1500 },
@@ -24,6 +25,7 @@ const pages = [
   { name: "email-transfer", path: "/email-transfer", delay: 500 },
   { name: "calendar-transfer", path: "/calendar-transfer", delay: 500 },
   { name: "drive-transfer", path: "/drive-transfer", delay: 500 },
+  { name: "new-user", path: "/new-user", delay: 800 },
   { name: "domain-change", path: "/domain-change", delay: 500 },
   { name: "offboarding", path: "/offboarding", delay: 800 },
   { name: "bulk", path: "/bulk", delay: 500 },
