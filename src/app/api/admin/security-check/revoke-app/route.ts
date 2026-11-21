@@ -40,6 +40,11 @@ export async function POST(request: NextRequest) {
     tenant = tenantFromRequest(request, body);
     const clientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
     if (!clientId) throw new ValidationError("clientId is required");
+    // OAuth client ids are short ("1234…apps.googleusercontent.com"). Refusing
+    // anything longer keeps a junk value out of Google calls and the log.
+    if (clientId.length > 256 || /[\s\u0000-\u001f]/.test(clientId)) {
+      throw new ValidationError("clientId is not an OAuth client id");
+    }
     if (!Array.isArray(body.users) || body.users.length === 0) {
       throw new ValidationError("users must list at least one account");
     }

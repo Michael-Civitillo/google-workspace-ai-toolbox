@@ -63,9 +63,8 @@ const AUDIT_FAILURE_WARN_INTERVAL_MS = 60_000;
 /**
  * Rotation cap: 8 MB per file, 3 kept archives — ~32 MB and tens of thousands
  * of entries, sized for the desktop-to-small-server installs this tool
- * targets. The reader (audit-reader.ts) only ever opens audit.log, so
- * audit.log.1 … .3 are for the operator and whatever log shipper watches the
- * data directory, not for the in-app viewer.
+ * targets. The in-app viewer (audit-reader.ts) reads the archives after the
+ * live file.
  */
 const MAX_AUDIT_LOG_BYTES = 8 * 1024 * 1024;
 const KEEP_ROTATED_LOGS = 3;
@@ -86,10 +85,12 @@ const ROTATION_RETRY_INTERVAL_MS = 60_000;
 
 /**
  * Move audit.log aside once it reaches the cap, shifting audit.log.1 up and
- * dropping what falls off the end. Never throws, and never partially rotates:
- * if an archive can't be shifted we leave the live log alone and keep
- * appending to it, because an oversized log is recoverable and a lost entry —
- * or an archive overwritten to make room — is not.
+ * dropping what falls off the end. Never throws, and all or nothing: every
+ * rename is undone if a later one fails, and the oldest archive is only
+ * deleted once everything else is in place. Before, the oldest archive was
+ * deleted and the others shifted ahead of the step most likely to fail (the
+ * live file, held open on Windows by a viewer or log shipper), so each retry
+ * lost another archive while the live log never rotated.
  */
 function rotateIfAtCap(): void {
   if (
@@ -115,35 +116,153 @@ function rotateIfAtCap(): void {
   appendsSinceStat = 0;
   if (size < MAX_AUDIT_LOG_BYTES) return;
 
+  const done: Array<[from: string, to: string]> = [];
+  const move = (from: string, to: string) => {
+    renameSync(from, to);
+    done.push([from, to]);
+  };
+  const stamp = `${process.pid}-${now}`;
+  const outgoing = `${AUDIT_LOG_PATH}.rotating-${stamp}`;
+  const doomed = `${AUDIT_LOG_PATH}.${KEEP_ROTATED_LOGS}.dropping-${stamp}`;
   try {
+    // The live file first: if it is held open, nothing has changed yet.
+    move(AUDIT_LOG_PATH, outgoing);
     const oldest = `${AUDIT_LOG_PATH}.${KEEP_ROTATED_LOGS}`;
-    if (existsSync(oldest)) unlinkSync(oldest);
+    if (existsSync(oldest)) move(oldest, doomed);
     for (let i = KEEP_ROTATED_LOGS - 1; i >= 1; i--) {
       const from = `${AUDIT_LOG_PATH}.${i}`;
-      if (existsSync(from)) renameSync(from, `${AUDIT_LOG_PATH}.${i + 1}`);
+      if (existsSync(from)) move(from, `${AUDIT_LOG_PATH}.${i + 1}`);
     }
-    renameSync(AUDIT_LOG_PATH, `${AUDIT_LOG_PATH}.1`);
-    // rename carries the mode over, but a log written before this module's
-    // load-time chmod could have been looser — pin the archive at 0600 too.
-    chmodSync(`${AUDIT_LOG_PATH}.1`, 0o600);
-    trackedLogSize = 0;
+    move(outgoing, `${AUDIT_LOG_PATH}.1`);
   } catch (e) {
+    // Put back whatever moved, newest move first. A step that can't be undone
+    // leaves its file under its temporary name, which is still on disk.
+    for (const [from, to] of done.reverse()) {
+      try {
+        renameSync(to, from);
+      } catch {
+        // Nothing more to do without risking another file.
+      }
+    }
     rotationRetryAfter = now + ROTATION_RETRY_INTERVAL_MS;
     console.error(
       "[audit] could not rotate the audit log — appending to the current file instead:",
       e instanceof Error ? e.message : e
     );
+    return;
   }
+  try {
+    if (existsSync(doomed)) unlinkSync(doomed);
+  } catch {
+    // An undeletable old archive costs disk space, not entries.
+  }
+  try {
+    // rename carries the mode over, but a log written before this module's
+    // load-time chmod could have been looser — pin the archive at 0600 too.
+    chmodSync(`${AUDIT_LOG_PATH}.1`, 0o600);
+  } catch {
+    // Best effort.
+  }
+  trackedLogSize = 0;
+}
+
+/** Forget the cached log size and any rotation back-off. For tests. */
+export function resetAuditWriterState(): void {
+  trackedLogSize = null;
+  appendsSinceStat = 0;
+  rotationRetryAfter = 0;
+}
+
+/**
+ * Size limits for one entry. Typical entries are a few hundred bytes; these
+ * only bite on something pathological, such as a rejected request carrying a
+ * multi-megabyte field. Before, such a request wrote a line of the same size,
+ * so a handful of them rotated every earlier entry out of the log.
+ */
+const ENTRY_LIMITS = {
+  stringChars: 1_000,
+  keyChars: 100,
+  arrayItems: 50,
+  objectKeys: 100,
+  depth: 6,
+  paramsBytes: 16 * 1024,
+  fieldChars: { action: 100, tenantId: 100, tenantName: 200, actor: 320, error: 2_000 },
+} as const;
+
+function clip(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}… [${value.length} chars]` : value;
+}
+
+function boundValue(value: unknown, depth: number): unknown {
+  if (typeof value === "string") return clip(value, ENTRY_LIMITS.stringChars);
+  if (value === null || value === undefined) return value;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (depth >= ENTRY_LIMITS.depth) return "[nested too deep]";
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, ENTRY_LIMITS.arrayItems)
+      .map((v) => boundValue(v, depth + 1));
+    if (value.length > ENTRY_LIMITS.arrayItems) {
+      items.push(`… ${value.length - ENTRY_LIMITS.arrayItems} more`);
+    }
+    return items;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of entries.slice(0, ENTRY_LIMITS.objectKeys)) {
+      out[clip(k, ENTRY_LIMITS.keyChars)] = boundValue(v, depth + 1);
+    }
+    if (entries.length > ENTRY_LIMITS.objectKeys) {
+      out.omittedKeys = entries.length - ENTRY_LIMITS.objectKeys;
+    }
+    return out;
+  }
+  return `[${typeof value}]`;
+}
+
+/**
+ * Params bounded field by field, then, if the whole is still too large, the
+ * largest values replaced by a note of their size until it fits. Small fields
+ * (who, which tenant, counts) survive; it is the bulk that goes.
+ */
+function boundParams(params: Record<string, unknown>): Record<string, unknown> {
+  const bounded = boundValue(params, 0) as Record<string, unknown>;
+  let size = JSON.stringify(bounded).length;
+  if (size <= ENTRY_LIMITS.paramsBytes) return bounded;
+  const bySize = Object.entries(bounded)
+    .map(([k, v]) => [k, JSON.stringify(v ?? null).length] as const)
+    .sort((a, b) => b[1] - a[1]);
+  for (const [k, n] of bySize) {
+    if (size <= ENTRY_LIMITS.paramsBytes) break;
+    bounded[k] = `[omitted: ${n} bytes]`;
+    size = JSON.stringify(bounded).length;
+  }
+  return bounded;
+}
+
+function clipField(value: string | null | undefined, max: number) {
+  return typeof value === "string" ? clip(value, max) : value;
+}
+
+/** An entry as it will be written: redacted, then bounded. Exported for tests. */
+export function preparedEntry(entry: AuditEntry, ts: string): Record<string, unknown> {
+  const { fieldChars } = ENTRY_LIMITS;
+  return {
+    ts,
+    ...entry,
+    action: clipField(entry.action, fieldChars.action),
+    tenantId: clipField(entry.tenantId, fieldChars.tenantId),
+    tenantName: clipField(entry.tenantName, fieldChars.tenantName),
+    actor: clipField(entry.actor, fieldChars.actor),
+    error: clipField(entry.error, fieldChars.error),
+    params: boundParams(redactSensitive(entry.params ?? {})),
+  };
 }
 
 export function audit(entry: AuditEntry): void {
   try {
-    const line =
-      JSON.stringify({
-        ts: new Date().toISOString(),
-        ...entry,
-        params: redactSensitive(entry.params),
-      }) + "\n";
+    const line = JSON.stringify(preparedEntry(entry, new Date().toISOString())) + "\n";
     rotateIfAtCap();
     appendFileSync(AUDIT_LOG_PATH, line, { encoding: "utf-8", mode: 0o600 });
     if (trackedLogSize !== null) trackedLogSize += Buffer.byteLength(line);
@@ -228,7 +347,10 @@ export function boundedParams(body: unknown): Record<string, unknown> {
   }
   const out: Record<string, unknown> = {};
   const entries = Object.entries(body as Record<string, unknown>);
-  for (const [k, v] of entries.slice(0, BOUNDED_MAX_KEYS)) {
+  for (const [rawKey, v] of entries.slice(0, BOUNDED_MAX_KEYS)) {
+    // Key names come from the caller too: a multi-megabyte key used to pass
+    // through untouched.
+    const k = clip(rawKey, 64);
     if (typeof v === "string") {
       out[k] =
         v.length > BOUNDED_MAX_CHARS

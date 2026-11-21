@@ -48,6 +48,14 @@ export async function POST(req: NextRequest) {
     if (!name || typeof name !== "string" || !name.trim()) {
       return NextResponse.json({ error: "name is required" }, { status: 400 });
     }
+    // The name is copied into every audit entry made for this tenant, and the
+    // config import already caps it at the same length.
+    if (name.trim().length > 100) {
+      return NextResponse.json(
+        { error: "name must be at most 100 characters" },
+        { status: 400 }
+      );
+    }
     const credPath = validateCredentialsFilePath(credentialsFile);
     if (!isValidEmail(adminEmail)) {
       return NextResponse.json(

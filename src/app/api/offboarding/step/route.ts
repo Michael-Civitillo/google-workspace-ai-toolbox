@@ -28,6 +28,17 @@ const MAX_BODY_BYTES = 16 * 1024;
 // Steps that impersonate the departing user rather than acting on them from
 // the admin's side. Google refuses to mint a token for a suspended account, so
 // these only work while the account is still active.
+const KNOWN_STEPS: ReadonlySet<string> = new Set([
+  "vacation",
+  "forward",
+  "calendar",
+  "drive",
+  "groups",
+  "revokeTokens",
+  "signOut",
+  "suspend",
+]);
+
 const SETTINGS_STEPS: ReadonlySet<string> = new Set([
   "vacation",
   "forward",
@@ -70,6 +81,9 @@ export async function POST(request: NextRequest) {
 
   let tenant: Tenant | null = null;
   const step = String(body.step || "");
+  // The step names this route knows. Anything else is refused below, and is
+  // never copied into the audit entry's action name.
+  const knownStep = KNOWN_STEPS.has(step) ? step : "unknown";
   try {
     tenant = tenantFromRequest(request, body);
     const user = requireEmail(body.user, "user");
@@ -505,15 +519,15 @@ export async function POST(request: NextRequest) {
   } catch (e) {
     const message = e instanceof Error ? e.message : "Step failed";
     audit({
-      action: `offboarding.${step || "unknown"}`,
+      action: `offboarding.${knownStep}`,
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
       // Record the identifiers, not the raw body: a 5,000-character vacation
       // message (or any unexpected field) has no place in the audit log.
       params: {
-        step,
-        user: typeof body.user === "string" ? body.user : null,
-        successor: typeof body.successor === "string" ? body.successor : null,
+        step: knownStep === "unknown" ? String(body.step ?? "").slice(0, 40) : step,
+        user: typeof body.user === "string" ? body.user.slice(0, 320) : null,
+        successor: typeof body.successor === "string" ? body.successor.slice(0, 320) : null,
       },
       outcome: "error",
       error: message,

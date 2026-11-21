@@ -41,9 +41,12 @@ export async function PUT(
     // null/""/false slips past the check yet is still written below, corrupting
     // the stored tenant (e.g. TENANT_COLOR_CLASSES[null] is undefined and the
     // UI crashes rendering it).
-    if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+    if (
+      name !== undefined &&
+      (typeof name !== "string" || !name.trim() || name.trim().length > 100)
+    ) {
       return NextResponse.json(
-        { error: "name must be a non-empty string" },
+        { error: "name must be a non-empty string of at most 100 characters" },
         { status: 400 }
       );
     }
