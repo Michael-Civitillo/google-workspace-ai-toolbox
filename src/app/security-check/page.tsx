@@ -25,6 +25,7 @@ import {
   Forward,
   KeyRound,
   Loader2,
+  MailCheck,
   Plug,
   ShieldAlert,
   ShieldCheck,
@@ -36,6 +37,7 @@ import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import {
   compareApps,
   delegationNeedsReview,
+  emailAuthKeys,
   findingKey,
   INACTIVE_DEFAULT_DAYS,
   INACTIVE_THRESHOLDS,
@@ -56,8 +58,16 @@ import {
   type TwoStepFinding,
   type UnreadAccount,
 } from "@/lib/security-check";
+import {
+  emailAuthIncomplete,
+  emailAuthNeedsReview,
+  type DomainEmailAuth,
+  type EmailAuthReport,
+  type RecordCheck,
+  type Verdict,
+} from "@/lib/email-auth";
 
-type CheckId = "twoStep" | "inactive" | "forwarding" | "apps" | "delegation";
+type CheckId = CheckName;
 type Status =
   | "idle"
   | "running"
@@ -126,6 +136,17 @@ const STATUS: Record<
   },
 };
 
+const VERDICT: Record<
+  Verdict,
+  { label: string; icon: typeof CheckCircle2; className: string }
+> = {
+  ok: { label: "In place", icon: CheckCircle2, className: "text-success-fg" },
+  warn: { label: "Weak", icon: AlertTriangle, className: "text-warning-fg" },
+  bad: { label: "Missing or broken", icon: ShieldAlert, className: "text-danger-fg" },
+  unknown: { label: "Can't tell", icon: CircleDashed, className: "text-muted-foreground" },
+  error: { label: "Not checked", icon: CircleDashed, className: "text-muted-foreground" },
+};
+
 const ACCESS: Record<
   AccessLevel,
   { label: string; variant: "destructive" | "warning" | "outline" }
@@ -183,7 +204,8 @@ function toCsv(
   inactive: InactiveFinding[],
   forwarding: ForwardingFinding[],
   apps: AppGrant[],
-  delegated: DelegatedClient[]
+  delegated: DelegatedClient[],
+  domains: DomainEmailAuth[]
 ): string {
   const rows: string[][] = [
     ["check", "account", "name", "administrator", "finding", "target", "detail"],
@@ -248,6 +270,24 @@ function toCsv(
       client.scopes.join(" "),
     ]);
   }
+  for (const d of domains) {
+    for (const [name, check] of [
+      ["SPF", d.spf],
+      ["DKIM", d.dkim],
+      ["DMARC", d.dmarc],
+    ] as Array<[string, RecordCheck]>) {
+      if (check.verdict === "ok") continue;
+      rows.push([
+        "Email authentication",
+        d.domain,
+        "",
+        "",
+        `${name}: ${VERDICT[check.verdict].label}`,
+        check.record ?? "",
+        check.summary,
+      ]);
+    }
+  }
   return rows.map((r) => r.map((c) => `"${csvCell(c)}"`).join(",")).join("\n");
 }
 
@@ -284,7 +324,7 @@ function Tile({
         selected ? "border-primary ring-1 ring-primary" : "border-border"
       )}
     >
-      <span className="flex min-h-10 items-start gap-2 text-sm text-muted-foreground">
+      <span className="flex min-h-10 items-start gap-2 text-sm text-muted-foreground xl:min-h-0">
         <Icon className="mt-0.5 h-4 w-4 shrink-0" />
         {label}
       </span>
@@ -334,6 +374,11 @@ export default function SecurityCheck() {
   const [delegation, setDelegation] = useState<DelegationReport | null>(null);
   const [delegationError, setDelegationError] = useState<string | null>(null);
   const [delegationLoading, setDelegationLoading] = useState(false);
+  // Email authentication is tenant-wide too: one request, public DNS.
+  const [emailAuth, setEmailAuth] = useState<EmailAuthReport | null>(null);
+  const [emailAuthError, setEmailAuthError] = useState<string | null>(null);
+  const [emailAuthLoading, setEmailAuthLoading] = useState(false);
+  const [openDomain, setOpenDomain] = useState<string | null>(null);
   const [message, setMessage] = useState<Feedback | null>(null);
 
   const [selected, setSelected] = useState<CheckId>("twoStep");
@@ -375,6 +420,10 @@ export default function SecurityCheck() {
     setDelegation(null);
     setDelegationError(null);
     setDelegationLoading(false);
+    setEmailAuth(null);
+    setEmailAuthError(null);
+    setEmailAuthLoading(false);
+    setOpenDomain(null);
     setShowAll(false);
     setOpenApp(null);
     setOpenClient(null);
@@ -418,31 +467,42 @@ export default function SecurityCheck() {
     // Not awaited: the admin log is read while the accounts are scanned. The
     // `abortRef.current === ac` checks keep a slow answer from an earlier run
     // from landing in this one.
-    setDelegationLoading(true);
-    void (async () => {
-      const current = () =>
-        tenantIdRef.current === pinnedTenantId && abortRef.current === ac;
+    const current = () =>
+      tenantIdRef.current === pinnedTenantId && abortRef.current === ac;
+    const tenantWide = async <T,>(
+      url: string,
+      onData: (data: T) => void,
+      onError: (error: string) => void,
+      setLoading: (loading: boolean) => void,
+      fallback: string
+    ) => {
+      setLoading(true);
       try {
-        const res = await tfetch(
-          "/api/admin/security-check/delegation",
-          { signal: ac.signal },
-          pinnedTenantId
-        );
+        const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
         const result = await res.json();
         if (!current()) return;
-        if (result.success) {
-          setDelegation(result.data as DelegationReport);
-        } else {
-          setDelegationError(result.error || "The admin log could not be read");
-        }
+        if (result.success) onData(result.data as T);
+        else onError(result.error || fallback);
       } catch {
-        if (current() && !ac.signal.aborted) {
-          setDelegationError("Failed to connect to the API");
-        }
+        if (current() && !ac.signal.aborted) onError("Failed to connect to the API");
       } finally {
-        if (current()) setDelegationLoading(false);
+        if (current()) setLoading(false);
       }
-    })();
+    };
+    void tenantWide<DelegationReport>(
+      "/api/admin/security-check/delegation",
+      setDelegation,
+      setDelegationError,
+      setDelegationLoading,
+      "The admin log could not be read"
+    );
+    void tenantWide<EmailAuthReport>(
+      "/api/admin/security-check/email-auth",
+      setEmailAuth,
+      setEmailAuthError,
+      setEmailAuthLoading,
+      "The domains could not be checked"
+    );
 
     const allApps = new Map<string, AppGrant>();
     let pageToken: string | null = null;
@@ -732,11 +792,14 @@ export default function SecurityCheck() {
   );
 
   const delegatedAll = useMemo(() => delegation?.clients ?? [], [delegation]);
+  const domainsAll = useMemo(() => emailAuth?.domains ?? [], [emailAuth]);
 
   // Remember a scan that covered the whole tenant as the baseline for the next
   // one. Waits for the delegation request, which runs beside the account scan.
   useEffect(() => {
-    if (!done || scanning || stopped !== null || delegationLoading) return;
+    if (!done || scanning || stopped !== null || delegationLoading || emailAuthLoading) {
+      return;
+    }
     const run = abortRef.current;
     if (!run || savedRunRef.current === run) return;
     savedRunRef.current = run;
@@ -746,10 +809,14 @@ export default function SecurityCheck() {
       forwarding,
       apps,
       delegated: delegatedAll,
+      domains: domainsAll,
     });
     if (keys.length > SNAPSHOT_MAX_KEYS) return;
     const covered: CheckName[] = ["twoStep", "inactive", "forwarding", "apps"];
     if (delegation) covered.push("delegation");
+    // Only a run where every lookup was answered is a baseline: a record
+    // that could not be looked up then must not look new when it can be.
+    if (emailAuth && !domainsAll.some(emailAuthIncomplete)) covered.push("emailAuth");
     tfetch(
       "/api/admin/security-check/history",
       {
@@ -768,6 +835,9 @@ export default function SecurityCheck() {
     delegationLoading,
     delegation,
     delegatedAll,
+    emailAuthLoading,
+    emailAuth,
+    domainsAll,
     twoStep,
     inactive,
     forwarding,
@@ -786,6 +856,8 @@ export default function SecurityCheck() {
   const newApp = (app: AppGrant) => isNew("apps", findingKey.app(app));
   const newClient = (client: DelegatedClient) =>
     isNew("delegation", findingKey.delegation(client));
+  const newDomain = (d: DomainEmailAuth) =>
+    emailAuthKeys(d).some((key) => isNew("emailAuth", key));
 
   const adminsWithoutTwoStep = twoStep.filter((f) => f.admin).length;
   const forwardingMailboxes = new Set(forwarding.map((f) => f.user)).size;
@@ -799,19 +871,27 @@ export default function SecurityCheck() {
   const forwardingList = onlyNew ? forwarding.filter(newForwarding) : forwarding;
   const appList = onlyNew ? appRows.filter((r) => newApp(r.app)) : appRows;
   const delegatedClients = onlyNew ? delegatedAll.filter(newClient) : delegatedAll;
+  const domainList = onlyNew ? domainsAll.filter(newDomain) : domainsAll;
+  const domainsToReview = domainsAll.filter(emailAuthNeedsReview).length;
+  const domainsUnchecked = domainsAll.filter(emailAuthIncomplete).length;
+  const domainsBroken = domainsAll.some((d) =>
+    [d.spf, d.dkim, d.dmarc].some((c) => c.verdict === "bad")
+  );
   const freshCount = {
     twoStep: twoStepSorted.filter(newTwoStep).length,
     inactive: inactiveShown.filter(newInactive).length,
     forwarding: new Set(forwarding.filter(newForwarding).map((f) => f.user)).size,
     apps: appRows.filter((r) => r.access.level === "high" && newApp(r.app)).length,
     delegation: delegatedAll.filter((c) => delegationNeedsReview(c) && newClient(c)).length,
+    emailAuth: domainsAll.filter((d) => emailAuthNeedsReview(d) && newDomain(d)).length,
   };
   const anythingNew =
     twoStepSorted.some(newTwoStep) ||
     inactiveShown.some(newInactive) ||
     forwarding.some(newForwarding) ||
     apps.some(newApp) ||
-    delegatedAll.some(newClient);
+    delegatedAll.some(newClient) ||
+    domainsAll.some(newDomain);
   const hasResults = totals !== null;
   const partial = stopped !== null;
 
@@ -851,6 +931,21 @@ export default function SecurityCheck() {
           : delegationToReview > 0
             ? "warning"
             : "quiet",
+    // DNS answers are complete answers, so this check can say "Nothing found",
+    // but only when every lookup for every domain was actually answered.
+    emailAuth: !hasResults
+      ? "idle"
+      : emailAuthLoading
+        ? "running"
+        : !emailAuth
+          ? "incomplete"
+          : domainsToReview > 0
+            ? domainsBroken
+              ? "critical"
+              : "warning"
+            : domainsUnchecked > 0
+              ? "incomplete"
+              : "good",
   };
 
   const progressLine = () => {
@@ -874,7 +969,7 @@ export default function SecurityCheck() {
   const exportCsv = () => {
     downloadCsv(
       `security-check-${new Date().toISOString().slice(0, 10)}.csv`,
-      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedAll)
+      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedAll, domainsAll)
     );
   };
 
@@ -883,6 +978,7 @@ export default function SecurityCheck() {
     setShowAll(false);
     setOpenApp(null);
     setOpenClient(null);
+    setOpenDomain(null);
   };
 
   const limited = <T,>(rows: T[]): T[] => (showAll ? rows : rows.slice(0, ROW_LIMIT));
@@ -909,7 +1005,8 @@ export default function SecurityCheck() {
       inactive.length +
       forwarding.length +
       apps.length +
-      delegatedAll.length >
+      delegatedAll.length +
+      domainsToReview >
     0;
   const unreadTotal = (totals?.mailboxErrors ?? 0) + (totals?.appErrors ?? 0);
 
@@ -917,7 +1014,7 @@ export default function SecurityCheck() {
     <>
       <PageHeader
         title="Security Check"
-        description="One pass over the tenant for the things that most often lead to trouble: accounts without 2-Step Verification, accounts nobody uses, mail forwarded outside the organisation, outside apps holding access to your data, and apps granted domain-wide delegation. It only reads; nothing is changed."
+        description="One pass over the tenant for the things that most often lead to trouble: accounts without 2-Step Verification, accounts nobody uses, mail forwarded outside the organisation, outside apps holding access to your data, apps granted domain-wide delegation, and domains other people could send mail as. Scanning only reads; nothing changes unless you press a fix button and confirm it."
         badge="Audit"
         actions={
           <>
@@ -956,7 +1053,7 @@ export default function SecurityCheck() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Tile
           icon={KeyRound}
           label="No 2-Step Verification"
@@ -1028,6 +1125,22 @@ export default function SecurityCheck() {
           fresh={freshCount.delegation}
           selected={selected === "delegation"}
           onSelect={() => select("delegation")}
+        />
+        <Tile
+          icon={MailCheck}
+          label="Email spoofing protection"
+          value={hasResults && emailAuth ? domainsToReview.toLocaleString() : "–"}
+          note={
+            !hasResults
+              ? "Domains missing SPF, DKIM or DMARC"
+              : emailAuthError
+                ? "The domains couldn't be checked"
+                : `of ${plural(domainsAll.length, "domain")}`
+          }
+          status={status.emailAuth}
+          fresh={freshCount.emailAuth}
+          selected={selected === "emailAuth"}
+          onSelect={() => select("emailAuth")}
         />
       </div>
 
@@ -1589,6 +1702,118 @@ export default function SecurityCheck() {
                       ones in this period may be missing.
                     </p>
                   )}
+                </>
+              )}
+            </CardContent>
+          </>
+        )}
+        {selected === "emailAuth" && (
+          <>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <MailCheck className="h-5 w-5" />
+                Email spoofing protection
+              </CardTitle>
+              <CardDescription className="space-y-2">
+                <span className="block">
+                  Three public DNS records tell other mail systems which mail
+                  really comes from you. Without them anyone can send mail that
+                  appears to come from your domain, and more of your own mail
+                  lands in spam. SPF lists the servers allowed to send, DKIM
+                  lets receivers check a signature on each message, and DMARC
+                  says what to do with mail that fails both.
+                </span>
+                <span className="block">
+                  SPF and DMARC are records you add with whoever hosts your
+                  DNS. DKIM is switched on in the Google Admin console (Apps →
+                  Google Workspace → Gmail → Authenticate email), which also
+                  gives you the record to publish. DKIM is looked for under
+                  Google&apos;s default name only; one set up under another
+                  name can&apos;t be found from outside.
+                </span>
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!hasResults ? (
+                <Empty>Run the check to see results.</Empty>
+              ) : emailAuthLoading ? (
+                <Empty>Looking up DNS records…</Empty>
+              ) : emailAuthError ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+                  <p className="font-medium">The domains could not be checked.</p>
+                  <p className="mt-1 text-xs text-muted-foreground break-words">
+                    {emailAuthError}
+                  </p>
+                </div>
+              ) : !emailAuth ? (
+                <Empty>The check was stopped before the domains were looked up.</Empty>
+              ) : domainList.length === 0 ? (
+                <Empty>
+                  {onlyNew
+                    ? "Nothing new here since the last scan."
+                    : "This tenant has no verified domains to check."}
+                </Empty>
+              ) : (
+                <>
+                  {limited(domainList).map((d) => {
+                    const open = openDomain === d.domain;
+                    return (
+                      <div key={d.domain} className="rounded-lg border bg-muted/30 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-medium break-all">{d.domain}</p>
+                            {d.primary && <Badge variant="outline">primary</Badge>}
+                            {newDomain(d) && <Badge variant="accent">new</Badge>}
+                          </div>
+                          <button
+                            type="button"
+                            aria-expanded={open}
+                            className="text-xs text-muted-foreground underline underline-offset-2"
+                            onClick={() => setOpenDomain(open ? null : d.domain)}
+                          >
+                            {open ? "Hide records" : "Show records"}
+                          </button>
+                        </div>
+                        <dl className="mt-2 space-y-2">
+                          {(
+                            [
+                              ["SPF", d.spf],
+                              ["DKIM", d.dkim],
+                              ["DMARC", d.dmarc],
+                            ] as Array<[string, RecordCheck]>
+                          ).map(([name, check]) => {
+                            const v = VERDICT[check.verdict];
+                            const VerdictIcon = v.icon;
+                            return (
+                              <div key={name} className="grid grid-cols-[4rem_1fr] gap-x-3 text-xs">
+                                <dt className="font-medium">{name}</dt>
+                                <dd className="min-w-0">
+                                  <span
+                                    className={cn(
+                                      "flex items-center gap-1.5 font-medium",
+                                      v.className
+                                    )}
+                                  >
+                                    <VerdictIcon className="h-3.5 w-3.5 shrink-0" />
+                                    {v.label}
+                                  </span>
+                                  <span className="mt-0.5 block text-muted-foreground">
+                                    {check.summary}
+                                  </span>
+                                  {open && (
+                                    <span className="mt-1 block font-mono text-muted-foreground break-all">
+                                      {check.record ?? "(no single record to show)"}
+                                    </span>
+                                  )}
+                                </dd>
+                              </div>
+                            );
+                          })}
+                        </dl>
+                      </div>
+                    );
+                  })}
+                  {more(domainList.length)}
                 </>
               )}
             </CardContent>

@@ -9,6 +9,8 @@
  * matters for a report people use to decide that nothing is wrong.
  */
 
+import type { DomainEmailAuth, Verdict } from "./email-auth";
+
 // ---------------------------------------------------------------------------
 // Accounts: 2-Step Verification and inactivity
 // ---------------------------------------------------------------------------
@@ -616,8 +618,15 @@ export interface DelegationReport {
 // What changed since the last scan
 // ---------------------------------------------------------------------------
 
-/** The five checks, by the name the page and the history file use for them. */
-export const CHECK_IDS = ["twoStep", "inactive", "forwarding", "apps", "delegation"] as const;
+/** The checks, by the name the page and the history file use for them. */
+export const CHECK_IDS = [
+  "twoStep",
+  "inactive",
+  "forwarding",
+  "apps",
+  "delegation",
+  "emailAuth",
+] as const;
 export type CheckName = (typeof CHECK_IDS)[number];
 
 /**
@@ -655,7 +664,17 @@ export const findingKey = {
   /** Includes the time of the change, so every grant or removal is new once. */
   delegation: (client: DelegatedClient) =>
     `dwd|${client.clientId}|${client.status}|${client.lastChange}`,
+  /** One per record with something wrong, so a record that gets worse is new. */
+  emailAuth: (domain: string, record: "spf" | "dkim" | "dmarc", verdict: Verdict) =>
+    `mail|${domain}|${record}|${verdict}`,
 };
+
+/** The keys for one domain's email authentication problems. */
+export function emailAuthKeys(d: DomainEmailAuth): string[] {
+  return (["spf", "dkim", "dmarc"] as const)
+    .filter((r) => ["bad", "warn", "unknown"].includes(d[r].verdict))
+    .map((r) => findingKey.emailAuth(d.domain, r, d[r].verdict));
+}
 
 /** Every key a finished scan should be remembered by. */
 export function snapshotKeys(found: {
@@ -664,6 +683,7 @@ export function snapshotKeys(found: {
   forwarding: readonly ForwardingFinding[];
   apps: readonly AppGrant[];
   delegated: readonly DelegatedClient[];
+  domains?: readonly DomainEmailAuth[];
 }): string[] {
   const keys = new Set<string>();
   for (const f of found.twoStep) keys.add(findingKey.twoStep(f));
@@ -675,6 +695,9 @@ export function snapshotKeys(found: {
   for (const f of found.forwarding) keys.add(findingKey.forwarding(f));
   for (const app of found.apps) keys.add(findingKey.app(app));
   for (const client of found.delegated) keys.add(findingKey.delegation(client));
+  for (const domain of found.domains ?? []) {
+    for (const key of emailAuthKeys(domain)) keys.add(key);
+  }
   return [...keys].sort();
 }
 
