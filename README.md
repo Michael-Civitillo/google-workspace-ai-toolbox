@@ -471,7 +471,7 @@ Tenant config is saved to `tenants.json` locally (gitignored — your credential
 npm run dev            # fire it up
 npm run build          # production build
 npm run lint           # check your work
-npm run screenshots    # regenerate docs/screenshots/* in light + dark modes (needs dev server + APP_PASSWORD)
+npm run screenshots    # regenerate docs/screenshots/* in light + dark modes (needs a running app + APP_PASSWORD)
 
 npm run package        # build the single-file desktop payload (needs Node 22+)
 npm run package:exe    # Windows: assemble OpenAdmin-win-x64.exe
@@ -479,7 +479,13 @@ npm run package:bin    # Linux/macOS: assemble packaging/dist/open-admin
 npm run package:smoke  # start a built binary and check it end to end
 npm run test:launcher  # unit tests for the packaged launcher
 npm run test:lib       # unit tests for the app's own logic (src/**/*.test.ts)
+npm run test:e2e       # drive a built binary in a browser against a stand-in for Google
 ```
+
+`test:e2e` needs a packaged build and Playwright, and takes about a quarter of
+an hour. [`scripts/e2e/README.md`](scripts/e2e/README.md) explains how it works,
+what it covers, and how the README screenshots are made from the same sample
+organisation.
 
 See [`packaging/README.md`](packaging/README.md) for how the single-file build
 is put together.
