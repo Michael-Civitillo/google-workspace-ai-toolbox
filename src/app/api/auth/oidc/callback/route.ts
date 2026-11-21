@@ -13,12 +13,14 @@ import {
   type OidcMode,
 } from "@/lib/oidc";
 import {
+  consumeHandshake,
   HANDSHAKE_COOKIE_NAME,
   handshakeCookieOptions,
   parseHandshake,
 } from "@/lib/oidc-handshake";
 import { renderRedirectPage, renderTestResultPage } from "@/lib/oidc-pages";
-import { audit } from "@/lib/audit";
+import { audit, auditThrottled } from "@/lib/audit";
+import { clientKey } from "@/lib/rate-limit";
 import { identityFromRequest, describeActor } from "@/lib/session";
 import type { SsoTestResult } from "@/lib/sso-types";
 
@@ -88,6 +90,19 @@ export async function GET(req: NextRequest) {
     return clearHandshake(loginError("session_expired"));
   }
   const mode: OidcMode = handshake.mode;
+  // A handshake is good for one callback. A replayed copy is treated like an
+  // expired one.
+  if (!consumeHandshake(handshake.state)) {
+    return clearHandshake(
+      mode === "test"
+        ? testPage({
+            ok: false,
+            code: "session_expired",
+            message: "This sign-in attempt was already used. Start the test again.",
+          })
+        : loginError("session_expired")
+    );
+  }
 
   let cfg;
   try {
@@ -139,7 +154,7 @@ export async function GET(req: NextRequest) {
       req.nextUrl.search,
       handshake
     );
-    const access = evaluateSsoAccess(cfg, identity.email);
+    const access = evaluateSsoAccess(cfg, identity);
 
     if (!access.allowed) {
       failedEmail = identity.email;
@@ -149,11 +164,10 @@ export async function GET(req: NextRequest) {
         access.reason
       );
     } else if (mode === "test") {
-      await recordSsoTest({
-        at: new Date().toISOString(),
-        ok: true,
-        email: identity.email,
-      }).catch((e) => console.error("[sso] could not record test result:", e));
+      await recordSsoTest(
+        { at: new Date().toISOString(), ok: true, email: identity.email },
+        cfg.updatedAt
+      ).catch((e) => console.error("[sso] could not record test result:", e));
       audit({
         action: auditAction,
         tenantId: null,
@@ -213,13 +227,10 @@ export async function GET(req: NextRequest) {
           );
   }
 
-  // Failure path (shared by thrown errors and the allowlist refusal).
-  console.warn(
-    `[sso] ${mode} failed: ${failure.code} — ${failure.message}${
-      failure.detail ? ` (${failure.detail})` : ""
-    }`
-  );
-  audit({
+  // Failure path (shared by thrown errors and the allowlist refusal). Anyone
+  // can reach this without signing in, so what it writes is capped per
+  // client: a flood of made-up callbacks used to fill the audit log.
+  const logged = auditThrottled(`sso-callback:${clientKey(req)}`, {
     action: auditAction,
     tenantId: null,
     tenantName: null,
@@ -233,16 +244,26 @@ export async function GET(req: NextRequest) {
     error: failure.message,
     actor: testerActor ?? failedEmail,
   });
+  if (logged) {
+    console.warn(
+      `[sso] ${mode} failed: ${failure.code} — ${failure.message}${
+        failure.detail ? ` (${failure.detail})` : ""
+      }`
+    );
+  }
 
   if (mode === "test") {
-    await recordSsoTest({
-      at: new Date().toISOString(),
-      ok: false,
-      email: failedEmail,
-      error: failure.detail
-        ? `${failure.message} (${failure.detail})`
-        : failure.message,
-    }).catch((err) => console.error("[sso] could not record test result:", err));
+    await recordSsoTest(
+      {
+        at: new Date().toISOString(),
+        ok: false,
+        email: failedEmail,
+        error: failure.detail
+          ? `${failure.message} (${failure.detail})`
+          : failure.message,
+      },
+      cfg.updatedAt
+    ).catch((err) => console.error("[sso] could not record test result:", err));
     return clearHandshake(
       testPage({
         ok: false,

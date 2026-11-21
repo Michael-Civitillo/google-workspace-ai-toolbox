@@ -37,19 +37,26 @@ function loginError(code: string): NextResponse {
 }
 
 function testFailure(
+  nonce: string | undefined,
   message: string,
   detail?: string,
   code = "start_failed",
   status = 200
 ): NextResponse {
   return new NextResponse(
-    renderTestResultPage({
-      type: "gws-sso-test",
-      ok: false,
-      code,
-      message,
-      detail,
-    }),
+    // The page's script reports the result to the wizard and closes the
+    // pop-up; the Content-Security-Policy only lets it run with this
+    // request's nonce. Without it the wizard never heard about the failure.
+    renderTestResultPage(
+      {
+        type: "gws-sso-test",
+        ok: false,
+        code,
+        message,
+        detail,
+      },
+      nonce
+    ),
     {
       status,
       headers: {
@@ -63,10 +70,11 @@ function testFailure(
 export async function GET(req: NextRequest) {
   const mode: OidcMode =
     req.nextUrl.searchParams.get("mode") === "test" ? "test" : "login";
+  const nonce = req.headers.get("x-nonce") ?? undefined;
 
   if (!authConfigured()) {
     return mode === "test"
-      ? testFailure("APP_PASSWORD is not set on the server")
+      ? testFailure(nonce, "APP_PASSWORD is not set on the server")
       : loginError("server_error");
   }
 
@@ -82,6 +90,7 @@ export async function GET(req: NextRequest) {
       // for the pop-up's message and would otherwise wait until the window
       // is closed by hand.
       return testFailure(
+        nonce,
         "Your Open Admin session has expired — sign in again and re-run the test",
         undefined,
         "unauthorized",
@@ -98,6 +107,7 @@ export async function GET(req: NextRequest) {
     console.error("[sso] could not read config:", e);
     return mode === "test"
       ? testFailure(
+          nonce,
           "Could not read the single sign-on configuration",
           e instanceof Error ? e.message : String(e)
         )
@@ -105,7 +115,7 @@ export async function GET(req: NextRequest) {
   }
   if (!cfg) {
     return mode === "test"
-      ? testFailure("Single sign-on isn't configured yet — save the configuration first")
+      ? testFailure(nonce, "Single sign-on isn't configured yet — save the configuration first")
       : loginError("not_configured");
   }
   if (mode === "login" && !ssoLoginAvailable(cfg)) {
@@ -132,6 +142,7 @@ export async function GET(req: NextRequest) {
     console.error("[sso] could not start sign-in:", e);
     return mode === "test"
       ? testFailure(
+          nonce,
           "Could not reach the identity provider",
           e instanceof Error ? e.message : String(e)
         )

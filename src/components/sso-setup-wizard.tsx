@@ -22,6 +22,8 @@ import {
   SSO_CALLBACK_PATH,
   SSO_PROVIDERS,
   SSO_PROVIDER_PRESETS,
+  SSO_ONLY_CONFIRM_PHRASE,
+  issuerFamily,
   isLoopbackHost,
   type IssuerCheckResult,
   type PublicSsoConfig,
@@ -181,6 +183,11 @@ export function SsoSetupWizard({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState<PublicSsoConfig | null>(null);
+  // The settings as they were when last saved, so the finish step can tell
+  // when the form has changed since: enabling acts on what is stored, so a
+  // changed form must never be shown as "Saved".
+  const [savedKey, setSavedKey] = useState<string | null>(null);
+  const [ssoOnlyPhrase, setSsoOnlyPhrase] = useState("");
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const [enabling, setEnabling] = useState(false);
   const [enableError, setEnableError] = useState<string | null>(null);
@@ -202,6 +209,8 @@ export function SsoSetupWizard({
       setSaving(false);
       setSaveError(null);
       setSaved(null);
+      setSavedKey(null);
+      setSsoOnlyPhrase("");
       setTest({ kind: "idle" });
       setEnabling(false);
       setEnableError(null);
@@ -220,11 +229,18 @@ export function SsoSetupWizard({
   const issuerTrimmed = form.issuer.trim();
   const discoveryOk =
     discovery.kind === "ok" && discovery.issuer === issuerTrimmed;
-  const hasSecret = form.clientSecret.trim() !== "" || !!existing?.hasClientSecret;
+  // A stored secret belongs to one client at one provider: once the issuer or
+  // client ID changes, a new one is required (the server refuses otherwise).
+  const clientChanged =
+    !!existing &&
+    (existing.issuer !== issuerTrimmed || existing.clientId !== form.clientId.trim());
+  const hasSecret =
+    form.clientSecret.trim() !== "" || (!!existing?.hasClientSecret && !clientChanged);
   const domains = splitEntries(form.allowedDomains);
   const emails = splitEntries(form.allowedEmails);
+  const googleIssuer = form.provider === "google" || issuerFamily(issuerTrimmed) === "google";
   const accessOk =
-    (form.allowAnyIdpUser && form.provider !== "google") ||
+    (form.allowAnyIdpUser && !googleIssuer) ||
     domains.length + emails.length > 0;
 
   const canContinue: Record<StepId, boolean> = {
@@ -312,8 +328,13 @@ export function SsoSetupWizard({
 
   async function save() {
     if (!redirect.uri) return;
+    // A test still running was started against the previous settings; its
+    // result must not be shown as a result for these.
+    cancelTestRef.current();
+    setTest({ kind: "idle" });
     setSaving(true);
     setSaveError(null);
+    const key = currentKey;
     try {
       const cfg = await saveSsoConfig({
         provider: form.provider,
@@ -331,7 +352,8 @@ export function SsoSetupWizard({
         enabled: existing?.enabled ?? false,
       });
       setSaved(cfg);
-      setTest({ kind: "idle" });
+      setSavedKey(key);
+      setSsoOnlyPhrase("");
       onSaved(cfg);
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : "Failed to save");
@@ -355,7 +377,11 @@ export function SsoSetupWizard({
     setEnabling(true);
     setEnableError(null);
     try {
-      const cfg = await saveSsoConfig(patch);
+      // Going password-free also needs the phrase the person typed; the
+      // server checks it.
+      const cfg = await saveSsoConfig(
+        makesSsoOnly(patch) ? { ...patch, confirm: ssoOnlyPhrase.trim() } : patch
+      );
       setSaved(cfg);
       onSaved(cfg);
     } catch (e) {
@@ -381,7 +407,28 @@ export function SsoSetupWizard({
   const needsTestBeforeEnable = saved
     ? !saved.passwordLoginEnabled
     : !form.passwordLoginEnabled;
-  const testPassed = test.kind === "done" && test.result.ok;
+  // Everything a save sends, minus the secret's value (only whether one was
+  // typed). Changed since the last save means the finish step's actions
+  // would act on settings the person isn't looking at.
+  const currentKey = JSON.stringify([
+    form.provider,
+    form.displayName.trim(),
+    issuerTrimmed,
+    form.clientId.trim(),
+    form.clientSecret.trim() !== "",
+    redirect.uri,
+    domains,
+    emails,
+    form.allowAnyIdpUser,
+    form.passwordLoginEnabled,
+  ]);
+  const unsavedChanges = !!saved && savedKey !== null && savedKey !== currentKey;
+  const testPassed = test.kind === "done" && test.result.ok && !unsavedChanges;
+
+  function makesSsoOnly(patch: { enabled: true } | { passwordLoginEnabled: false }) {
+    if (!saved) return false;
+    return "enabled" in patch ? !saved.passwordLoginEnabled : saved.enabled;
+  }
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange} disablePointerDismissal>
@@ -447,12 +494,21 @@ export function SsoSetupWizard({
               onTurnOffFallback={turnOffFallback}
               needsTestBeforeEnable={needsTestBeforeEnable}
               testPassed={testPassed}
+              unsavedChanges={unsavedChanges}
+              ssoOnlyPhrase={ssoOnlyPhrase}
+              onSsoOnlyPhrase={setSsoOnlyPhrase}
+              clientChanged={clientChanged}
             />
           )}
         </div>
 
         <DialogFooter className="sm:justify-between sm:items-center">
-          <Button variant="ghost" size="sm" onClick={back} disabled={isFirst || saving || enabling}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={back}
+            disabled={isFirst || saving || enabling || test.kind === "running"}
+          >
             <ArrowLeft className="h-4 w-4 mr-1.5" />
             Back
           </Button>
@@ -926,7 +982,7 @@ function AccessStep({
   emails: string[];
   onChange: <K extends keyof WizardForm>(key: K, value: WizardForm[K]) => void;
 }) {
-  const isGoogle = form.provider === "google";
+  const isGoogle = form.provider === "google" || issuerFamily(form.issuer.trim()) === "google";
   return (
     <div className="space-y-4">
       <div>
@@ -1053,6 +1109,10 @@ function FinishStep({
   onTurnOffFallback,
   needsTestBeforeEnable,
   testPassed,
+  unsavedChanges,
+  ssoOnlyPhrase,
+  onSsoOnlyPhrase,
+  clientChanged,
 }: {
   form: WizardForm;
   existing: PublicSsoConfig | null;
@@ -1073,6 +1133,12 @@ function FinishStep({
   onTurnOffFallback: () => void;
   needsTestBeforeEnable: boolean;
   testPassed: boolean;
+  /** The form differs from what was last saved. */
+  unsavedChanges: boolean;
+  ssoOnlyPhrase: string;
+  onSsoOnlyPhrase: (value: string) => void;
+  /** The issuer or client ID differs from the stored configuration. */
+  clientChanged: boolean;
 }) {
   const preset = SSO_PROVIDER_PRESETS[form.provider];
   const rows: Array<[string, string]> = [
@@ -1084,9 +1150,9 @@ function FinishStep({
       "Client secret",
       form.clientSecret.trim()
         ? "•••••••• (new)"
-        : existing?.hasClientSecret
+        : existing?.hasClientSecret && !clientChanged
         ? "•••••••• (unchanged)"
-        : "missing",
+        : "missing: the issuer or client ID changed",
     ],
     ["Redirect URI", redirectUri ?? "invalid"],
     ["Allowed domains", domains.length ? domains.join(", ") : "none"],
@@ -1102,10 +1168,32 @@ function FinishStep({
     ],
   ];
   const enableBlocked = needsTestBeforeEnable && !testPassed;
-  // Live config whose fallback is being turned off: the flip is offered here,
-  // after a passing test, instead of riding along with the save.
+  // Live config whose password fallback should end up off but is on in what
+  // was stored: either the save deferred it, or the server turned it back on
+  // because who can sign in changed. The flip is offered here, after a
+  // passing test, instead of riding along with the save.
   const fallbackFlipPending =
-    deferFallbackOff && !!saved?.enabled && saved.passwordLoginEnabled;
+    !!saved?.enabled && saved.passwordLoginEnabled && !form.passwordLoginEnabled;
+  const serverReenabledFallback =
+    fallbackFlipPending && !deferFallbackOff && existing?.enabled && !existing.passwordLoginEnabled;
+  const phraseOk = ssoOnlyPhrase.trim() === SSO_ONLY_CONFIRM_PHRASE;
+  const phraseInput = (
+    <div className="space-y-1">
+      <Label htmlFor="sso-only-phrase" className="text-xs">
+        Type <code className="bg-muted px-1 py-0.5 rounded font-mono">{SSO_ONLY_CONFIRM_PHRASE}</code>{" "}
+        to turn password sign-in off
+      </Label>
+      <Input
+        id="sso-only-phrase"
+        value={ssoOnlyPhrase}
+        onChange={(e) => onSsoOnlyPhrase(e.target.value)}
+        placeholder={SSO_ONLY_CONFIRM_PHRASE}
+        className="font-mono text-sm max-w-56"
+        autoComplete="off"
+        spellCheck={false}
+      />
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -1143,10 +1231,15 @@ function FinishStep({
             ? "Save changes"
             : "Save configuration"}
         </Button>
-        {saved && (
+        {saved && !unsavedChanges && (
           <span className="text-xs text-success-fg inline-flex items-center gap-1">
             <CheckCircle2 className="h-3.5 w-3.5" />
             Saved{saved.enabled ? " — single sign-on is live" : " — not enabled yet"}
+          </span>
+        )}
+        {unsavedChanges && (
+          <span className="text-xs text-warning-fg" data-testid="sso-unsaved">
+            Changed since you saved. Save again before testing or enabling.
           </span>
         )}
       </div>
@@ -1164,7 +1257,7 @@ function FinishStep({
           variant="outline"
           size="sm"
           onClick={onTest}
-          disabled={!saved || test.kind === "running"}
+          disabled={!saved || unsavedChanges || test.kind === "running"}
           data-testid="sso-test"
         >
           {test.kind === "running" ? (
@@ -1174,7 +1267,7 @@ function FinishStep({
           )}
           {test.kind === "running" ? "Waiting for the pop-up…" : "Test sign-in"}
         </Button>
-        {test.kind === "done" && <SsoTestResultPanel result={test.result} />}
+        {test.kind === "done" && !unsavedChanges && <SsoTestResultPanel result={test.result} />}
       </div>
 
       <Separator />
@@ -1184,15 +1277,19 @@ function FinishStep({
         {fallbackFlipPending ? (
           <>
             <Hint>
+              {serverReenabledFallback
+                ? "Because the provider or who can sign in changed, password sign-in was turned back on so nobody is locked out by untested settings. "
+                : ""}
               {testPassed
                 ? "The test passed with the saved configuration — password sign-in can now be turned off."
                 : "Single sign-on is live with the password form still on. Run the test sign-in above; once it passes, password sign-in can be turned off."}
             </Hint>
+            {testPassed && !unsavedChanges && phraseInput}
             {enableError && <Problem>{enableError}</Problem>}
             <Button
               size="sm"
               onClick={onTurnOffFallback}
-              disabled={enabling || !testPassed}
+              disabled={enabling || !testPassed || unsavedChanges || !phraseOk}
               data-testid="sso-fallback-off"
             >
               {enabling ? (
@@ -1218,11 +1315,18 @@ function FinishStep({
                 ? "Password sign-in is being turned off, so a passing test sign-in is required before enabling."
                 : "Enable now, or run the test first (recommended)."}
             </Hint>
+            {saved && !saved.passwordLoginEnabled && !enableBlocked && !unsavedChanges && phraseInput}
             {enableError && <Problem>{enableError}</Problem>}
             <Button
               size="sm"
               onClick={onEnable}
-              disabled={!saved || enabling || enableBlocked}
+              disabled={
+                !saved ||
+                enabling ||
+                enableBlocked ||
+                unsavedChanges ||
+                (!saved.passwordLoginEnabled && !phraseOk)
+              }
               data-testid="sso-enable"
             >
               {enabling ? (

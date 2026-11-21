@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { chmodSync, existsSync, statSync, unlinkSync } from "fs";
 import path from "path";
 import {
@@ -17,6 +18,8 @@ import {
   type SsoLoginStatus,
   type SsoProvider,
   type SsoTestRecord,
+  issuerFamily,
+  SSO_ONLY_CONFIRM_PHRASE,
 } from "./sso-types";
 
 /**
@@ -262,9 +265,12 @@ function isPrivateIpv4([a, b]: number[]): boolean {
     a === 0 || // 0.0.0.0/8: "this network", which the stack dials locally
     a === 10 ||
     a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10: carrier-grade NAT, Tailscale
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
+    (a === 169 && b === 254) ||
+    (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15: benchmarking, often internal
+    a >= 224 // multicast and reserved
   );
 }
 
@@ -334,16 +340,49 @@ export function isPrivateIssuerHost(hostname: string): boolean {
     .replace(/\.$/, "");
   if (
     host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".local") ||
-    host.endsWith(".internal")
+    INTERNAL_SUFFIXES.some((suffix) => host.endsWith(suffix))
   ) {
     return true;
   }
   const v4 = ipv4Octets(host);
   if (v4) return isPrivateIpv4(v4);
   const v6 = ipv6Bytes(host);
-  return v6 ? isPrivateIpv6(v6) : false;
+  if (v6) return isPrivateIpv6(v6);
+  // A single-label name ("keycloak", "idp") only resolves on a local network.
+  return !host.includes(".");
+}
+
+/** Name endings used only on private networks. */
+const INTERNAL_SUFFIXES = [
+  ".localhost",
+  ".local",
+  ".internal",
+  ".intranet",
+  ".lan",
+  ".home",
+  ".home.arpa",
+  ".corp",
+  ".localdomain",
+  ".svc",
+];
+
+/**
+ * True when a name resolves, right now, to any private or internal address.
+ * The text check above can't see that a public-looking name points inside
+ * the network. A name that doesn't resolve at all returns false: nothing can
+ * be fetched from it either.
+ */
+export async function hostResolvesPrivate(hostname: string): Promise<boolean> {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (isPrivateIssuerHost(host)) return true;
+  if (ipv4Octets(host) || ipv6Bytes(host)) return false;
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await lookup(host, { all: true, verbatim: true });
+  } catch {
+    return false;
+  }
+  return addresses.some(({ address }) => isPrivateIssuerHost(address));
 }
 
 /**
@@ -355,6 +394,13 @@ export function isPrivateIssuerHost(hostname: string): boolean {
 export function validateIssuer(value: unknown): string {
   const s = requireString(value, "issuer", MAX_URL_CHARS);
   const url = parseUrl(s, "issuer");
+  // An issuer containing /.well-known/ makes the OpenID library skip its
+  // check that the discovery document belongs to this issuer.
+  if (url.pathname.includes("/.well-known/")) {
+    throw new ValidationError(
+      "issuer must be the provider's issuer URL, not its discovery document address (leave off /.well-known/...)"
+    );
+  }
   const allowPrivate = privateIssuerAllowed();
   if (!allowPrivate && isPrivateIssuerHost(url.hostname)) {
     throw new ValidationError(PRIVATE_ISSUER_REFUSED);
@@ -487,8 +533,15 @@ export function validateSsoUpdate(
   if (!clientId) throw new ValidationError("clientId is required");
 
   let clientSecret = existing?.clientSecret;
-  if (present("clientSecret") && body.clientSecret !== "") {
+  const newSecret = present("clientSecret") && body.clientSecret !== "";
+  if (newSecret) {
     clientSecret = requireString(body.clientSecret, "clientSecret", MAX_SECRET_CHARS);
+  } else if (existing && (existing.issuer !== issuer || existing.clientId !== clientId)) {
+    // A secret belongs to one client at one provider. Keeping the stored one
+    // would send it to a different provider's token endpoint.
+    throw new ValidationError(
+      "The issuer or client ID changed, so enter the client secret for the new client"
+    );
   }
   if (!clientSecret) throw new ValidationError("clientSecret is required");
 
@@ -506,14 +559,14 @@ export function validateSsoUpdate(
   const allowAnyIdpUser = present("allowAnyIdpUser")
     ? requireBoolean(body.allowAnyIdpUser, "allowAnyIdpUser")
     : existing?.allowAnyIdpUser ?? false;
-  const passwordLoginEnabled = present("passwordLoginEnabled")
+  let passwordLoginEnabled = present("passwordLoginEnabled")
     ? requireBoolean(body.passwordLoginEnabled, "passwordLoginEnabled")
     : existing?.passwordLoginEnabled ?? true;
   const enabled = present("enabled")
     ? requireBoolean(body.enabled, "enabled")
     : existing?.enabled ?? false;
 
-  if (allowAnyIdpUser && provider === "google") {
+  if (allowAnyIdpUser && (provider === "google" || issuerFamily(issuer) === "google")) {
     throw new ValidationError(
       "Google sign-in must be restricted to specific domains or emails — otherwise any Google account could sign in"
     );
@@ -542,14 +595,27 @@ export function validateSsoUpdate(
 
   // Turning single sign-on on with the password form off is the one change
   // that can lock every admin out, so the server — not just the wizard —
-  // demands a passing test of this exact configuration first. Only the
-  // transition is gated: a config that is already live without the fallback
-  // can still be edited (its admins signed in through the provider).
+  // demands a passing test of this exact configuration first, and the typed
+  // phrase the page asks for. Only the transition is gated.
   const wasSsoOnly = !!existing && existing.enabled && !existing.passwordLoginEnabled;
-  if (enabled && !passwordLoginEnabled && !wasSsoOnly && !lastTest?.ok) {
-    throw new ValidationError(
-      "Password sign-in is off in this configuration, so a passing test sign-in of the saved configuration is required before it can be enabled. Save, run \"Test sign-in\", then enable."
-    );
+  if (wasSsoOnly && coreChanged && enabled) {
+    // Editing who can sign in, or the client itself, on a configuration that
+    // is live with the password off would apply untested. Turn the password
+    // fallback back on until the new settings pass a test; the wizard then
+    // offers to turn it off again.
+    passwordLoginEnabled = true;
+  } else if (enabled && !passwordLoginEnabled && !wasSsoOnly) {
+    if (!lastTest?.ok) {
+      throw new ValidationError(
+        "Password sign-in is off in this configuration, so a passing test sign-in of the saved configuration is required before it can be enabled. Save, run \"Test sign-in\", then enable."
+      );
+    }
+    const confirm = typeof body.confirm === "string" ? body.confirm.trim() : "";
+    if (confirm !== SSO_ONLY_CONFIRM_PHRASE) {
+      throw new ValidationError(
+        `Turning off password sign-in needs the confirmation phrase: send confirm "${SSO_ONLY_CONFIRM_PHRASE}".`
+      );
+    }
   }
 
   return {
@@ -601,12 +667,23 @@ export async function deleteSsoConfig(): Promise<boolean> {
   });
 }
 
-/** Remember the outcome of a "Test sign-in" run for the status card. */
-export async function recordSsoTest(record: SsoTestRecord): Promise<void> {
-  await withLock(async () => {
+/**
+ * Remember the outcome of a "Test sign-in" run for the status card.
+ *
+ * Only recorded against the configuration that was tested: `testedUpdatedAt`
+ * is the configuration's updatedAt when the sign-in finished. If it was saved
+ * again meanwhile, the result vouches for nothing stored and is dropped,
+ * because a pass is what allows the password form to be turned off.
+ */
+export async function recordSsoTest(
+  record: SsoTestRecord,
+  testedUpdatedAt: string
+): Promise<boolean> {
+  return withLock(async () => {
     const existing = readSsoConfig();
-    if (!existing) return;
+    if (!existing || existing.updatedAt !== testedUpdatedAt) return false;
     await writeStoreAtomic({ ...existing, lastTest: record });
+    return true;
   });
 }
 

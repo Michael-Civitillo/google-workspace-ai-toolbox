@@ -371,3 +371,47 @@ export function boundedParams(body: unknown): Record<string, unknown> {
   }
   return out;
 }
+
+/**
+ * audit(), at most `limit` times per `windowMs` for one key (a client), for
+ * entries a caller can trigger without signing in, such as a failed single
+ * sign-on callback. Without a cap those let anyone write to the log as fast
+ * as they could send requests, and push every earlier entry out of it. What
+ * is held back is counted and reported on the next entry written for that
+ * key. Returns whether this entry was written.
+ */
+const throttles = new Map<string, { since: number; written: number; held: number }>();
+const THROTTLE_MAX_KEYS = 1_000;
+
+export function auditThrottled(
+  key: string,
+  entry: AuditEntry,
+  limit = 20,
+  windowMs = 10 * 60_000
+): boolean {
+  const now = Date.now();
+  let t = throttles.get(key);
+  let heldBefore = 0;
+  if (!t || now - t.since >= windowMs) {
+    heldBefore = t?.held ?? 0;
+    t = { since: now, written: 0, held: 0 };
+    throttles.delete(key);
+    throttles.set(key, t);
+    while (throttles.size > THROTTLE_MAX_KEYS) {
+      const oldest = throttles.keys().next().value;
+      if (oldest === undefined) break;
+      throttles.delete(oldest);
+    }
+  }
+  if (t.written >= limit) {
+    t.held++;
+    return false;
+  }
+  t.written++;
+  audit(
+    heldBefore > 0
+      ? { ...entry, params: { ...entry.params, similarEntriesNotLogged: heldBefore } }
+      : entry
+  );
+  return true;
+}
