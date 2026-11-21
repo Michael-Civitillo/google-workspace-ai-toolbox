@@ -29,6 +29,7 @@ import {
   UserSearch,
   UserPlus,
   Ticket,
+  Signature,
 } from "lucide-react";
 
 interface GwsStatus {
@@ -82,6 +83,12 @@ const taskGroups: TaskGroup[] = [
         description: "Browse groups, manage members, and see every group a user belongs to.",
         href: "/groups",
         icon: Users,
+      },
+      {
+        title: "Email Signatures",
+        description: "One signature template for everyone, filled in from each person's directory profile.",
+        href: "/signatures",
+        icon: Signature,
       },
     ],
   },

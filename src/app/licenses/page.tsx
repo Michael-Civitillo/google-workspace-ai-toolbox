@@ -213,7 +213,7 @@ export default function Licenses() {
         setProgress(`Reading accounts... ${accounts.length.toLocaleString()} so far`);
         const query: string = pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : "";
         const res = await tfetch(
-          `/api/admin/licenses/accounts${query}`,
+          `/api/admin/accounts${query}`,
           { signal: ac.signal },
           pinnedTenantId
         );

@@ -25,6 +25,13 @@ import {
   type LicenseAssignment,
 } from "./licenses";
 import {
+  renderSignature,
+  SIGNATURE_HTML_MAX,
+  templateProblem,
+  type RenderedSignature,
+  type SignatureProfile,
+} from "./signatures";
+import {
   DELEGATION_WINDOW_DAYS,
   forwardingFindings,
   inactiveFinding,
@@ -830,6 +837,174 @@ const SECURITY_CHECK_ERROR_CHARS = 200;
 function errorText(e: unknown): string {
   const message = e instanceof Error ? e.message : String(e);
   return message.slice(0, SECURITY_CHECK_ERROR_CHARS);
+}
+
+// -------------------------------------------------------------- Signatures
+
+/** Reading and setting a signature needs only the basic Gmail settings scope. */
+const GMAIL_SIGNATURE_SCOPES = ["https://www.googleapis.com/auth/gmail.settings.basic"];
+
+/** The person's primary organisation entry, or the first when none is marked. */
+function primaryOf<T extends { primary?: boolean | null }>(list: unknown): T | undefined {
+  if (!Array.isArray(list)) return undefined;
+  return (list as T[]).find((x) => x?.primary) ?? (list as T[])[0];
+}
+
+/**
+ * What the directory says about one person, for filling a signature
+ * template: their name, job title, department and work phone.
+ */
+export async function getSignatureProfile(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<{ profile: SignatureProfile; suspended: boolean; mailboxSetup: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new ValidationError("user must be a valid email address");
+  }
+  const { client } = getAdminClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.users.get(
+        {
+          userKey: userEmail,
+          projection: "basic",
+          fields: "primaryEmail,name,organizations,phones,suspended,isMailboxSetup",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  const u = res.data;
+  const org = primaryOf<{ primary?: boolean; title?: string; department?: string }>(u.organizations);
+  const phones = Array.isArray(u.phones)
+    ? (u.phones as Array<{ type?: string; primary?: boolean; value?: string }>)
+    : [];
+  const phone =
+    phones.find((p) => p?.type === "work" && p.value) ??
+    phones.find((p) => p?.primary && p.value) ??
+    phones.find((p) => p?.value);
+  return {
+    profile: {
+      name: u.name?.fullName || "",
+      firstName: u.name?.givenName || "",
+      lastName: u.name?.familyName || "",
+      email: (u.primaryEmail || userEmail).toLowerCase(),
+      title: org?.title || "",
+      department: org?.department || "",
+      phone: phone?.value || "",
+    },
+    suspended: u.suspended || false,
+    mailboxSetup: u.isMailboxSetup !== false,
+  };
+}
+
+/** The address a mailbox sends as by default, and the signature on it. */
+async function primarySendAs(
+  gmail: gmail_v1.Gmail,
+  userEmail: string
+): Promise<{ sendAsEmail: string; signature: string }> {
+  const res = await withGoogleRetry(
+    () => gmail.users.settings.sendAs.list({ userId: "me" }, { timeout: ADMIN_API_TIMEOUT_MS }),
+    { retryServerErrors: true }
+  );
+  const all = res.data.sendAs || [];
+  const primary =
+    all.find((s) => s.isPrimary) ??
+    all.find((s) => (s.sendAsEmail || "").toLowerCase() === userEmail.toLowerCase());
+  if (!primary?.sendAsEmail) {
+    throw new Error(`Gmail did not list a primary sending address for ${userEmail}`);
+  }
+  return { sendAsEmail: primary.sendAsEmail, signature: primary.signature || "" };
+}
+
+export interface SignaturePreview {
+  profile: SignatureProfile;
+  rendered: RenderedSignature;
+  /** The signature the mailbox has now, as HTML. */
+  current: string;
+}
+
+function assertCanHaveSignature(
+  user: string,
+  account: { suspended: boolean; mailboxSetup: boolean }
+) {
+  if (account.suspended) {
+    throw new ValidationError(
+      `${user} is suspended, and Google won't open a suspended account's mail settings.`
+    );
+  }
+  if (!account.mailboxSetup) {
+    throw new ValidationError(`${user} has no Gmail mailbox, so there is no signature to set.`);
+  }
+}
+
+function renderFor(template: string, profile: SignatureProfile): RenderedSignature {
+  const problem = templateProblem(template);
+  if (problem) throw new ValidationError(problem);
+  const rendered = renderSignature(template, profile);
+  if (rendered.html.length > SIGNATURE_HTML_MAX) {
+    throw new ValidationError(
+      `The signature for ${profile.email} comes to ${rendered.html.length} characters; Gmail's limit is ${SIGNATURE_HTML_MAX}.`
+    );
+  }
+  return rendered;
+}
+
+/** What a template would give one person, next to what they have now. Read-only. */
+export async function previewSignature(
+  tenant: Tenant | null,
+  userEmail: string,
+  template: string
+): Promise<SignaturePreview> {
+  const problem = templateProblem(template);
+  if (problem) throw new ValidationError(problem);
+  const account = await getSignatureProfile(tenant, userEmail);
+  assertCanHaveSignature(account.profile.email, account);
+  const rendered = renderFor(template, account.profile);
+  const gmail = buildGmailClient(tenant, account.profile.email, GMAIL_SIGNATURE_SCOPES);
+  const { signature } = await primarySendAs(gmail, account.profile.email);
+  return { profile: account.profile, rendered, current: signature };
+}
+
+/**
+ * Set one person's signature from a template.
+ *
+ * Returns what was there before, so a run can be exported and undone by hand.
+ * A mailbox that already has exactly this signature is left untouched. A
+ * template that leaves this person with nothing at all (every line dropped
+ * out) is refused: that would silently delete the signature they have.
+ */
+export async function applySignature(
+  tenant: Tenant | null,
+  userEmail: string,
+  template: string
+): Promise<{ user: string; changed: boolean; previous: string; html: string }> {
+  const problem = templateProblem(template);
+  if (problem) throw new ValidationError(problem);
+  const account = await getSignatureProfile(tenant, userEmail);
+  const user = account.profile.email;
+  assertCanHaveSignature(user, account);
+  const rendered = renderFor(template, account.profile);
+  if (!rendered.html) {
+    throw new ValidationError(
+      `Nothing in the template applies to ${user} (their directory profile has none of its fields), so their signature was left as it is.`
+    );
+  }
+  const gmail = buildGmailClient(tenant, user, GMAIL_SIGNATURE_SCOPES);
+  const { sendAsEmail, signature: previous } = await primarySendAs(gmail, user);
+  if (previous === rendered.html) {
+    return { user, changed: false, previous, html: rendered.html };
+  }
+  // Setting the same signature twice changes nothing, so a server error can retry.
+  await withGoogleRetry(
+    () =>
+      gmail.users.settings.sendAs.patch(
+        { userId: "me", sendAsEmail, requestBody: { signature: rendered.html } },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { user, changed: true, previous, html: rendered.html };
 }
 
 // ---------------------------------------------------------------- Licences

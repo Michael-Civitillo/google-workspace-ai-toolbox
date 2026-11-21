@@ -29,6 +29,7 @@ import {
   UserSearch,
   UserPlus,
   Ticket,
+  Signature,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -64,6 +65,7 @@ const navigation: NavGroup[] = [
         icon: CalendarDays,
       },
       { name: "Groups", href: "/groups", icon: Users },
+      { name: "Email Signatures", href: "/signatures", icon: Signature },
     ],
   },
   {

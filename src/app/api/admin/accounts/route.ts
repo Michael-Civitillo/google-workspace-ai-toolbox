@@ -5,12 +5,13 @@ import { ValidationError } from "@/lib/validate";
 import { errorResponse } from "@/lib/api-errors";
 
 /**
- * One page of the directory, for the Licences page to set next to the licence
- * list: who is suspended, and who hasn't signed in for a long time.
+ * One page of the directory, with each account's state: suspended, archived,
+ * whether it has a mailbox, and when it was last signed in to.
  *
- * GET /api/admin/licenses/accounts?pageToken=<token>
+ * GET /api/admin/accounts?pageToken=<token>
  *
- * Read-only.
+ * Read-only. The Licences page sets it next to the licence list; Signatures
+ * uses it to fill in "everyone with a mailbox".
  */
 export async function GET(request: NextRequest) {
   try {
