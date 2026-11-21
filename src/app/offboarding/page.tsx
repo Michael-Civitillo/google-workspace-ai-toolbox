@@ -200,6 +200,18 @@ export default function Offboarding() {
     };
   }, []);
 
+  // Security Check links here with the account already chosen
+  // (/offboarding?user=...). Only the field is filled in: nothing is looked up
+  // or run until the operator presses the buttons themselves. Read from the
+  // location in an effect rather than through useSearchParams, which would
+  // force the whole page behind a Suspense boundary for one optional value.
+  useEffect(() => {
+    const user = new URLSearchParams(window.location.search).get("user")?.trim();
+    if (user && user.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user)) {
+      setEmail(user);
+    }
+  }, []);
+
   // Effect-run marker for the lookup staleness guard below.
   const lookupSeq = useRef(0);
 

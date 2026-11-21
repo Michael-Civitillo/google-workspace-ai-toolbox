@@ -17,9 +17,13 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import {
+  deleteForwardingFilter,
+  disableAutoForwarding,
   isAbortError,
   listDelegationChanges,
+  revokeAppForUser,
   scanSecurityPage,
+  SecurityFixStaleError,
   serviceAccountClientId,
 } from "./admin-sdk";
 import type { Tenant } from "./tenant-types";
@@ -35,6 +39,8 @@ const DOMAINS = new Set(["example.com"]);
 interface Call {
   method: string;
   url: URL;
+  /** The parsed JSON body of a write, when there is one. */
+  body: unknown;
   /** Who the access token on this request was minted for. */
   subject: string | null;
   /** The scopes that token was minted with. */
@@ -87,9 +93,18 @@ class FakeGoogle {
 
     const bearer = new Headers(init.headers).get("authorization")?.replace(/^Bearer /i, "");
     const grant = bearer ? this.tokens.get(bearer) : undefined;
+    let parsedBody: unknown = null;
+    if (init.body !== undefined && init.body !== null) {
+      try {
+        parsedBody = JSON.parse(String(init.body));
+      } catch {
+        parsedBody = String(init.body);
+      }
+    }
     const call: Call = {
       method,
       url,
+      body: parsedBody,
       subject: grant?.subject ?? null,
       scopes: grant?.scopes ?? [],
     };
@@ -314,6 +329,7 @@ describe("scanSecurityPage", () => {
         target: "alice@gmail.com",
         detail: "Forwards all mail; deletes the original",
         hidesOriginal: true,
+        filterId: null,
       },
       {
         user: "bob@example.com",
@@ -322,6 +338,7 @@ describe("scanSecurityPage", () => {
         target: "drop@evil.net",
         detail: "Filter on from:bank@example.net",
         hidesOriginal: false,
+        filterId: "f1",
       },
     ]);
 
@@ -774,5 +791,149 @@ describe("serviceAccountClientId", () => {
       serviceAccountClientId({ ...tenant, credentialsFile: "/nonexistent/key.json" }),
       null
     );
+  });
+});
+
+const SHARING_SETTINGS = "https://www.googleapis.com/auth/gmail.settings.sharing";
+const FORWARDING_PATH = "/gmail/v1/users/me/settings/autoForwarding";
+const writes = () => google.calls.filter((c) => c.method !== "GET");
+
+describe("disableAutoForwarding", () => {
+  beforeEach(() => google.reset(() => undefined));
+
+  it("turns forwarding off when it still points where the operator saw it", async () => {
+    let body: unknown = null;
+    google.reset((call) => {
+      if (call.url.pathname !== FORWARDING_PATH) return undefined;
+      if (call.method === "GET") {
+        return json({ enabled: true, emailAddress: "Out@Evil.net", disposition: "trash" });
+      }
+      body = call.body;
+      return json({ enabled: false });
+    });
+    const result = await disableAutoForwarding(tenant, "alice@example.com", "out@evil.net");
+    assert.deepEqual(result, { changed: true, previousTarget: "out@evil.net" });
+    assert.equal(writes().length, 1);
+    assert.equal(writes()[0].method, "PUT");
+    assert.deepEqual(body, { enabled: false });
+    for (const call of google.calls) {
+      assert.equal(call.subject, "alice@example.com", "acts as the mailbox owner");
+      assert.deepEqual(call.scopes, [SHARING_SETTINGS]);
+    }
+  });
+
+  it("writes nothing when forwarding is already off", async () => {
+    google.reset(() => json({ enabled: false, emailAddress: "out@evil.net" }));
+    assert.deepEqual(await disableAutoForwarding(tenant, "alice@example.com", "out@evil.net"), {
+      changed: false,
+      previousTarget: null,
+    });
+    assert.equal(writes().length, 0);
+  });
+
+  it("refuses, and writes nothing, when the mailbox now forwards somewhere else", async () => {
+    google.reset(() => json({ enabled: true, emailAddress: "someone-else@example.org" }));
+    await assert.rejects(
+      disableAutoForwarding(tenant, "alice@example.com", "out@evil.net"),
+      (e) => e instanceof SecurityFixStaleError && /someone-else@example\.org/.test(e.message)
+    );
+    assert.equal(writes().length, 0);
+  });
+
+  it("rejects something that isn't an address before calling Google", async () => {
+    await assert.rejects(disableAutoForwarding(tenant, "not-an-address", "out@evil.net"));
+    assert.equal(google.calls.length, 0);
+  });
+});
+
+describe("deleteForwardingFilter", () => {
+  beforeEach(() => google.reset(() => undefined));
+  const FILTER_PATH = "/gmail/v1/users/me/settings/filters/abc123";
+
+  it("deletes the filter when it still forwards where the operator saw it", async () => {
+    google.reset((call) => {
+      if (call.url.pathname !== FILTER_PATH) return undefined;
+      return call.method === "GET"
+        ? json({ id: "abc123", criteria: {}, action: { forward: "drop@evil.net" } })
+        : new Response(null, { status: 204 });
+    });
+    assert.deepEqual(
+      await deleteForwardingFilter(tenant, "bob@example.com", "abc123", "Drop@Evil.net"),
+      { changed: true }
+    );
+    assert.deepEqual(
+      google.calls.map((c) => [c.method, c.url.pathname, c.subject]),
+      [
+        ["GET", FILTER_PATH, "bob@example.com"],
+        ["DELETE", FILTER_PATH, "bob@example.com"],
+      ]
+    );
+    assert.deepEqual(google.calls[1].scopes, [BASIC_SETTINGS]);
+  });
+
+  it("refuses to delete a filter that doesn't forward there", async () => {
+    google.reset(() => json({ id: "abc123", action: { addLabelIds: ["Label_1"] } }));
+    await assert.rejects(
+      deleteForwardingFilter(tenant, "bob@example.com", "abc123", "drop@evil.net"),
+      (e) => e instanceof SecurityFixStaleError
+    );
+    assert.equal(writes().length, 0, "a filter that only labels mail must survive");
+  });
+
+  it("treats a filter that is already gone as done", async () => {
+    google.reset(() => googleError(404, "Filter not found", "notFound"));
+    assert.deepEqual(
+      await deleteForwardingFilter(tenant, "bob@example.com", "abc123", "drop@evil.net"),
+      { changed: false }
+    );
+    assert.equal(writes().length, 0);
+  });
+
+  it("rejects a malformed filter id before calling Google", async () => {
+    for (const id of ["", "../etc", "a b", "x".repeat(201)]) {
+      await assert.rejects(
+        deleteForwardingFilter(tenant, "bob@example.com", id, "drop@evil.net"),
+        /malformed/
+      );
+    }
+    assert.equal(google.calls.length, 0);
+  });
+});
+
+describe("revokeAppForUser", () => {
+  beforeEach(() => google.reset(() => undefined));
+  const CLIENT = "1002-merge.apps.googleusercontent.com";
+  const TOKEN_PATH = `/admin/directory/v1/users/bob%40example.com/tokens/${CLIENT}`;
+
+  it("deletes that app's token for that account, as the admin", async () => {
+    google.reset((call) =>
+      call.method === "DELETE" ? new Response(null, { status: 204 }) : undefined
+    );
+    assert.deepEqual(await revokeAppForUser(tenant, "bob@example.com", CLIENT), {
+      changed: true,
+    });
+    assert.equal(google.calls.length, 1);
+    assert.equal(google.calls[0].method, "DELETE");
+    assert.equal(decodeURIComponent(google.calls[0].url.pathname), decodeURIComponent(TOKEN_PATH));
+    assert.equal(google.calls[0].subject, ADMIN);
+  });
+
+  it("treats an app that is no longer connected as done", async () => {
+    google.reset(() => googleError(404, "Token not found", "notFound"));
+    assert.deepEqual(await revokeAppForUser(tenant, "bob@example.com", CLIENT), {
+      changed: false,
+    });
+  });
+
+  it("surfaces a refusal instead of calling it done", async () => {
+    google.reset(() => googleError(403, "Not Authorized to access this resource/api", "forbidden"));
+    await assert.rejects(revokeAppForUser(tenant, "bob@example.com", CLIENT), /Not Authorized/);
+  });
+
+  it("rejects a client id that could change the request path", async () => {
+    for (const id of ["", "a/b", "a b", "x?y", "x#y", "x".repeat(301)]) {
+      await assert.rejects(revokeAppForUser(tenant, "bob@example.com", id), /malformed/);
+    }
+    assert.equal(google.calls.length, 0);
   });
 });

@@ -1009,6 +1009,161 @@ export async function scanSecurityPage(
 }
 
 /**
+ * Turn off a mailbox's auto-forwarding.
+ *
+ * Reads the setting first and does nothing if forwarding is already off, or if
+ * it now points somewhere other than `expectedTarget`: the operator confirmed
+ * a specific forward they saw in a scan, and a mailbox that has changed since
+ * deserves a fresh look rather than a blind write.
+ *
+ * Writing the forwarding setting needs the sharing scope; the basic scope the
+ * scan reads with can't.
+ */
+export async function disableAutoForwarding(
+  tenant: Tenant | null,
+  userEmail: string,
+  expectedTarget: string
+): Promise<{ changed: boolean; previousTarget: string | null }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  const gmail = buildGmailClient(tenant, userEmail, [
+    "https://www.googleapis.com/auth/gmail.settings.sharing",
+  ]);
+  const current = await withGoogleRetry(
+    () =>
+      gmail.users.settings.getAutoForwarding(
+        { userId: "me" },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  const target = (current.data.emailAddress || "").trim().toLowerCase();
+  if (!current.data.enabled) return { changed: false, previousTarget: null };
+  if (target !== expectedTarget.trim().toLowerCase()) {
+    throw new SecurityFixStaleError(
+      `This mailbox now forwards to ${target || "a different address"}, not ` +
+        `${expectedTarget}. Run the check again before changing it.`
+    );
+  }
+  // Setting the forwarding state is idempotent, so a 5xx blip can retry.
+  await withGoogleRetry(
+    () =>
+      gmail.users.settings.updateAutoForwarding(
+        { userId: "me", requestBody: { enabled: false } },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { changed: true, previousTarget: target };
+}
+
+/**
+ * Delete one Gmail filter that forwards mail to `expectedTarget`.
+ *
+ * The filter is fetched first and deleted only if it still forwards there. A
+ * filter id names exactly one filter (editing one replaces it under a new id),
+ * so this is a guard against acting on a stale or mistaken id, never a way to
+ * delete some other filter. One that is already gone counts as done.
+ */
+export async function deleteForwardingFilter(
+  tenant: Tenant | null,
+  userEmail: string,
+  filterId: string,
+  expectedTarget: string
+): Promise<{ changed: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(filterId)) {
+    throw new Error("filterId is malformed");
+  }
+  const gmail = buildGmailClient(tenant, userEmail, [
+    ...GMAIL_SETTINGS_READ_SCOPES,
+  ]);
+  let forward: string;
+  try {
+    const found = await withGoogleRetry(
+      () =>
+        gmail.users.settings.filters.get(
+          { userId: "me", id: filterId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    forward = (found.data.action?.forward || "").trim().toLowerCase();
+  } catch (e) {
+    if (isNotFoundError(e)) return { changed: false };
+    throw e;
+  }
+  if (forward !== expectedTarget.trim().toLowerCase()) {
+    throw new SecurityFixStaleError(
+      "That filter no longer forwards to " +
+        `${expectedTarget}. Run the check again before changing it.`
+    );
+  }
+  try {
+    await withGoogleRetry(
+      () =>
+        gmail.users.settings.filters.delete(
+          { userId: "me", id: filterId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+  } catch (e) {
+    if (isNotFoundError(e)) return { changed: false };
+    throw e;
+  }
+  return { changed: true };
+}
+
+/**
+ * Revoke one app's access for one account. An app the account no longer has
+ * connected counts as done. The person can connect the app again unless it is
+ * blocked in the Admin console; this removes the access it holds today.
+ */
+export async function revokeAppForUser(
+  tenant: Tenant | null,
+  userEmail: string,
+  clientId: string
+): Promise<{ changed: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!clientId || clientId.length > 300 || /[\s/?#]/.test(clientId)) {
+    throw new Error("clientId is malformed");
+  }
+  const { client } = getAdminClient(tenant);
+  try {
+    await withGoogleRetry(
+      () =>
+        client.tokens.delete(
+          { userKey: userEmail, clientId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+  } catch (e) {
+    if (isNotFoundError(e)) return { changed: false };
+    throw e;
+  }
+  return { changed: true };
+}
+
+/**
+ * A Security Check fix was refused because what it was about to change is no
+ * longer what the operator confirmed. Not a Google failure and not a bad
+ * request: the answer is to scan again.
+ */
+export class SecurityFixStaleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecurityFixStaleError";
+  }
+}
+
+/**
  * The admin log's names for a domain-wide delegation grant and its removal
  * (Admin console: Security, API controls, Manage Domain Wide Delegation).
  */

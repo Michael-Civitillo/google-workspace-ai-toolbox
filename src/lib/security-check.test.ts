@@ -248,6 +248,7 @@ describe("forwardingFindings", () => {
         target: "sam.personal@gmail.com",
         detail: "Forwards all mail; keeps the original in the inbox",
         hidesOriginal: false,
+        filterId: null,
       },
     ]);
   });
@@ -297,10 +298,10 @@ describe("forwardingFindings", () => {
     );
     assert.equal(internal, 1);
     assert.deepEqual(
-      external.map((f) => [f.kind, f.target, f.detail]),
+      external.map((f) => [f.kind, f.target, f.detail, f.filterId]),
       [
-        ["filter", "x@evil.net", "Filter on from:bank@example.net"],
-        ["filter", "all@evil.net", "Filter on all incoming mail"],
+        ["filter", "x@evil.net", "Filter on from:bank@example.net", "1"],
+        ["filter", "all@evil.net", "Filter on all incoming mail", "4"],
       ]
     );
   });

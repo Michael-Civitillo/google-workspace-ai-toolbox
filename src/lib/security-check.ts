@@ -126,6 +126,12 @@ export function inactiveFinding(
   };
 }
 
+/**
+ * The most accounts one request may revoke an app for. The page sends larger
+ * sets in batches, so a long list shows progress and can't time out.
+ */
+export const REVOKE_APP_BATCH = 25;
+
 /** Does a reported account count as inactive at the chosen threshold? */
 export function isInactiveAt(finding: InactiveFinding, thresholdDays: number): boolean {
   return finding.idleDays === null || finding.idleDays >= thresholdDays;
@@ -172,6 +178,8 @@ export interface ForwardingFinding {
    * takes when someone wants a copy of the mail without the owner noticing.
    */
   hidesOriginal: boolean;
+  /** Gmail's id for the filter, when this finding is a filter. */
+  filterId: string | null;
 }
 
 /**
@@ -234,6 +242,7 @@ export function forwardingFindings(
         target: target.toLowerCase(),
         detail: `Forwards all mail; ${disposition?.detail ?? "keeps the original"}`,
         hidesOriginal: disposition?.hides ?? false,
+        filterId: null,
       });
     } else {
       internal++;
@@ -251,6 +260,7 @@ export function forwardingFindings(
         target: forward.toLowerCase(),
         detail: `Filter on ${describeFilterCriteria(filter.criteria)}`,
         hidesOriginal: false,
+        filterId: filter.id ?? null,
       });
     } else {
       internal++;

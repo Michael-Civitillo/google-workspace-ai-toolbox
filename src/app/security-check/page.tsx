@@ -9,10 +9,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert, type Feedback } from "@/components/feedback-alert";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -39,6 +40,7 @@ import {
   INACTIVE_THRESHOLDS,
   isInactiveAt,
   mergeAppGrants,
+  REVOKE_APP_BATCH,
   summariseAccess,
   type AccessLevel,
   type AppGrant,
@@ -86,6 +88,15 @@ const NO_TOTALS: Totals = {
   mailboxErrors: 0,
   appErrors: 0,
 };
+
+/** A finding the operator has chosen to fix, awaiting their confirmation. */
+type Fix =
+  | { type: "forwarding"; finding: ForwardingFinding }
+  | { type: "app-user"; app: AppGrant; user: string }
+  | { type: "app-all"; app: AppGrant };
+
+/** People listed individually (each with its own Revoke) under an app. */
+const APP_USERS_SHOWN = 50;
 
 /** Rows shown per list until the operator asks for the rest. */
 const ROW_LIMIT = 100;
@@ -295,7 +306,7 @@ function Person({ name, user }: { name: string; user: string }) {
 }
 
 export default function SecurityCheck() {
-  const { id: tenantId } = useCurrentTenant();
+  const { tenant, id: tenantId } = useCurrentTenant();
 
   const [scanning, setScanning] = useState(false);
   const [done, setDone] = useState(false);
@@ -321,6 +332,9 @@ export default function SecurityCheck() {
   const [openApp, setOpenApp] = useState<string | null>(null);
   const [openClient, setOpenClient] = useState<string | null>(null);
   const [showUnread, setShowUnread] = useState(false);
+  const [fix, setFix] = useState<Fix | null>(null);
+  const [fixBusy, setFixBusy] = useState(false);
+  const [fixError, setFixError] = useState<string | null>(null);
 
   const cancelRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -344,6 +358,9 @@ export default function SecurityCheck() {
     setOpenApp(null);
     setOpenClient(null);
     setShowUnread(false);
+    setFix(null);
+    setFixBusy(false);
+    setFixError(null);
   };
 
   // Findings from tenant A must never be read as tenant B's: stop any scan in
@@ -512,6 +529,138 @@ export default function SecurityCheck() {
   const cancelCheck = () => {
     cancelRef.current = true;
     abortRef.current?.abort();
+  };
+
+  const postJson = (url: string, body: unknown) =>
+    tfetch(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      tenantId
+    );
+
+  const openFix = (next: Fix) => {
+    setMessage(null);
+    setFixError(null);
+    setFix(next);
+  };
+
+  const fixForwarding = async (f: ForwardingFinding) => {
+    setFixBusy(true);
+    setFixError(null);
+    try {
+      const res = await postJson("/api/admin/security-check/forwarding", {
+        user: f.user,
+        kind: f.kind,
+        filterId: f.filterId ?? undefined,
+        target: f.target,
+        // The dialog only enables Confirm once this exact address was typed.
+        confirm: f.user,
+      });
+      const result = await res.json();
+      if (!result.success) {
+        // Stay in the dialog: that is where the operator is looking.
+        setFixError(result.error || "The change could not be made");
+        return;
+      }
+      setForwarding((prev) => prev.filter((x) => x !== f));
+      setFix(null);
+      setMessage({
+        type: "success",
+        text: !result.data?.changed
+          ? `${f.user} was already no longer forwarding to ${f.target}`
+          : f.kind === "filter"
+            ? `Deleted the filter that forwarded ${f.user}'s mail to ${f.target}`
+            : `Turned off forwarding from ${f.user} to ${f.target}`,
+      });
+    } catch {
+      setFixError("Failed to connect to the API");
+    } finally {
+      setFixBusy(false);
+    }
+  };
+
+  const revokeApp = async (app: AppGrant, users: string[]) => {
+    if (users.length === 0) {
+      setFix(null);
+      return;
+    }
+    setFixBusy(true);
+    setFixError(null);
+    const single = users.length === 1;
+    const revoked: string[] = [];
+    let firstError: string | null = null;
+    let failed = 0;
+    try {
+      for (let i = 0; i < users.length; i += REVOKE_APP_BATCH) {
+        const batch = users.slice(i, i + REVOKE_APP_BATCH);
+        const res = await postJson("/api/admin/security-check/revoke-app", {
+          clientId: app.clientId,
+          users: batch,
+          batchOf: users.length,
+          confirm: single ? users[0] : "REVOKE",
+        });
+        const result = await res.json();
+        if (!result.success) {
+          failed += users.length - i;
+          firstError ??= result.error || "The request was refused";
+          break;
+        }
+        for (const r of result.data.results as Array<{ user: string; error?: string }>) {
+          if (r.error) {
+            failed++;
+            firstError ??= `${r.user}: ${r.error}`;
+          } else {
+            revoked.push(r.user);
+          }
+        }
+      }
+    } catch {
+      failed += users.length - revoked.length - failed;
+      firstError ??= "Failed to connect to the API";
+    } finally {
+      setFixBusy(false);
+    }
+
+    if (revoked.length > 0) {
+      const gone = new Set(revoked);
+      setApps((prev) =>
+        prev
+          .map((a) =>
+            a.clientId === app.clientId
+              ? { ...a, users: a.users.filter((u) => !gone.has(u)) }
+              : a
+          )
+          .filter((a) => a.users.length > 0)
+      );
+    }
+    const name = app.name || app.clientId;
+    if (failed > 0) {
+      setFixError(
+        `${revoked.length > 0 ? `Revoked for ${plural(revoked.length, "account")}. ` : ""}${plural(failed, "account")} could not be revoked. ${firstError ?? ""}`
+      );
+      return;
+    }
+    setFix(null);
+    setMessage({
+      type: "success",
+      text: single
+        ? `Revoked ${name}'s access to ${users[0]}`
+        : `Revoked ${name}'s access for ${plural(revoked.length, "account")}`,
+    });
+  };
+
+  const confirmFix = () => {
+    if (!fix) return;
+    if (fix.type === "forwarding") return fixForwarding(fix.finding);
+    if (fix.type === "app-user") return revokeApp(fix.app, [fix.user]);
+    // Whoever still has it connected now, not when the dialog opened: a retry
+    // after a partial failure must not re-send the accounts already done.
+    const current = apps.find((a) => a.clientId === fix.app.clientId);
+    return revokeApp(fix.app, current?.users ?? []);
   };
 
   const twoStepSorted = useMemo(
@@ -883,7 +1032,15 @@ export default function SecurityCheck() {
                           )}
                         </p>
                       </div>
-                      {f.admin && <Badge variant="warning">administrator</Badge>}
+                      <div className="flex shrink-0 items-center gap-2">
+                        {f.admin && <Badge variant="warning">administrator</Badge>}
+                        <Link
+                          href={`/offboarding?user=${encodeURIComponent(f.user)}`}
+                          className={buttonVariants({ variant: "outline", size: "sm" })}
+                        >
+                          Offboard…
+                        </Link>
+                      </div>
                     </div>
                   ))}
                   {more(inactiveShown.length)}
@@ -931,22 +1088,35 @@ export default function SecurityCheck() {
                   {limited(forwarding).map((f, i) => (
                     <div
                       key={`${f.user}|${f.kind}|${f.target}|${i}`}
-                      className="space-y-1 rounded-lg border bg-muted/30 p-3"
+                      className="flex items-start justify-between gap-3 rounded-lg border bg-muted/30 p-3"
                     >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Person name={f.name} user={f.user} />
-                        <Badge variant="outline">
-                          {f.kind === "auto-forward" ? "all mail" : "filter"}
-                        </Badge>
-                        {f.hidesOriginal && (
-                          <Badge variant="destructive">hides the original</Badge>
-                        )}
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Person name={f.name} user={f.user} />
+                          <Badge variant="outline">
+                            {f.kind === "auto-forward" ? "all mail" : "filter"}
+                          </Badge>
+                          {f.hidesOriginal && (
+                            <Badge variant="destructive">hides the original</Badge>
+                          )}
+                        </div>
+                        <p className="text-sm">
+                          <span className="text-muted-foreground">to </span>
+                          <span className="font-medium break-all">{f.target}</span>
+                        </p>
+                        <p className="text-xs text-muted-foreground break-words">{f.detail}</p>
                       </div>
-                      <p className="text-sm">
-                        <span className="text-muted-foreground">to </span>
-                        <span className="font-medium break-all">{f.target}</span>
-                      </p>
-                      <p className="text-xs text-muted-foreground break-words">{f.detail}</p>
+                      {(f.kind === "auto-forward" || f.filterId) && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          disabled={scanning}
+                          onClick={() => openFix({ type: "forwarding", finding: f })}
+                        >
+                          {f.kind === "auto-forward" ? "Turn off…" : "Delete filter…"}
+                        </Button>
+                      )}
                     </div>
                   ))}
                   {more(forwarding.length)}
@@ -1029,13 +1199,45 @@ export default function SecurityCheck() {
                               </p>
                             </div>
                             <div>
-                              <p className="font-medium">Granted by</p>
-                              <p className="text-muted-foreground break-words">
-                                {app.users.slice(0, 50).join(", ")}
-                                {app.users.length > 50
-                                  ? `, and ${(app.users.length - 50).toLocaleString()} more (all in the CSV export)`
-                                  : ""}
-                              </p>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="font-medium">Granted by</p>
+                                <Button
+                                  variant="outline"
+                                  size="xs"
+                                  disabled={scanning}
+                                  onClick={() => openFix({ type: "app-all", app })}
+                                >
+                                  {app.users.length === 1
+                                    ? "Revoke access…"
+                                    : `Revoke for all ${app.users.length.toLocaleString()}…`}
+                                </Button>
+                              </div>
+                              <ul className="mt-1 text-muted-foreground">
+                                {app.users.slice(0, APP_USERS_SHOWN).map((user) => (
+                                  <li
+                                    key={user}
+                                    className="flex items-center justify-between gap-2 py-0.5"
+                                  >
+                                    <span className="break-all">{user}</span>
+                                    {app.users.length > 1 && (
+                                      <button
+                                        type="button"
+                                        className="shrink-0 underline underline-offset-2 disabled:opacity-50"
+                                        disabled={scanning}
+                                        onClick={() => openFix({ type: "app-user", app, user })}
+                                      >
+                                        Revoke
+                                      </button>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                              {app.users.length > APP_USERS_SHOWN && (
+                                <p className="mt-1 text-muted-foreground">
+                                  and {(app.users.length - APP_USERS_SHOWN).toLocaleString()} more
+                                  (all in the CSV export)
+                                </p>
+                              )}
                             </div>
                             <div>
                               <p className="font-medium">Permissions</p>
@@ -1279,6 +1481,93 @@ export default function SecurityCheck() {
           )}
         </Card>
       )}
+
+      <ConfirmActionDialog
+        open={!!fix}
+        onOpenChange={(o) => {
+          if (fixBusy) return;
+          if (!o) {
+            setFixError(null);
+            setFix(null);
+          }
+        }}
+        tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+        severity="high"
+        busy={fixBusy}
+        error={fixError}
+        onConfirm={() => void confirmFix()}
+        {...(fix?.type === "forwarding"
+          ? {
+              title:
+                fix.finding.kind === "filter"
+                  ? "Delete forwarding filter"
+                  : "Turn off forwarding",
+              summary: `Mail arriving in ${fix.finding.user} will no longer be sent to ${fix.finding.target}.`,
+              confirmPhrase: fix.finding.user,
+              confirmLabel: fixError
+                ? "Try again"
+                : fix.finding.kind === "filter"
+                  ? "Delete filter"
+                  : "Turn off forwarding",
+              changes: [
+                { label: "Mailbox", after: fix.finding.user },
+                {
+                  label: fix.finding.kind === "filter" ? "Filter" : "Forwarding",
+                  before: `to ${fix.finding.target}`,
+                  after: fix.finding.kind === "filter" ? "deleted" : "off",
+                  emphasis: true,
+                },
+              ],
+              warnings:
+                fix.finding.kind === "filter"
+                  ? `The whole filter is deleted, including anything else it did (labels, archiving). ${fix.finding.detail}.`
+                  : "Mail that has already been forwarded is not recalled.",
+            }
+          : fix?.type === "app-user"
+            ? {
+                title: "Revoke app access",
+                summary: `${fix.app.name || "This app"} will lose its access to ${fix.user}'s account.`,
+                confirmPhrase: fix.user,
+                confirmLabel: fixError ? "Try again" : "Revoke access",
+                changes: [
+                  {
+                    label: "App",
+                    after: `${fix.app.name || "(unnamed app)"} · ${fix.app.clientId}`,
+                  },
+                  {
+                    label: "Account",
+                    before: fix.user,
+                    after: "access revoked",
+                    emphasis: true,
+                  },
+                ],
+                warnings:
+                  "They can connect the app again unless it is blocked in the Google Admin console (Security → Access and data control → API controls).",
+              }
+            : {
+                title: "Revoke app access for everyone",
+                summary: `${fix?.app.name || "This app"} will lose its access to every account that granted it.`,
+                confirmPhrase: "REVOKE",
+                confirmLabel: fixError ? "Try again" : "Revoke for everyone",
+                changes: [
+                  {
+                    label: "App",
+                    after: `${fix?.app.name || "(unnamed app)"} · ${fix?.app.clientId ?? ""}`,
+                  },
+                  {
+                    label: "Accounts",
+                    before: plural(
+                      apps.find((a) => a.clientId === fix?.app.clientId)?.users.length ?? 0,
+                      "account"
+                    ),
+                    after: "access revoked",
+                    emphasis: true,
+                  },
+                ],
+                warnings:
+                  "People can connect the app again unless it is blocked in the Google Admin console (Security → Access and data control → API controls).",
+              })}
+      />
 
       {totals && totals.withoutMailbox > 0 && !scanning && (
         <p className="mt-4 text-xs text-muted-foreground">
