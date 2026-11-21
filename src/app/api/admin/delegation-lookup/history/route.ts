@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
-import { readAuditLogPage } from "@/lib/audit-reader";
+import { readAuditLogPage, type AuditCursor } from "@/lib/audit-reader";
 import { getDelegationSightings } from "@/lib/delegation-sightings";
 import { requireEmail, ValidationError, isValidEmail } from "@/lib/validate";
 import { errorResponse } from "@/lib/api-errors";
@@ -23,9 +23,10 @@ import { errorResponse } from "@/lib/api-errors";
  */
 
 const MAX_OWNERS = 100;
-// The audit log rotates at 8 MB and the reader walks 512 KB windows, so a
-// bound of 32 windows covers the whole live file with room to spare.
-const MAX_AUDIT_WINDOWS = 32;
+// The audit log rotates at 8 MB and keeps three archives; the reader walks
+// 512 KB windows, so 64 cover all four files. The bound leaves room for
+// windows split by many matching entries.
+const MAX_AUDIT_WINDOWS = 80;
 
 interface PairHistory {
   owner: string;
@@ -65,7 +66,7 @@ export async function GET(request: NextRequest) {
     // successful add and the latest successful remove for this delegate.
     const latestAdd = new Map<string, { ts: number; iso: string; actor: string | null }>();
     const latestRemove = new Map<string, number>();
-    let cursor: number | null = null;
+    let cursor: AuditCursor | null = null;
     for (let i = 0; i < MAX_AUDIT_WINDOWS; i++) {
       const page = await readAuditLogPage({
         cursor,
