@@ -449,6 +449,160 @@ export function compareApps(a: AppGrant, b: AppGrant): number {
 }
 
 // ---------------------------------------------------------------------------
+// Domain-wide delegation
+// ---------------------------------------------------------------------------
+
+/**
+ * How far back the admin log is asked for delegation changes. Google keeps
+ * admin log events for about six months; asking for more returns the same.
+ */
+export const DELEGATION_WINDOW_DAYS = 180;
+
+/** One entry from the admin log: delegation granted to a client, or removed. */
+export interface DelegationEvent {
+  /** RFC3339 time of the change. */
+  time: string;
+  /** The administrator who made it. */
+  actor: string;
+  kind: "authorize" | "remove";
+  /** The API client the change is about: a service account or OAuth client id. */
+  clientId: string;
+  /** Scopes granted. Empty for a removal. */
+  scopes: string[];
+}
+
+/**
+ * What the admin log says about one client with domain-wide delegation.
+ *
+ * This is a reading of the log, not of Google's configuration: Google offers
+ * no way for an app to read the delegation list itself. A client granted
+ * before the log's window and untouched since does not appear at all.
+ */
+export interface DelegatedClient {
+  clientId: string;
+  /** Its most recent change in the window was a grant, or a removal. */
+  status: "authorized" | "removed";
+  /** Scopes from its most recent grant in the window. */
+  scopes: string[];
+  lastChange: string;
+  lastActor: string;
+  /** This is Open Admin's own service account. */
+  ownApp: boolean;
+  /**
+   * For Open Admin's own client only: scopes it was granted that it never
+   * asks for. Every unused scope is reach that a stolen key would have for
+   * nothing.
+   */
+  unusedScopes: string[];
+  /** Every change in the window, newest first. */
+  history: DelegationEvent[];
+}
+
+/**
+ * The scope list from an admin log parameter. Google may send it as one
+ * string or as a list, separated by commas, spaces or new lines; all of those
+ * mean the same thing.
+ */
+export function parseScopeList(
+  value: string | readonly string[] | null | undefined
+): string[] {
+  if (!value) return [];
+  const pieces = typeof value === "string" ? [value] : value;
+  const scopes = pieces
+    .flatMap((piece) => String(piece).split(/[\s,]+/))
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  return [...new Set(scopes)];
+}
+
+/** The same scope, however it was typed into the Admin console. */
+function scopeKey(scope: string): string {
+  return scope.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/**
+ * Turn the admin log's delegation changes into one entry per client.
+ *
+ * A client's most recent change decides whether it is authorised now, and its
+ * most recent grant decides its scopes: the Admin console replaces a client's
+ * scope list when it is edited, so a later grant supersedes an earlier one.
+ *
+ * Authorised clients come first, widest access first; among equals, the most
+ * recently changed. Open Admin's own client is listed like any other, marked,
+ * with the scopes it holds but never uses.
+ */
+export function summariseDelegation(
+  events: readonly DelegationEvent[],
+  opts: { ownClientId: string | null; usedScopes: readonly string[] }
+): DelegatedClient[] {
+  const byClient = new Map<string, DelegationEvent[]>();
+  for (const event of events) {
+    const clientId = event.clientId.trim();
+    if (!clientId) continue;
+    const list = byClient.get(clientId) ?? [];
+    list.push({ ...event, clientId });
+    byClient.set(clientId, list);
+  }
+
+  const used = new Set(opts.usedScopes.map(scopeKey));
+  const own = opts.ownClientId?.trim() || null;
+
+  const clients: DelegatedClient[] = [];
+  for (const [clientId, list] of byClient) {
+    const history = [...list].sort((a, b) => b.time.localeCompare(a.time));
+    const latest = history[0];
+    const lastGrant = history.find((e) => e.kind === "authorize");
+    const status = latest.kind === "authorize" ? "authorized" : "removed";
+    const scopes = [...(lastGrant?.scopes ?? [])].sort();
+    const ownApp = own !== null && clientId === own;
+    clients.push({
+      clientId,
+      status,
+      scopes,
+      lastChange: latest.time,
+      lastActor: latest.actor,
+      ownApp,
+      unusedScopes:
+        ownApp && status === "authorized"
+          ? scopes.filter((scope) => !used.has(scopeKey(scope)))
+          : [],
+      history,
+    });
+  }
+
+  return clients.sort(
+    (a, b) =>
+      Number(b.status === "authorized") - Number(a.status === "authorized") ||
+      LEVEL_RANK[summariseAccess(b.scopes).level] -
+        LEVEL_RANK[summariseAccess(a.scopes).level] ||
+      b.lastChange.localeCompare(a.lastChange) ||
+      a.clientId.localeCompare(b.clientId)
+  );
+}
+
+/**
+ * Does this client deserve a second look?
+ *
+ * Any other app that currently holds delegation does: it can act as every
+ * user, and the question "do we still need this?" is the whole point of the
+ * check. Open Admin's own client is expected, and is a finding only when it
+ * was granted more than it uses.
+ */
+export function delegationNeedsReview(client: DelegatedClient): boolean {
+  if (client.status !== "authorized") return false;
+  return client.ownApp ? client.unusedScopes.length > 0 : true;
+}
+
+/** What the delegation check returns. */
+export interface DelegationReport {
+  /** How many days of the admin log were read. */
+  windowDays: number;
+  clients: DelegatedClient[];
+  /** True when the log held more changes than were read. */
+  truncated: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // One page of a scan
 // ---------------------------------------------------------------------------
 

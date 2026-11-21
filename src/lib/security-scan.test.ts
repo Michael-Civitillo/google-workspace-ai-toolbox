@@ -16,7 +16,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { isAbortError, scanSecurityPage } from "./admin-sdk";
+import {
+  isAbortError,
+  listDelegationChanges,
+  scanSecurityPage,
+  serviceAccountClientId,
+} from "./admin-sdk";
 import type { Tenant } from "./tenant-types";
 
 const ADMIN = "admin@example.com";
@@ -115,6 +120,7 @@ before(() => {
     JSON.stringify({
       type: "service_account",
       client_email: "scanner@test-project.iam.gserviceaccount.com",
+      client_id: "100200300400500600700",
       private_key: privateKey.export({ type: "pkcs8", format: "pem" }),
     })
   );
@@ -578,5 +584,195 @@ describe("scanSecurityPage", () => {
       "https://www.googleapis.com/auth/drive",
       "openid",
     ]);
+  });
+});
+
+const REPORTS = "https://www.googleapis.com/auth/admin.reports.audit.readonly";
+const ACTIVITY_PATH = "/admin/reports/v1/activity/users/all/applications/admin";
+
+/** An admin log item as the Reports API returns it. */
+function logItem(
+  time: string,
+  actor: string,
+  name: string,
+  parameters: Array<Record<string, unknown>>
+) {
+  return {
+    id: { time, applicationName: "admin" },
+    actor: { email: actor },
+    events: [{ type: "DOMAIN_SETTINGS", name, parameters }],
+  };
+}
+
+describe("listDelegationChanges", () => {
+  beforeEach(() => google.reset(() => undefined));
+
+  it("reads grants and removals from the admin log", async () => {
+    google.reset((call) => {
+      if (call.url.pathname !== ACTIVITY_PATH) return undefined;
+      const event = call.url.searchParams.get("eventName");
+      if (event === "AUTHORIZE_API_CLIENT_ACCESS") {
+        return json({
+          items: [
+            logItem("2026-11-01T10:00:00.000Z", "admin@example.com", event, [
+              { name: "API_CLIENT_NAME", value: "111222333" },
+              {
+                name: "API_SCOPES",
+                value: "https://mail.google.com/,https://www.googleapis.com/auth/drive",
+              },
+              { name: "DOMAIN_NAME", value: "example.com" },
+            ]),
+            logItem("2026-10-01T10:00:00.000Z", "other@example.com", event, [
+              { name: "API_CLIENT_NAME", value: "tool.apps.googleusercontent.com" },
+              { name: "API_SCOPES", multiValue: ["https://www.googleapis.com/auth/calendar"] },
+            ]),
+          ],
+        });
+      }
+      if (event === "REMOVE_API_CLIENT_ACCESS") {
+        return json({
+          items: [
+            logItem("2026-11-10T10:00:00.000Z", "admin@example.com", event, [
+              { name: "API_CLIENT_NAME", value: "tool.apps.googleusercontent.com" },
+            ]),
+          ],
+        });
+      }
+      return json({});
+    });
+
+    const { events, truncated } = await listDelegationChanges(tenant, { now: NOW });
+    assert.equal(truncated, false);
+    assert.deepEqual(events, [
+      {
+        time: "2026-11-01T10:00:00.000Z",
+        actor: "admin@example.com",
+        kind: "authorize",
+        clientId: "111222333",
+        scopes: ["https://mail.google.com/", "https://www.googleapis.com/auth/drive"],
+      },
+      {
+        time: "2026-10-01T10:00:00.000Z",
+        actor: "other@example.com",
+        kind: "authorize",
+        clientId: "tool.apps.googleusercontent.com",
+        scopes: ["https://www.googleapis.com/auth/calendar"],
+      },
+      {
+        time: "2026-11-10T10:00:00.000Z",
+        actor: "admin@example.com",
+        kind: "remove",
+        clientId: "tool.apps.googleusercontent.com",
+        scopes: [],
+      },
+    ]);
+  });
+
+  it("asks only for delegation events, six months back, as the admin with the reports scope", async () => {
+    google.reset(() => json({}));
+    await listDelegationChanges(tenant, { now: NOW });
+
+    assert.equal(google.calls.length, 2, "one request per event name when there is one page each");
+    assert.deepEqual(
+      google.calls.map((c) => c.url.searchParams.get("eventName")),
+      ["AUTHORIZE_API_CLIENT_ACCESS", "REMOVE_API_CLIENT_ACCESS"]
+    );
+    for (const call of google.calls) {
+      assert.equal(call.method, "GET");
+      assert.equal(call.url.pathname, ACTIVITY_PATH);
+      assert.equal(call.subject, ADMIN);
+      assert.deepEqual(call.scopes, [REPORTS]);
+      assert.equal(
+        call.url.searchParams.get("startTime"),
+        new Date(NOW - 180 * DAY).toISOString()
+      );
+    }
+  });
+
+  it("follows the log across pages", async () => {
+    google.reset((call) => {
+      if (call.url.searchParams.get("eventName") !== "AUTHORIZE_API_CLIENT_ACCESS") return json({});
+      const token = call.url.searchParams.get("pageToken");
+      const item = (n: number) =>
+        logItem(`2026-11-0${n}T00:00:00.000Z`, "admin@example.com", "AUTHORIZE_API_CLIENT_ACCESS", [
+          { name: "API_CLIENT_NAME", value: `client-${n}` },
+          { name: "API_SCOPES", value: "openid" },
+        ]);
+      if (!token) return json({ items: [item(1)], nextPageToken: "p2" });
+      if (token === "p2") return json({ items: [item(2)], nextPageToken: "p3" });
+      return json({ items: [item(3)] });
+    });
+    const { events, truncated } = await listDelegationChanges(tenant, { now: NOW });
+    assert.deepEqual(
+      events.map((e) => e.clientId),
+      ["client-1", "client-2", "client-3"]
+    );
+    assert.equal(truncated, false);
+  });
+
+  it("says so when the log is longer than it will read", async () => {
+    google.reset((call) =>
+      call.url.searchParams.get("eventName") === "AUTHORIZE_API_CLIENT_ACCESS"
+        ? json({ items: [], nextPageToken: "more" })
+        : json({})
+    );
+    const { truncated } = await listDelegationChanges(tenant, { now: NOW });
+    assert.equal(truncated, true);
+    assert.equal(
+      google.calls.filter(
+        (c) => c.url.searchParams.get("eventName") === "AUTHORIZE_API_CLIENT_ACCESS"
+      ).length,
+      5,
+      "stops at its page limit"
+    );
+  });
+
+  it("ignores other events and entries with no client", async () => {
+    google.reset((call) =>
+      call.url.searchParams.get("eventName") === "AUTHORIZE_API_CLIENT_ACCESS"
+        ? json({
+            items: [
+              logItem("2026-11-01T00:00:00.000Z", "admin@example.com", "CHANGE_PASSWORD", [
+                { name: "API_CLIENT_NAME", value: "not-a-delegation-event" },
+              ]),
+              logItem("2026-11-01T00:00:00.000Z", "admin@example.com", "AUTHORIZE_API_CLIENT_ACCESS", [
+                { name: "API_SCOPES", value: "openid" },
+              ]),
+            ],
+          })
+        : json({})
+    );
+    assert.deepEqual((await listDelegationChanges(tenant, { now: NOW })).events, []);
+  });
+
+  it("fails loudly when the admin log can't be read", async () => {
+    google.reset(() =>
+      googleError(403, "Not Authorized to access this resource/api", "forbidden")
+    );
+    await assert.rejects(listDelegationChanges(tenant, { now: NOW }), /Not Authorized/);
+  });
+
+  it("stops when the request is cancelled", async () => {
+    google.reset(() => json({}));
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      listDelegationChanges(tenant, { now: NOW, signal: controller.signal }),
+      (e) => isAbortError(e)
+    );
+    assert.equal(google.calls.length, 0);
+  });
+});
+
+describe("serviceAccountClientId", () => {
+  it("reads the client id from the tenant's key file", () => {
+    assert.equal(serviceAccountClientId(tenant), "100200300400500600700");
+  });
+
+  it("is null when there is no key file to read", () => {
+    assert.equal(
+      serviceAccountClientId({ ...tenant, credentialsFile: "/nonexistent/key.json" }),
+      null
+    );
   });
 });

@@ -3,16 +3,20 @@ import { describe, it } from "node:test";
 import {
   classifyScope,
   compareApps,
+  delegationNeedsReview,
   describeFilterCriteria,
   forwardingFindings,
   inactiveFinding,
   isExternalAddress,
   isInactiveAt,
   mergeAppGrants,
+  parseScopeList,
   parseSignInTime,
   summariseAccess,
+  summariseDelegation,
   twoStepFinding,
   type AppGrant,
+  type DelegationEvent,
   type DirectoryAccount,
 } from "./security-check";
 
@@ -506,5 +510,198 @@ describe("compareApps", () => {
       apps.sort(compareApps).map((a) => a.name),
       ["Alpha mail", "Beta mail", "Zeta mail", "Calendar tool", "Sign-in only"]
     );
+  });
+});
+
+const GMAIL = "https://mail.google.com/";
+const DRIVE = "https://www.googleapis.com/auth/drive";
+const CALENDAR = "https://www.googleapis.com/auth/calendar";
+
+describe("parseScopeList", () => {
+  it("reads one scope", () => {
+    assert.deepEqual(parseScopeList(GMAIL), [GMAIL]);
+  });
+
+  it("splits a single string on commas, spaces and new lines", () => {
+    assert.deepEqual(parseScopeList(`${GMAIL},${DRIVE}`), [GMAIL, DRIVE]);
+    assert.deepEqual(parseScopeList(`${GMAIL}, ${DRIVE}\n${CALENDAR}`), [GMAIL, DRIVE, CALENDAR]);
+  });
+
+  it("reads a list, including one whose items are themselves lists", () => {
+    assert.deepEqual(parseScopeList([GMAIL, DRIVE]), [GMAIL, DRIVE]);
+    assert.deepEqual(parseScopeList([`${GMAIL},${DRIVE}`, CALENDAR]), [GMAIL, DRIVE, CALENDAR]);
+  });
+
+  it("drops blanks and repeats", () => {
+    assert.deepEqual(parseScopeList(` ${GMAIL} ,, ${GMAIL} `), [GMAIL]);
+  });
+
+  it("treats nothing as no scopes", () => {
+    assert.deepEqual(parseScopeList(null), []);
+    assert.deepEqual(parseScopeList(undefined), []);
+    assert.deepEqual(parseScopeList(""), []);
+    assert.deepEqual(parseScopeList([]), []);
+  });
+});
+
+function change(overrides: Partial<DelegationEvent>): DelegationEvent {
+  return {
+    time: "2026-10-01T09:00:00.000Z",
+    actor: "admin@example.com",
+    kind: "authorize",
+    clientId: "111",
+    scopes: [CALENDAR],
+    ...overrides,
+  };
+}
+
+const NOT_OURS = { ownClientId: null, usedScopes: [] };
+
+describe("summariseDelegation", () => {
+  it("returns nothing for an empty log", () => {
+    assert.deepEqual(summariseDelegation([], NOT_OURS), []);
+  });
+
+  it("reports a granted client with who granted it and when", () => {
+    const [client] = summariseDelegation([change({ scopes: [DRIVE, GMAIL] })], NOT_OURS);
+    assert.equal(client.clientId, "111");
+    assert.equal(client.status, "authorized");
+    assert.deepEqual(client.scopes, [GMAIL, DRIVE].sort());
+    assert.equal(client.lastActor, "admin@example.com");
+    assert.equal(client.lastChange, "2026-10-01T09:00:00.000Z");
+    assert.equal(client.ownApp, false);
+  });
+
+  it("lets the most recent change decide, whatever order the log arrives in", () => {
+    const removedLast = summariseDelegation(
+      [
+        change({ kind: "remove", time: "2026-10-05T00:00:00.000Z", scopes: [] }),
+        change({ time: "2026-10-01T00:00:00.000Z" }),
+      ],
+      NOT_OURS
+    );
+    assert.equal(removedLast[0].status, "removed");
+    assert.equal(removedLast[0].lastChange, "2026-10-05T00:00:00.000Z");
+
+    const grantedAgain = summariseDelegation(
+      [
+        change({ time: "2026-10-01T00:00:00.000Z" }),
+        change({ kind: "remove", time: "2026-10-05T00:00:00.000Z", scopes: [] }),
+        change({ time: "2026-10-09T00:00:00.000Z", scopes: [GMAIL], actor: "other@example.com" }),
+      ],
+      NOT_OURS
+    );
+    assert.equal(grantedAgain[0].status, "authorized");
+    assert.deepEqual(grantedAgain[0].scopes, [GMAIL]);
+    assert.equal(grantedAgain[0].lastActor, "other@example.com");
+    assert.equal(grantedAgain[0].history.length, 3);
+    assert.deepEqual(
+      grantedAgain[0].history.map((e) => e.time),
+      ["2026-10-09T00:00:00.000Z", "2026-10-05T00:00:00.000Z", "2026-10-01T00:00:00.000Z"]
+    );
+  });
+
+  it("takes a client's scopes from its latest grant, not a union of old ones", () => {
+    // Editing an entry in the Admin console replaces its scopes.
+    const [client] = summariseDelegation(
+      [
+        change({ time: "2026-09-01T00:00:00.000Z", scopes: [GMAIL, DRIVE] }),
+        change({ time: "2026-10-01T00:00:00.000Z", scopes: [CALENDAR] }),
+      ],
+      NOT_OURS
+    );
+    assert.deepEqual(client.scopes, [CALENDAR]);
+  });
+
+  it("keeps a removed client's last scopes, so the history still reads", () => {
+    const [client] = summariseDelegation(
+      [
+        change({ time: "2026-09-01T00:00:00.000Z", scopes: [GMAIL] }),
+        change({ kind: "remove", time: "2026-10-01T00:00:00.000Z", scopes: [] }),
+      ],
+      NOT_OURS
+    );
+    assert.equal(client.status, "removed");
+    assert.deepEqual(client.scopes, [GMAIL]);
+  });
+
+  it("keeps clients apart and ignores entries with no client", () => {
+    const clients = summariseDelegation(
+      [change({ clientId: "111" }), change({ clientId: "222" }), change({ clientId: "  " })],
+      NOT_OURS
+    );
+    assert.deepEqual(clients.map((c) => c.clientId).sort(), ["111", "222"]);
+  });
+
+  it("puts authorised clients first, widest access first, then most recent", () => {
+    const clients = summariseDelegation(
+      [
+        change({ clientId: "calendar-old", time: "2026-08-01T00:00:00.000Z" }),
+        change({ clientId: "calendar-new", time: "2026-10-01T00:00:00.000Z" }),
+        change({ clientId: "mail", scopes: [GMAIL], time: "2026-07-01T00:00:00.000Z" }),
+        change({ clientId: "gone", scopes: [GMAIL], time: "2026-06-01T00:00:00.000Z" }),
+        change({ clientId: "gone", kind: "remove", scopes: [], time: "2026-11-01T00:00:00.000Z" }),
+      ],
+      NOT_OURS
+    );
+    assert.deepEqual(
+      clients.map((c) => c.clientId),
+      ["mail", "calendar-new", "calendar-old", "gone"]
+    );
+  });
+
+  it("recognises Open Admin's own client and lists what it never uses", () => {
+    const [client] = summariseDelegation(
+      [change({ clientId: "999", scopes: [CALENDAR, GMAIL, "https://www.googleapis.com/auth/Drive/"] })],
+      { ownClientId: " 999 ", usedScopes: [CALENDAR, DRIVE] }
+    );
+    assert.equal(client.ownApp, true);
+    assert.deepEqual(client.unusedScopes, [GMAIL], "case and a trailing slash don't make a scope unused");
+  });
+
+  it("does not list unused scopes for anyone else's client, or a removed one", () => {
+    const others = summariseDelegation([change({ clientId: "111", scopes: [GMAIL] })], {
+      ownClientId: "999",
+      usedScopes: [CALENDAR],
+    });
+    assert.deepEqual(others[0].unusedScopes, []);
+
+    const removed = summariseDelegation(
+      [
+        change({ clientId: "999", scopes: [GMAIL], time: "2026-09-01T00:00:00.000Z" }),
+        change({ clientId: "999", kind: "remove", scopes: [], time: "2026-10-01T00:00:00.000Z" }),
+      ],
+      { ownClientId: "999", usedScopes: [CALENDAR] }
+    );
+    assert.deepEqual(removed[0].unusedScopes, []);
+  });
+});
+
+describe("delegationNeedsReview", () => {
+  const one = (events: DelegationEvent[], ownClientId: string | null = null) =>
+    summariseDelegation(events, { ownClientId, usedScopes: [CALENDAR] })[0];
+
+  it("flags any other app that currently holds delegation", () => {
+    assert.equal(delegationNeedsReview(one([change({ scopes: [CALENDAR] })])), true);
+  });
+
+  it("does not flag a client whose delegation was removed", () => {
+    assert.equal(
+      delegationNeedsReview(
+        one([
+          change({ time: "2026-09-01T00:00:00.000Z" }),
+          change({ kind: "remove", scopes: [], time: "2026-10-01T00:00:00.000Z" }),
+        ])
+      ),
+      false
+    );
+  });
+
+  it("accepts Open Admin's own client when it holds only what it uses", () => {
+    assert.equal(delegationNeedsReview(one([change({ scopes: [CALENDAR] })], "111")), false);
+  });
+
+  it("flags Open Admin's own client when it was granted more than it uses", () => {
+    assert.equal(delegationNeedsReview(one([change({ scopes: [CALENDAR, GMAIL] })], "111")), true);
   });
 });

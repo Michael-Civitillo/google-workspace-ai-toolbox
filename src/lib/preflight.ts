@@ -66,7 +66,8 @@ const REQUIRED_SCOPES: ReadonlyArray<{
   {
     scope: "https://www.googleapis.com/auth/admin.reports.audit.readonly",
     label: "Reports (audit, read)",
-    feature: "Sign-in/admin activity reports + AI security digest",
+    feature:
+      "Sign-in/admin activity reports + AI security digest, Security Check (domain-wide delegation)",
   },
   {
     scope: "https://www.googleapis.com/auth/admin.datatransfer",
@@ -114,6 +115,11 @@ const REQUIRED_SCOPES: ReadonlyArray<{
     feature: "Calendar delegation and transfer",
   },
 ] as const;
+
+/** Every scope Open Admin asks Google for, and no others. */
+export function usedScopes(): string[] {
+  return REQUIRED_SCOPES.map((s) => s.scope);
+}
 
 interface ServiceAccountCreds {
   client_email?: string;

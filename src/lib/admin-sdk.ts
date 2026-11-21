@@ -18,12 +18,15 @@ import {
   emailDomain,
 } from "./validate";
 import {
+  DELEGATION_WINDOW_DAYS,
   forwardingFindings,
   inactiveFinding,
   isActiveAccount,
   isAdminAccount,
+  parseScopeList,
   twoStepFinding,
   type AppGrant,
+  type DelegationEvent,
   type DirectoryAccount,
   type RawAutoForwarding,
   type RawFilter,
@@ -75,6 +78,7 @@ const SCOPES = {
 interface ServiceAccountCreds {
   client_email?: string;
   private_key?: string;
+  client_id?: string;
 }
 
 /**
@@ -1002,6 +1006,119 @@ export async function scanSecurityPage(
     .sort((a, b) => a.clientId.localeCompare(b.clientId));
 
   return page;
+}
+
+/**
+ * The admin log's names for a domain-wide delegation grant and its removal
+ * (Admin console: Security, API controls, Manage Domain Wide Delegation).
+ */
+const DELEGATION_EVENTS = [
+  ["AUTHORIZE_API_CLIENT_ACCESS", "authorize"],
+  ["REMOVE_API_CLIENT_ACCESS", "remove"],
+] as const;
+
+// Far more than any tenant changes delegation in six months. Past this the
+// caller is told the list is cut short rather than waiting on an endless log.
+const DELEGATION_MAX_PAGES = 5;
+const DELEGATION_PAGE_SIZE = 1000;
+
+/**
+ * The client id of the service account this tenant runs as, or null when the
+ * key file doesn't carry one. It is the id a domain-wide delegation entry is
+ * filed under, which is how the Security Check recognises its own entry.
+ */
+export function serviceAccountClientId(tenant: Tenant | null): string | null {
+  const credFile =
+    tenant?.credentialsFile ||
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
+  if (!credFile) return null;
+  try {
+    const id = loadCredentials(credFile).client_id;
+    return typeof id === "string" && id.trim() ? id.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every change to domain-wide delegation the admin log still holds: each time
+ * a client was authorised (with which scopes, by whom) and each removal.
+ *
+ * Google gives an app no way to read the delegation list itself; that lives
+ * only in the Admin console. The log is the nearest thing, and it is a history,
+ * not a snapshot: a client authorised before the log's reach (about six
+ * months) and never touched since is simply absent. Callers must say so
+ * rather than present the result as the full list.
+ *
+ * Read-only, as the admin, with the reports scope alone.
+ */
+export async function listDelegationChanges(
+  tenant: Tenant | null,
+  opts: { now?: number; signal?: AbortSignal } = {}
+): Promise<{ events: DelegationEvent[]; truncated: boolean }> {
+  const { client } = getReportsClient(tenant);
+  const startTime = new Date(
+    (opts.now ?? Date.now()) - DELEGATION_WINDOW_DAYS * 86_400_000
+  ).toISOString();
+
+  const events: DelegationEvent[] = [];
+  let truncated = false;
+
+  for (const [eventName, kind] of DELEGATION_EVENTS) {
+    let pageToken: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page >= DELEGATION_MAX_PAGES) {
+        truncated = true;
+        break;
+      }
+      const res = await withGoogleRetry(
+        () =>
+          client.activities.list(
+            {
+              userKey: "all",
+              applicationName: "admin",
+              eventName,
+              startTime,
+              maxResults: DELEGATION_PAGE_SIZE,
+              pageToken,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+          ),
+        { retryServerErrors: true, signal: opts.signal }
+      );
+
+      for (const item of res.data.items || []) {
+        const time = item.id?.time || "";
+        const actor = item.actor?.email || item.actor?.callerType || "(unknown)";
+        for (const ev of item.events || []) {
+          // The filter is Google's; this is ours, in case an item carries
+          // other events alongside the one that matched.
+          if (ev.name !== eventName) continue;
+          let clientId = "";
+          let scopes: string[] = [];
+          for (const p of ev.parameters || []) {
+            if (p.name === "API_CLIENT_NAME") clientId = (p.value || "").trim();
+            if (p.name === "API_SCOPES") {
+              scopes = parseScopeList(p.multiValue ?? p.value);
+            }
+          }
+          if (!clientId || !time) continue;
+          events.push({
+            time,
+            actor,
+            kind,
+            clientId,
+            scopes: kind === "authorize" ? scopes : [],
+          });
+        }
+      }
+
+      pageToken = res.data.nextPageToken || undefined;
+      if (!pageToken) break;
+    }
+  }
+
+  return { events, truncated };
 }
 
 /**

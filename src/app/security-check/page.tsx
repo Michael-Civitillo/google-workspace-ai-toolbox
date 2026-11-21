@@ -27,12 +27,14 @@ import {
   Plug,
   ShieldAlert,
   ShieldCheck,
+  Waypoints,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import {
   compareApps,
+  delegationNeedsReview,
   INACTIVE_DEFAULT_DAYS,
   INACTIVE_THRESHOLDS,
   isInactiveAt,
@@ -40,6 +42,8 @@ import {
   summariseAccess,
   type AccessLevel,
   type AppGrant,
+  type DelegatedClient,
+  type DelegationReport,
   type ForwardingFinding,
   type InactiveFinding,
   type SecurityCheckPage,
@@ -47,8 +51,15 @@ import {
   type UnreadAccount,
 } from "@/lib/security-check";
 
-type CheckId = "twoStep" | "inactive" | "forwarding" | "apps";
-type Status = "idle" | "running" | "good" | "warning" | "critical" | "incomplete";
+type CheckId = "twoStep" | "inactive" | "forwarding" | "apps" | "delegation";
+type Status =
+  | "idle"
+  | "running"
+  | "good"
+  | "warning"
+  | "critical"
+  | "incomplete"
+  | "quiet";
 
 interface Totals {
   accounts: number;
@@ -91,6 +102,13 @@ const STATUS: Record<
   warning: { label: "Worth a look", icon: AlertTriangle, className: "text-warning-fg" },
   critical: { label: "Needs attention", icon: ShieldAlert, className: "text-danger-fg" },
   incomplete: { label: "Incomplete", icon: CircleDashed, className: "text-muted-foreground" },
+  // For a check that can only see recent history: nothing to act on, which is
+  // not the same as a clean bill of health.
+  quiet: {
+    label: "Nothing recent to review",
+    icon: CircleDashed,
+    className: "text-muted-foreground",
+  },
 };
 
 const ACCESS: Record<
@@ -149,7 +167,8 @@ function toCsv(
   twoStep: TwoStepFinding[],
   inactive: InactiveFinding[],
   forwarding: ForwardingFinding[],
-  apps: AppGrant[]
+  apps: AppGrant[],
+  delegated: DelegatedClient[]
 ): string {
   const rows: string[][] = [
     ["check", "account", "name", "administrator", "finding", "target", "detail"],
@@ -201,6 +220,19 @@ function toCsv(
       ]);
     }
   }
+  for (const client of delegated) {
+    rows.push([
+      "Domain-wide delegation",
+      client.lastActor,
+      "",
+      "",
+      `${client.status === "authorized" ? "Delegation granted" : "Delegation removed"}${
+        client.ownApp ? " (Open Admin's own service account)" : ""
+      } on ${client.lastChange}`,
+      client.clientId,
+      client.scopes.join(" "),
+    ]);
+  }
   return rows.map((r) => r.map((c) => `"${csvCell(c)}"`).join(",")).join("\n");
 }
 
@@ -234,13 +266,15 @@ function Tile({
         selected ? "border-primary ring-1 ring-primary" : "border-border"
       )}
     >
-      <span className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Icon className="h-4 w-4" />
+      <span className="flex min-h-10 items-start gap-2 text-sm text-muted-foreground">
+        <Icon className="mt-0.5 h-4 w-4 shrink-0" />
         {label}
       </span>
       <span className="text-3xl font-semibold tabular-nums tracking-tight">{value}</span>
       <span className="text-xs text-muted-foreground">{note}</span>
-      <span className={cn("flex items-center gap-1.5 text-xs font-medium", s.className)}>
+      <span
+        className={cn("mt-auto flex items-center gap-1.5 text-xs font-medium", s.className)}
+      >
         <StatusIcon className={cn("h-3.5 w-3.5", s.spin && "animate-spin")} />
         {s.label}
       </span>
@@ -274,12 +308,18 @@ export default function SecurityCheck() {
   const [apps, setApps] = useState<AppGrant[]>([]);
   const [mailboxErrors, setMailboxErrors] = useState<UnreadAccount[]>([]);
   const [appErrors, setAppErrors] = useState<UnreadAccount[]>([]);
+  // Domain-wide delegation is tenant-wide, so it is one request beside the
+  // account scan rather than part of each page of it.
+  const [delegation, setDelegation] = useState<DelegationReport | null>(null);
+  const [delegationError, setDelegationError] = useState<string | null>(null);
+  const [delegationLoading, setDelegationLoading] = useState(false);
   const [message, setMessage] = useState<Feedback | null>(null);
 
   const [selected, setSelected] = useState<CheckId>("twoStep");
   const [threshold, setThreshold] = useState<number>(INACTIVE_DEFAULT_DAYS);
   const [showAll, setShowAll] = useState(false);
   const [openApp, setOpenApp] = useState<string | null>(null);
+  const [openClient, setOpenClient] = useState<string | null>(null);
   const [showUnread, setShowUnread] = useState(false);
 
   const cancelRef = useRef(false);
@@ -297,8 +337,12 @@ export default function SecurityCheck() {
     setApps([]);
     setMailboxErrors([]);
     setAppErrors([]);
+    setDelegation(null);
+    setDelegationError(null);
+    setDelegationLoading(false);
     setShowAll(false);
     setOpenApp(null);
+    setOpenClient(null);
     setShowUnread(false);
   };
 
@@ -330,6 +374,35 @@ export default function SecurityCheck() {
     reset();
     setTotals(NO_TOTALS);
     setScanning(true);
+
+    // Not awaited: the admin log is read while the accounts are scanned. The
+    // `abortRef.current === ac` checks keep a slow answer from an earlier run
+    // from landing in this one.
+    setDelegationLoading(true);
+    void (async () => {
+      const current = () =>
+        tenantIdRef.current === pinnedTenantId && abortRef.current === ac;
+      try {
+        const res = await tfetch(
+          "/api/admin/security-check/delegation",
+          { signal: ac.signal },
+          pinnedTenantId
+        );
+        const result = await res.json();
+        if (!current()) return;
+        if (result.success) {
+          setDelegation(result.data as DelegationReport);
+        } else {
+          setDelegationError(result.error || "The admin log could not be read");
+        }
+      } catch {
+        if (current() && !ac.signal.aborted) {
+          setDelegationError("Failed to connect to the API");
+        }
+      } finally {
+        if (current()) setDelegationLoading(false);
+      }
+    })();
 
     const allApps = new Map<string, AppGrant>();
     let pageToken: string | null = null;
@@ -469,6 +542,8 @@ export default function SecurityCheck() {
   const forwardingMailboxes = new Set(forwarding.map((f) => f.user)).size;
   const hiddenForwards = forwarding.filter((f) => f.hidesOriginal).length;
   const broadApps = appRows.filter((r) => r.access.level === "high").length;
+  const delegatedClients = delegation?.clients ?? [];
+  const delegationToReview = delegatedClients.filter(delegationNeedsReview).length;
   const hasResults = totals !== null;
   const partial = stopped !== null;
 
@@ -497,6 +572,17 @@ export default function SecurityCheck() {
       totals?.mailboxErrors ?? 0
     ),
     apps: statusFor(broadApps, "warning", totals?.appErrors ?? 0),
+    // Never "Nothing found": the log only reaches back six months, so an empty
+    // answer is not evidence that no app holds delegation.
+    delegation: !hasResults
+      ? "idle"
+      : delegationLoading
+        ? "running"
+        : !delegation
+          ? "incomplete"
+          : delegationToReview > 0
+            ? "warning"
+            : "quiet",
   };
 
   const progressLine = () => {
@@ -520,7 +606,7 @@ export default function SecurityCheck() {
   const exportCsv = () => {
     downloadCsv(
       `security-check-${new Date().toISOString().slice(0, 10)}.csv`,
-      toCsv(twoStepSorted, inactiveShown, forwarding, apps)
+      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedClients)
     );
   };
 
@@ -528,6 +614,7 @@ export default function SecurityCheck() {
     setSelected(id);
     setShowAll(false);
     setOpenApp(null);
+    setOpenClient(null);
   };
 
   const limited = <T,>(rows: T[]): T[] => (showAll ? rows : rows.slice(0, ROW_LIMIT));
@@ -548,14 +635,19 @@ export default function SecurityCheck() {
           : clean;
 
   const anythingFound =
-    twoStep.length + inactive.length + forwarding.length + apps.length > 0;
+    twoStep.length +
+      inactive.length +
+      forwarding.length +
+      apps.length +
+      delegatedClients.length >
+    0;
   const unreadTotal = (totals?.mailboxErrors ?? 0) + (totals?.appErrors ?? 0);
 
   return (
     <>
       <PageHeader
         title="Security Check"
-        description="One pass over the tenant for the four things that most often lead to trouble: accounts without 2-Step Verification, accounts nobody uses, mail forwarded outside the organisation, and outside apps holding access to your data. It only reads; nothing is changed."
+        description="One pass over the tenant for the things that most often lead to trouble: accounts without 2-Step Verification, accounts nobody uses, mail forwarded outside the organisation, outside apps holding access to your data, and apps granted domain-wide delegation. It only reads; nothing is changed."
         badge="Audit"
         actions={
           <>
@@ -594,7 +686,7 @@ export default function SecurityCheck() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <Tile
           icon={KeyRound}
           label="No 2-Step Verification"
@@ -646,6 +738,21 @@ export default function SecurityCheck() {
           status={status.apps}
           selected={selected === "apps"}
           onSelect={() => select("apps")}
+        />
+        <Tile
+          icon={Waypoints}
+          label="Domain-wide delegation"
+          value={hasResults && delegation ? delegationToReview.toLocaleString() : "–"}
+          note={
+            !hasResults
+              ? "Apps allowed to act as any user"
+              : delegationError
+                ? "The admin log couldn't be read"
+                : "Granted or changed in the last 6 months"
+          }
+          status={status.delegation}
+          selected={selected === "delegation"}
+          onSelect={() => select("delegation")}
         />
       </div>
 
@@ -946,6 +1053,171 @@ export default function SecurityCheck() {
                     );
                   })}
                   {more(appRows.length)}
+                </>
+              )}
+            </CardContent>
+          </>
+        )}
+        {selected === "delegation" && (
+          <>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Waypoints className="h-5 w-5" />
+                Domain-wide delegation
+              </CardTitle>
+              <CardDescription className="space-y-2">
+                <span className="block">
+                  Domain-wide delegation lets an app act as any user in the
+                  organisation: read their mail, their files and their
+                  calendar, with no password and no consent screen. Whoever
+                  holds that app&apos;s key has the same reach, so every entry
+                  should be one you recognise and still need.
+                </span>
+                <span className="block">
+                  <span className="font-medium text-foreground">
+                    This is not the full list.
+                  </span>{" "}
+                  Google keeps that in the Admin console (Security → Access and
+                  data control → API controls → Manage Domain Wide Delegation)
+                  and gives apps no way to read it. What is shown here comes
+                  from the admin log: each time delegation was granted, changed
+                  or removed in about the last six months. An app granted
+                  earlier and untouched since will not appear, so check the
+                  list in the Admin console as well.
+                </span>
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!hasResults ? (
+                <Empty>Run the check to see results.</Empty>
+              ) : delegationLoading ? (
+                <Empty>Reading the admin log…</Empty>
+              ) : delegationError ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+                  <p className="font-medium">The admin log could not be read.</p>
+                  <p className="mt-1 text-xs text-muted-foreground break-words">
+                    {delegationError}
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    This check needs the service account to be granted the
+                    reports permission (admin.reports.audit.readonly).{" "}
+                    <Link href="/tenants" className="underline underline-offset-2">
+                      Tenants
+                    </Link>{" "}
+                    → Test scopes shows whether it is.
+                  </p>
+                </div>
+              ) : !delegation ? (
+                <Empty>The check was stopped before the admin log was read.</Empty>
+              ) : delegatedClients.length === 0 ? (
+                <Empty>
+                  No delegation was granted, changed or removed in the last six
+                  months. That says nothing about older entries.
+                </Empty>
+              ) : (
+                <>
+                  {limited(delegatedClients).map((client) => {
+                    const open = openClient === client.clientId;
+                    const access = summariseAccess(client.scopes);
+                    const authorized = client.status === "authorized";
+                    return (
+                      <div key={client.clientId} className="rounded-lg border bg-muted/30">
+                        <button
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => setOpenClient(open ? null : client.clientId)}
+                          className="flex w-full items-start justify-between gap-3 p-3 text-left"
+                        >
+                          <div className="min-w-0 space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="font-mono text-sm font-medium break-all">
+                                {client.clientId}
+                              </p>
+                              {client.ownApp && <Badge variant="accent">Open Admin</Badge>}
+                              {authorized ? (
+                                <Badge variant={ACCESS[access.level].variant}>
+                                  {ACCESS[access.level].label}
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline">removed</Badge>
+                              )}
+                              {client.unusedScopes.length > 0 && (
+                                <Badge variant="warning">
+                                  {`${plural(client.unusedScopes.length, "permission")} it doesn't use`}
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {authorized ? "Granted" : "Removed"} by {client.lastActor} on{" "}
+                              {formatDate(client.lastChange)}
+                              {authorized && access.areas.length > 0
+                                ? ` · ${access.areas.map((a) => a.area).join(" · ")}`
+                                : ""}
+                            </p>
+                          </div>
+                          <span className="flex shrink-0 items-center text-muted-foreground">
+                            {open ? (
+                              <ChevronDown className="h-4 w-4" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4" />
+                            )}
+                          </span>
+                        </button>
+                        {open && (
+                          <div className="space-y-3 border-t px-3 py-3 text-xs">
+                            {client.ownApp && (
+                              <p className="text-muted-foreground">
+                                This is the service account Open Admin itself runs as.
+                                {client.unusedScopes.length > 0
+                                  ? " The permissions marked unused can be removed from its entry in the Admin console without affecting anything here."
+                                  : ""}
+                              </p>
+                            )}
+                            <div>
+                              <p className="font-medium">
+                                {authorized ? "Permissions" : "Permissions it had"}
+                              </p>
+                              {client.scopes.length === 0 ? (
+                                <p className="text-muted-foreground">Not recorded in the log</p>
+                              ) : (
+                                <ul className="font-mono text-muted-foreground">
+                                  {client.scopes.map((scope) => (
+                                    <li key={scope} className="break-all">
+                                      {scope}
+                                      {client.unusedScopes.includes(scope) && (
+                                        <span className="ml-2 font-sans font-medium text-warning-fg">
+                                          unused
+                                        </span>
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                            <div>
+                              <p className="font-medium">Changes in the last six months</p>
+                              <ul className="text-muted-foreground">
+                                {client.history.map((event, i) => (
+                                  <li key={`${event.time}|${event.kind}|${i}`}>
+                                    {formatDate(event.time)}:{" "}
+                                    {event.kind === "authorize" ? "granted" : "removed"} by{" "}
+                                    {event.actor}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {more(delegatedClients.length)}
+                  {delegation.truncated && (
+                    <p className="text-xs text-muted-foreground">
+                      The admin log held more changes than were read, so older
+                      ones in this period may be missing.
+                    </p>
+                  )}
                 </>
               )}
             </CardContent>

@@ -146,7 +146,7 @@ const taskGroups: TaskGroup[] = [
       },
       {
         title: "Security Check",
-        description: "One scan for missing 2-Step Verification, idle accounts, outside forwarding and risky apps.",
+        description: "One scan for missing 2-Step Verification, idle accounts, outside forwarding, risky apps and delegation.",
         href: "/security-check",
         icon: ShieldCheck,
       },
