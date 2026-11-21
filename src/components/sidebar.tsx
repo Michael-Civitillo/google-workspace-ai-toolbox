@@ -27,6 +27,7 @@ import {
   Settings2,
   ShieldCheck,
   UserSearch,
+  UserPlus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -79,6 +80,7 @@ const navigation: NavGroup[] = [
   {
     label: "Lifecycle",
     items: [
+      { name: "New User", href: "/new-user", icon: UserPlus },
       { name: "Domain Change", href: "/domain-change", icon: Globe },
       { name: "Offboarding", href: "/offboarding", icon: UserMinus },
       { name: "Bulk Operations", href: "/bulk", icon: Layers },

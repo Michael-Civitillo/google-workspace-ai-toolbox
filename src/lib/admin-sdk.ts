@@ -16,6 +16,7 @@ import {
   isValidDomain,
   isValidUsername,
   emailDomain,
+  ValidationError,
 } from "./validate";
 import {
   DELEGATION_WINDOW_DAYS,
@@ -1448,6 +1449,194 @@ export async function changePrimaryDomain(
 // ---------------------------------------------------------------------------
 // Offboarding primitives
 // ---------------------------------------------------------------------------
+
+// The characters a temporary password is drawn from. Look-alikes (0/O, 1/l/I)
+// are left out because a temporary password is read off a screen and typed,
+// or read out over the phone.
+const TEMP_PASSWORD_ALPHABET =
+  "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+const TEMP_PASSWORD_SYMBOLS = "-_.!?";
+export const TEMP_PASSWORD_LENGTH = 16;
+
+/**
+ * A temporary password: long, random, and typeable. Always contains an upper
+ * and a lower case letter, a digit and a symbol, so it passes any complexity
+ * rule a tenant has set. It is meant to be used once: every account given one
+ * is also made to choose its own at the next sign-in.
+ */
+export function generateTemporaryPassword(
+  randomInt: (max: number) => number = (max) => randomIntBelow(max)
+): string {
+  const pick = (chars: string) => chars[randomInt(chars.length)];
+  const upper = TEMP_PASSWORD_ALPHABET.slice(0, 24);
+  const lower = TEMP_PASSWORD_ALPHABET.slice(24, 49);
+  const digits = TEMP_PASSWORD_ALPHABET.slice(49);
+  const chars = [pick(upper), pick(lower), pick(digits), pick(TEMP_PASSWORD_SYMBOLS)];
+  while (chars.length < TEMP_PASSWORD_LENGTH) chars.push(pick(TEMP_PASSWORD_ALPHABET));
+  // Shuffle, so the guaranteed characters aren't always in the same places.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+/** A uniform random integer in [0, max), from the system's secure source. */
+function randomIntBelow(max: number): number {
+  const limit = Math.floor(0x100000000 / max) * max;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return buf[0] % max;
+  }
+}
+
+export interface NewUserInput {
+  givenName: string;
+  familyName: string;
+  primaryEmail: string;
+  /** Organisational unit path. Defaults to the root, "/". */
+  orgUnitPath?: string;
+}
+
+const NAME_MAX_CHARS = 60;
+
+function cleanName(value: string, field: string): string {
+  const name = String(value ?? "").trim();
+  // Control characters have no business in a name and can hide text.
+  if (!name || name.length > NAME_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new ValidationError(`${field} must be between 1 and ${NAME_MAX_CHARS} characters`);
+  }
+  return name;
+}
+
+function cleanOrgUnitPath(value: string | undefined): string {
+  const path = String(value ?? "/").trim() || "/";
+  if (!path.startsWith("/") || path.length > 300 || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new ValidationError('The organisational unit must start with "/", like /Sales or /Sales/EMEA');
+  }
+  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+}
+
+/**
+ * Create a user account with a temporary password that must be changed at the
+ * first sign-in.
+ *
+ * Checked before anything is created: the address must be on one of the
+ * tenant's own verified domains (and not a domain alias, where primary
+ * addresses can't live), and must not already belong to someone. Creation is
+ * never retried on a server error: Google may have created the account before
+ * the error, and a second attempt would fail confusingly or, worse, be
+ * mistaken for the first.
+ *
+ * The password is returned to the caller and nowhere else. It is not logged
+ * and not stored.
+ */
+export async function createUser(
+  tenant: Tenant | null,
+  input: NewUserInput
+): Promise<{ primaryEmail: string; orgUnitPath: string; temporaryPassword: string }> {
+  const primaryEmail = String(input.primaryEmail ?? "").trim().toLowerCase();
+  if (!isValidEmail(primaryEmail)) {
+    throw new ValidationError("primaryEmail must be a valid email address");
+  }
+  const givenName = cleanName(input.givenName, "First name");
+  const familyName = cleanName(input.familyName, "Last name");
+  const orgUnitPath = cleanOrgUnitPath(input.orgUnitPath);
+
+  const domain = (await listDomains(tenant)).find(
+    (d) => d.domainName === emailDomain(primaryEmail)
+  );
+  if (!domain || !domain.verified) {
+    throw new ValidationError(
+      `${emailDomain(primaryEmail)} is not a verified domain of this tenant`
+    );
+  }
+  if (domain.isAlias) {
+    throw new ValidationError(
+      `${domain.domainName} is a domain alias. Create the account on the domain it mirrors; the alias address comes with it.`
+    );
+  }
+  if (await userExists(tenant, primaryEmail)) {
+    throw new UserAlreadyExistsError(`${primaryEmail} already belongs to an account`);
+  }
+
+  const temporaryPassword = generateTemporaryPassword();
+  const { client } = getAdminClient(tenant);
+  await withGoogleRetry(
+    () =>
+      client.users.insert(
+        {
+          requestBody: {
+            primaryEmail,
+            name: { givenName, familyName },
+            password: temporaryPassword,
+            changePasswordAtNextLogin: true,
+            orgUnitPath,
+          },
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: false }
+  );
+  return { primaryEmail, orgUnitPath, temporaryPassword };
+}
+
+/** The address a new account was to be created with is already taken. */
+export class UserAlreadyExistsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UserAlreadyExistsError";
+  }
+}
+
+/**
+ * Give an account a new temporary password that must be changed at the next
+ * sign-in. Sessions that are already signed in stay signed in: a new password
+ * alone does not end them (signOutAllSessions does).
+ *
+ * The password is returned to the caller and nowhere else.
+ */
+export async function resetUserPassword(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<{ primaryEmail: string; temporaryPassword: string }> {
+  if (!isValidEmail(userEmail)) {
+    throw new ValidationError("userEmail must be a valid email address");
+  }
+  // Resolve first: the key may be an alias, and the caller should be told
+  // which account was actually changed.
+  const target = await getUser(tenant, userEmail);
+  const primaryEmail = target.primaryEmail.toLowerCase();
+  // The account Open Admin acts as. If its temporary password were lost (a
+  // closed tab is enough) and it is the only super admin, nobody could get
+  // back into the Admin console. That one is changed by its owner, at Google.
+  const { client, impersonatedAdmin } = getAdminClient(tenant);
+  if (primaryEmail === impersonatedAdmin || userEmail.toLowerCase() === impersonatedAdmin) {
+    throw new ValidationError(
+      `${primaryEmail} is the admin account Open Admin acts as. Change its password from that account's own Google settings.`
+    );
+  }
+  if (target.suspended) {
+    throw new ValidationError(
+      `${primaryEmail} is suspended. A new password would not let them sign in; re-enable the account first.`
+    );
+  }
+  const temporaryPassword = generateTemporaryPassword();
+  // Setting the same password again changes nothing, so a server error can retry.
+  await withGoogleRetry(
+    () =>
+      client.users.update(
+        {
+          userKey: primaryEmail,
+          requestBody: { password: temporaryPassword, changePasswordAtNextLogin: true },
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { primaryEmail, temporaryPassword };
+}
 
 /** Suspend a user. Refuses to suspend the impersonated admin themselves. */
 export async function suspendUser(

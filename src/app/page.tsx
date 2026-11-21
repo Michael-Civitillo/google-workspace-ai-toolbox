@@ -27,6 +27,7 @@ import {
   ScrollText,
   ShieldCheck,
   UserSearch,
+  UserPlus,
 } from "lucide-react";
 
 interface GwsStatus {
@@ -109,6 +110,12 @@ const taskGroups: TaskGroup[] = [
   {
     label: "Lifecycle",
     tasks: [
+      {
+        title: "New User",
+        description: "Create an account with a temporary password and groups, or reset a password.",
+        href: "/new-user",
+        icon: UserPlus,
+      },
       {
         title: "Domain Change",
         description: "Switch a user's primary email to another domain in your tenant.",
