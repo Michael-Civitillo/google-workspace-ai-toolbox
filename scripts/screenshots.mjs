@@ -10,19 +10,35 @@ const BASE_URL = process.env.SCREENSHOT_BASE_URL || "http://localhost:3000";
 const PASSWORD = process.env.APP_PASSWORD || "";
 const THEMES = (process.env.SCREENSHOT_THEMES || "light,dark").split(",");
 
+// Every page in the sidebar, in sidebar order, so a page added to the app has an
+// obvious place here. Three are deliberately absent: security-check.png and
+// licenses.png show a finished scan, and signatures.png shows a preview. None
+// of those can be produced by loading a URL, so they are captured separately
+// (sample data) and left alone here.
 const pages = [
   { name: "dashboard", path: "/", delay: 1500 },
-  { name: "audit", path: "/audit", delay: 800 },
+  { name: "get-started", path: "/onboarding", delay: 1500 },
   { name: "email-delegation", path: "/email-delegation", delay: 500 },
+  { name: "delegation-lookup", path: "/delegation-lookup", delay: 500 },
   { name: "calendar-delegation", path: "/calendar-delegation", delay: 500 },
-  { name: "calendar-transfer", path: "/calendar-transfer", delay: 500 },
+  { name: "groups", path: "/groups", delay: 800 },
   { name: "email-transfer", path: "/email-transfer", delay: 500 },
+  { name: "calendar-transfer", path: "/calendar-transfer", delay: 500 },
+  { name: "drive-transfer", path: "/drive-transfer", delay: 500 },
+  { name: "new-user", path: "/new-user", delay: 800 },
   { name: "domain-change", path: "/domain-change", delay: 500 },
   { name: "offboarding", path: "/offboarding", delay: 800 },
+  { name: "bulk", path: "/bulk", delay: 500 },
+  { name: "mailbox-export", path: "/mailbox-export", delay: 500 },
+  { name: "mailbox-import", path: "/mailbox-import", delay: 500 },
   { name: "sharing-audit", path: "/sharing-audit", delay: 800 },
+  { name: "audit", path: "/audit", delay: 800 },
+  { name: "activity-reports", path: "/activity-reports", delay: 800 },
+  { name: "audit-log", path: "/audit-log", delay: 800 },
+  { name: "setup", path: "/setup", delay: 1500 },
   { name: "tenants", path: "/tenants", delay: 800 },
   { name: "sso", path: "/sso", delay: 800 },
-  { name: "setup", path: "/setup", delay: 1500 },
+  { name: "settings", path: "/settings", delay: 800 },
   { name: "login", path: "/login", delay: 800, skipLogin: true },
 ];
 
@@ -66,6 +82,10 @@ async function captureForTheme(browser, theme) {
     await page.goto(`${BASE_URL}${path}`, { waitUntil: "networkidle0" });
     // Re-apply theme after navigation in case localStorage was cleared.
     await setTheme(page, theme);
+    // Park the pointer in the top-right margin. Left where the sign-in button
+    // was, it sits over whichever card lands there and lights it up as if it
+    // had been picked out on purpose.
+    await page.mouse.move(1396, 4);
     await new Promise((r) => setTimeout(r, delay));
     await page.addStyleTag({
       content: `

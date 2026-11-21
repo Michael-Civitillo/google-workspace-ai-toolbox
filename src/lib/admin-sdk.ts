@@ -8,6 +8,7 @@ import { admin_datatransfer_v1 } from "googleapis/build/src/apis/admin/datatrans
 import { gmail_v1 } from "googleapis/build/src/apis/gmail/v1";
 import { drive_v3 } from "googleapis/build/src/apis/drive/v3";
 import { calendar_v3 } from "googleapis/build/src/apis/calendar/v3";
+import { licensing_v1 } from "googleapis/build/src/apis/licensing/v1";
 import { JWT } from "google-auth-library";
 import { readFileSync, statSync, type Stats } from "fs";
 import type { Tenant } from "./tenant-types";
@@ -16,14 +17,30 @@ import {
   isValidDomain,
   isValidUsername,
   emailDomain,
+  ValidationError,
 } from "./validate";
 import {
+  isKnownProduct,
+  isValidSkuId,
+  type LicenseAssignment,
+} from "./licenses";
+import {
+  renderSignature,
+  SIGNATURE_HTML_MAX,
+  templateProblem,
+  type RenderedSignature,
+  type SignatureProfile,
+} from "./signatures";
+import {
+  DELEGATION_WINDOW_DAYS,
   forwardingFindings,
   inactiveFinding,
   isActiveAccount,
   isAdminAccount,
+  parseScopeList,
   twoStepFinding,
   type AppGrant,
+  type DelegationEvent,
   type DirectoryAccount,
   type RawAutoForwarding,
   type RawFilter,
@@ -70,11 +87,13 @@ const SCOPES = {
   // scope for permission management — `drive.file` only covers files the app
   // itself created, which doesn't help an admin tool acting on existing files.
   DRIVE_FULL: "https://www.googleapis.com/auth/drive",
+  LICENSING: "https://www.googleapis.com/auth/apps.licensing",
 } as const;
 
 interface ServiceAccountCreds {
   client_email?: string;
   private_key?: string;
+  client_id?: string;
 }
 
 /**
@@ -296,6 +315,23 @@ function getReportsClient(
   };
 }
 
+/**
+ * Enterprise License Manager client (impersonating the tenant admin). Its own
+ * client for the same reason the groups one is: the scope was added later,
+ * and a tenant that hasn't authorised it yet must keep everything else.
+ */
+function getLicensingClient(tenant: Tenant | null): {
+  client: licensing_v1.Licensing;
+  impersonatedAdmin: string;
+} {
+  const subject = impersonatedAdminFor(tenant);
+  const auth = buildAuth(tenant, subject, [SCOPES.LICENSING]);
+  return {
+    client: new licensing_v1.Licensing({ ...CLIENT_DEFAULTS, auth }),
+    impersonatedAdmin: subject.toLowerCase(),
+  };
+}
+
 /** Admin SDK Data Transfer client (impersonating the tenant admin). */
 function getDataTransferClient(
   tenant: Tenant | null
@@ -372,6 +408,12 @@ export interface DomainInfo {
   domainName: string;
   isPrimary: boolean;
   verified: boolean;
+  /**
+   * A domain alias: every user automatically has an address at it, but no
+   * account's primary address can live there. It is part of the organisation
+   * for "is this address ours?", and not a domain a user can be moved to.
+   */
+  isAlias: boolean;
 }
 
 /** Look up a user by their email address. */
@@ -471,11 +513,35 @@ export async function listDomains(
     { retryServerErrors: true }
   );
 
-  const domains = (res.data.domains || []).map((d) => ({
-    domainName: (d.domainName || "").toLowerCase(),
-    isPrimary: d.isPrimary || false,
-    verified: d.verified || false,
-  }));
+  // Domain aliases come nested under the domain they mirror. They are listed
+  // alongside it: mail to someone@alias.example reaches the same mailbox as
+  // mail to their primary address, so treating an alias as outside the
+  // organisation flagged internal forwards, shares and transfers as external.
+  const domains: DomainInfo[] = [];
+  const seen = new Set<string>();
+  const add = (info: DomainInfo) => {
+    if (!info.domainName || seen.has(info.domainName)) return;
+    seen.add(info.domainName);
+    domains.push(info);
+  };
+  for (const d of res.data.domains || []) {
+    add({
+      domainName: (d.domainName || "").toLowerCase(),
+      isPrimary: d.isPrimary || false,
+      verified: d.verified || false,
+      isAlias: false,
+    });
+  }
+  for (const d of res.data.domains || []) {
+    for (const alias of d.domainAliases || []) {
+      add({
+        domainName: (alias.domainAliasName || "").toLowerCase(),
+        isPrimary: false,
+        verified: alias.verified || false,
+        isAlias: true,
+      });
+    }
+  }
   if (domainsCache.size >= DOMAINS_CACHE_MAX) {
     const oldest = domainsCache.keys().next().value;
     if (oldest !== undefined) domainsCache.delete(oldest);
@@ -773,6 +839,449 @@ function errorText(e: unknown): string {
   return message.slice(0, SECURITY_CHECK_ERROR_CHARS);
 }
 
+// -------------------------------------------------------------- Signatures
+
+/** Reading and setting a signature needs only the basic Gmail settings scope. */
+const GMAIL_SIGNATURE_SCOPES = ["https://www.googleapis.com/auth/gmail.settings.basic"];
+
+/** The person's primary organisation entry, or the first when none is marked. */
+function primaryOf<T extends { primary?: boolean | null }>(list: unknown): T | undefined {
+  if (!Array.isArray(list)) return undefined;
+  return (list as T[]).find((x) => x?.primary) ?? (list as T[])[0];
+}
+
+/**
+ * What the directory says about one person, for filling a signature
+ * template: their name, job title, department and work phone.
+ */
+export async function getSignatureProfile(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<{ profile: SignatureProfile; suspended: boolean; mailboxSetup: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new ValidationError("user must be a valid email address");
+  }
+  const { client } = getAdminClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.users.get(
+        {
+          userKey: userEmail,
+          projection: "basic",
+          fields: "primaryEmail,name,organizations,phones,suspended,isMailboxSetup",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  ).catch((e) => {
+    throw isNotFoundError(e) ? new NoSuchAccountError(userEmail.toLowerCase()) : e;
+  });
+  const u = res.data;
+  const org = primaryOf<{ primary?: boolean; title?: string; department?: string }>(u.organizations);
+  const phones = Array.isArray(u.phones)
+    ? (u.phones as Array<{ type?: string; primary?: boolean; value?: string }>)
+    : [];
+  const phone =
+    phones.find((p) => p?.type === "work" && p.value) ??
+    phones.find((p) => p?.primary && p.value) ??
+    phones.find((p) => p?.value);
+  return {
+    profile: {
+      name: u.name?.fullName || "",
+      firstName: u.name?.givenName || "",
+      lastName: u.name?.familyName || "",
+      email: (u.primaryEmail || userEmail).toLowerCase(),
+      title: org?.title || "",
+      department: org?.department || "",
+      phone: phone?.value || "",
+    },
+    suspended: u.suspended || false,
+    mailboxSetup: u.isMailboxSetup !== false,
+  };
+}
+
+/** The address a mailbox sends as by default, and the signature on it. */
+async function primarySendAs(
+  gmail: gmail_v1.Gmail,
+  userEmail: string
+): Promise<{ sendAsEmail: string; signature: string }> {
+  const res = await withGoogleRetry(
+    () => gmail.users.settings.sendAs.list({ userId: "me" }, { timeout: ADMIN_API_TIMEOUT_MS }),
+    { retryServerErrors: true }
+  );
+  const all = res.data.sendAs || [];
+  const primary =
+    all.find((s) => s.isPrimary) ??
+    all.find((s) => (s.sendAsEmail || "").toLowerCase() === userEmail.toLowerCase());
+  if (!primary?.sendAsEmail) {
+    throw new Error(`Gmail did not list a primary sending address for ${userEmail}`);
+  }
+  return { sendAsEmail: primary.sendAsEmail, signature: primary.signature || "" };
+}
+
+export interface SignaturePreview {
+  profile: SignatureProfile;
+  rendered: RenderedSignature;
+  /** The signature the mailbox has now, as HTML. */
+  current: string;
+}
+
+function assertCanHaveSignature(
+  user: string,
+  account: { suspended: boolean; mailboxSetup: boolean }
+) {
+  if (account.suspended) {
+    throw new ValidationError(
+      `${user} is suspended, and Google won't open a suspended account's mail settings.`
+    );
+  }
+  if (!account.mailboxSetup) {
+    throw new ValidationError(`${user} has no Gmail mailbox, so there is no signature to set.`);
+  }
+}
+
+function renderFor(template: string, profile: SignatureProfile): RenderedSignature {
+  const problem = templateProblem(template);
+  if (problem) throw new ValidationError(problem);
+  const rendered = renderSignature(template, profile);
+  if (rendered.html.length > SIGNATURE_HTML_MAX) {
+    throw new ValidationError(
+      `The signature for ${profile.email} comes to ${rendered.html.length} characters; Gmail's limit is ${SIGNATURE_HTML_MAX}.`
+    );
+  }
+  return rendered;
+}
+
+/** What a template would give one person, next to what they have now. Read-only. */
+export async function previewSignature(
+  tenant: Tenant | null,
+  userEmail: string,
+  template: string
+): Promise<SignaturePreview> {
+  const problem = templateProblem(template);
+  if (problem) throw new ValidationError(problem);
+  const account = await getSignatureProfile(tenant, userEmail);
+  assertCanHaveSignature(account.profile.email, account);
+  const rendered = renderFor(template, account.profile);
+  const gmail = buildGmailClient(tenant, account.profile.email, GMAIL_SIGNATURE_SCOPES);
+  const { signature } = await primarySendAs(gmail, account.profile.email);
+  return { profile: account.profile, rendered, current: signature };
+}
+
+/**
+ * Set one person's signature from a template.
+ *
+ * Returns what was there before, so a run can be exported and undone by hand.
+ * A mailbox that already has exactly this signature is left untouched. A
+ * template that leaves this person with nothing at all (every line dropped
+ * out) is refused: that would silently delete the signature they have.
+ */
+export async function applySignature(
+  tenant: Tenant | null,
+  userEmail: string,
+  template: string
+): Promise<{ user: string; changed: boolean; previous: string; html: string }> {
+  const problem = templateProblem(template);
+  if (problem) throw new ValidationError(problem);
+  const account = await getSignatureProfile(tenant, userEmail);
+  const user = account.profile.email;
+  assertCanHaveSignature(user, account);
+  const rendered = renderFor(template, account.profile);
+  if (!rendered.html) {
+    throw new ValidationError(
+      `Nothing in the template applies to ${user} (their directory profile has none of its fields), so their signature was left as it is.`
+    );
+  }
+  const gmail = buildGmailClient(tenant, user, GMAIL_SIGNATURE_SCOPES);
+  const { sendAsEmail, signature: previous } = await primarySendAs(gmail, user);
+  if (previous === rendered.html) {
+    return { user, changed: false, previous, html: rendered.html };
+  }
+  // Setting the same signature twice changes nothing, so a server error can retry.
+  await withGoogleRetry(
+    () =>
+      gmail.users.settings.sendAs.patch(
+        { userId: "me", sendAsEmail, requestBody: { signature: rendered.html } },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { user, changed: true, previous, html: rendered.html };
+}
+
+// ---------------------------------------------------------------- Licences
+
+/** The scope the licence calls need, for messages that name it. */
+export const LICENSING_SCOPE = SCOPES.LICENSING;
+
+/** The most licence assignments asked for per request. */
+const LICENSE_PAGE_SIZE = 500;
+
+/**
+ * Why licences could not be read or changed, when the reason is setup and not
+ * a fault: the tenant hasn't authorised the licensing scope for the key, or
+ * the licensing API is switched off in the key's Google Cloud project. Both
+ * have a fix the operator can make, so the route names it instead of passing
+ * on Google's wording.
+ */
+export type LicensingSetupProblem = "scope_missing" | "api_disabled";
+
+export function licensingSetupProblem(e: unknown): LicensingSetupProblem | null {
+  const message = e instanceof Error ? e.message : String(e ?? "");
+  if (/unauthorized_client/i.test(message)) return "scope_missing";
+  const { reasons } = googleErrorInfo(e);
+  if (
+    reasons.includes("accessnotconfigured") ||
+    reasons.includes("service_disabled") ||
+    /has not been used in project|it is disabled/i.test(message)
+  ) {
+    return "api_disabled";
+  }
+  return null;
+}
+
+// The customer id never changes for a tenant, so it is looked up once.
+const customerIdCache = new Map<string, string>();
+
+/**
+ * The organisation's customer id ("C01abc234"), which the licensing API wants
+ * in place of the "my_customer" shorthand the Directory API accepts. Read off
+ * the admin's own account, which needs no permission beyond the ones already
+ * in use.
+ */
+async function customerIdFor(tenant: Tenant | null, signal?: AbortSignal): Promise<string> {
+  const { client, impersonatedAdmin } = getAdminClient(tenant);
+  const cacheKey = `${tenant?.id ?? "env"}|${tenant?.credentialsFile ?? ""}|${impersonatedAdmin}`;
+  const cached = customerIdCache.get(cacheKey);
+  if (cached) return cached;
+  const res = await withGoogleRetry(
+    () =>
+      client.users.get(
+        { userKey: impersonatedAdmin, projection: "basic", fields: "customerId" },
+        { timeout: ADMIN_API_TIMEOUT_MS, signal }
+      ),
+    { retryServerErrors: true, signal }
+  );
+  const id = res.data.customerId;
+  if (!id) {
+    throw new Error(
+      `Google did not return a customer id for ${impersonatedAdmin}, so licences can't be looked up.`
+    );
+  }
+  customerIdCache.set(cacheKey, id);
+  return id;
+}
+
+function toAssignment(a: licensing_v1.Schema$LicenseAssignment): LicenseAssignment {
+  return {
+    user: (a.userId || "").toLowerCase(),
+    productId: a.productId || "",
+    productName: a.productName || a.productId || "",
+    skuId: a.skuId || "",
+    skuName: a.skuName || a.skuId || "",
+  };
+}
+
+/**
+ * One page of the accounts holding a licence of one product.
+ *
+ * `unavailable` is true when Google doesn't recognise the product for this
+ * organisation (400 or 404). The list of products asked about is fixed and
+ * most organisations have only one or two of them, so that is an ordinary
+ * answer, not an error.
+ */
+export async function listLicenseAssignments(
+  tenant: Tenant | null,
+  opts: { productId: string; pageToken?: string; signal?: AbortSignal }
+): Promise<{
+  assignments: LicenseAssignment[];
+  nextPageToken: string | null;
+  unavailable: boolean;
+}> {
+  if (!isKnownProduct(opts.productId)) {
+    throw new ValidationError("product is not one Open Admin asks about");
+  }
+  const customerId = await customerIdFor(tenant, opts.signal);
+  const { client } = getLicensingClient(tenant);
+  try {
+    const res = await withGoogleRetry(
+      () =>
+        client.licenseAssignments.listForProduct(
+          {
+            productId: opts.productId,
+            customerId,
+            maxResults: LICENSE_PAGE_SIZE,
+            pageToken: opts.pageToken,
+          },
+          { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+        ),
+      { retryServerErrors: true, signal: opts.signal }
+    );
+    return {
+      assignments: (res.data.items || []).map(toAssignment).filter((a) => a.user && a.skuId),
+      nextPageToken: res.data.nextPageToken || null,
+      unavailable: false,
+    };
+  } catch (e) {
+    const status = googleHttpStatus(e);
+    // Only on the first page: a 400 further in is a bad page token, a fault.
+    if (!opts.pageToken && (status === 400 || status === 404) && !licensingSetupProblem(e)) {
+      return { assignments: [], nextPageToken: null, unavailable: true };
+    }
+    throw e;
+  }
+}
+
+/** What a licence change was about to act on is no longer what was confirmed. */
+export class LicenseChangedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LicenseChangedError";
+  }
+}
+
+function requireLicenseTarget(input: { user: string; productId: string; skuId: string }) {
+  const user = String(input.user ?? "").trim().toLowerCase();
+  if (!isValidEmail(user)) throw new ValidationError("user must be a valid email address");
+  if (!isKnownProduct(input.productId)) {
+    throw new ValidationError("productId is not one Open Admin asks about");
+  }
+  if (!isValidSkuId(input.skuId)) throw new ValidationError("skuId is not a licence id");
+  return { user, productId: input.productId, skuId: input.skuId };
+}
+
+/**
+ * Give an account a licence. Never retried on a server error: the first
+ * attempt may have gone through, and a licence is something that is paid for.
+ */
+export async function assignLicense(
+  tenant: Tenant | null,
+  input: { user: string; productId: string; skuId: string }
+): Promise<LicenseAssignment> {
+  const { user, productId, skuId } = requireLicenseTarget(input);
+  const { client } = getLicensingClient(tenant);
+  const res = await withGoogleRetry(
+    () =>
+      client.licenseAssignments.insert(
+        { productId, skuId, requestBody: { userId: user } },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: false }
+  );
+  const assigned = toAssignment(res.data);
+  return {
+    user: assigned.user || user,
+    productId: assigned.productId || productId,
+    productName: assigned.productName || productId,
+    skuId: assigned.skuId || skuId,
+    skuName: assigned.skuName || skuId,
+  };
+}
+
+/**
+ * Take a licence away from an account.
+ *
+ * The account Open Admin acts as is refused: without its licence it loses the
+ * services this tool reaches through it. The licence is read first, and if
+ * the account no longer holds exactly this one the request is refused rather
+ * than removing something nobody confirmed.
+ */
+export async function removeLicense(
+  tenant: Tenant | null,
+  input: { user: string; productId: string; skuId: string }
+): Promise<{ user: string; skuName: string }> {
+  const { user, productId, skuId } = requireLicenseTarget(input);
+  const { client, impersonatedAdmin } = getLicensingClient(tenant);
+  if (user === impersonatedAdmin) {
+    throw new ValidationError(
+      `${user} is the admin account Open Admin acts as. Removing its licence would cut off the services this tool works through.`
+    );
+  }
+  let held: LicenseAssignment;
+  try {
+    const res = await withGoogleRetry(
+      () =>
+        client.licenseAssignments.get(
+          { productId, skuId, userId: user },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    held = toAssignment(res.data);
+  } catch (e) {
+    if (isNotFoundError(e)) {
+      throw new LicenseChangedError(
+        `${user} doesn't hold that licence any more. Check licences again to see the current state.`
+      );
+    }
+    throw e;
+  }
+  // Deleting what is already gone changes nothing, so a server error can retry.
+  await withGoogleRetry(
+    () =>
+      client.licenseAssignments.delete(
+        { productId, skuId, userId: user },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { user, skuName: held.skuName || skuId };
+}
+
+/** The most accounts one directory page may hold (Google's own limit). */
+export const DIRECTORY_MAX_PAGE = 500;
+
+/**
+ * One page of the directory, with the facts about each account that the
+ * audits reason from: whether it is suspended or archived, its admin roles,
+ * its 2-Step Verification state and when it was last signed in to.
+ *
+ * Read-only. Suspended and archived accounts are included; callers decide
+ * what to make of them.
+ */
+export async function listDirectoryAccounts(
+  tenant: Tenant | null,
+  opts: { pageToken?: string; pageSize?: number; signal?: AbortSignal } = {}
+): Promise<{ accounts: DirectoryAccount[]; nextPageToken: string | null }> {
+  const { client } = getAdminClient(tenant);
+  const pageSize = Math.min(DIRECTORY_MAX_PAGE, Math.max(1, opts.pageSize ?? DIRECTORY_MAX_PAGE));
+  const listed = await withGoogleRetry(
+    () =>
+      client.users.list(
+        {
+          customer: "my_customer",
+          maxResults: pageSize,
+          pageToken: opts.pageToken,
+          orderBy: "email",
+          projection: "basic",
+          fields:
+            "nextPageToken, users(primaryEmail, name/fullName, orgUnitPath, " +
+            "isAdmin, isDelegatedAdmin, suspended, archived, isEnrolledIn2Sv, " +
+            "isEnforcedIn2Sv, lastLoginTime, creationTime, isMailboxSetup)",
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+      ),
+    { retryServerErrors: true, signal: opts.signal }
+  );
+
+  const accounts: DirectoryAccount[] = (listed.data.users || []).map((u) => ({
+    primaryEmail: (u.primaryEmail || "").toLowerCase(),
+    fullName: u.name?.fullName || "",
+    orgUnitPath: u.orgUnitPath || "/",
+    isAdmin: u.isAdmin || false,
+    isDelegatedAdmin: u.isDelegatedAdmin || false,
+    suspended: u.suspended || false,
+    archived: u.archived || false,
+    enrolledIn2Sv: u.isEnrolledIn2Sv || false,
+    enforcedIn2Sv: u.isEnforcedIn2Sv || false,
+    lastLoginTime: u.lastLoginTime || null,
+    creationTime: u.creationTime || null,
+    // Absent means Google did not say; only an explicit false skips the mailbox.
+    mailboxSetup: u.isMailboxSetup !== false,
+  }));
+  return { accounts, nextPageToken: listed.data.nextPageToken || null };
+}
+
 /**
  * One page of the tenant-wide Security Check.
  *
@@ -814,40 +1323,11 @@ export async function scanSecurityPage(
   const now = opts.now ?? Date.now();
   const { client } = getAdminClient(tenant);
 
-  const listed = await withGoogleRetry(
-    () =>
-      client.users.list(
-        {
-          customer: "my_customer",
-          maxResults: pageSize,
-          pageToken: opts.pageToken,
-          orderBy: "email",
-          projection: "basic",
-          fields:
-            "nextPageToken, users(primaryEmail, name/fullName, orgUnitPath, " +
-            "isAdmin, isDelegatedAdmin, suspended, archived, isEnrolledIn2Sv, " +
-            "isEnforcedIn2Sv, lastLoginTime, creationTime, isMailboxSetup)",
-        },
-        { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
-      ),
-    { retryServerErrors: true, signal: opts.signal }
-  );
-
-  const accounts: DirectoryAccount[] = (listed.data.users || []).map((u) => ({
-    primaryEmail: (u.primaryEmail || "").toLowerCase(),
-    fullName: u.name?.fullName || "",
-    orgUnitPath: u.orgUnitPath || "/",
-    isAdmin: u.isAdmin || false,
-    isDelegatedAdmin: u.isDelegatedAdmin || false,
-    suspended: u.suspended || false,
-    archived: u.archived || false,
-    enrolledIn2Sv: u.isEnrolledIn2Sv || false,
-    enforcedIn2Sv: u.isEnforcedIn2Sv || false,
-    lastLoginTime: u.lastLoginTime || null,
-    creationTime: u.creationTime || null,
-    // Absent means Google did not say; only an explicit false skips the mailbox.
-    mailboxSetup: u.isMailboxSetup !== false,
-  }));
+  const { accounts, nextPageToken } = await listDirectoryAccounts(tenant, {
+    pageToken: opts.pageToken,
+    pageSize,
+    signal: opts.signal,
+  });
   const active = accounts.filter(
     (a) => a.primaryEmail && isActiveAccount(a)
   );
@@ -867,7 +1347,7 @@ export async function scanSecurityPage(
     appsChecked: 0,
     apps: [],
     appErrors: [],
-    nextPageToken: listed.data.nextPageToken || null,
+    nextPageToken,
   };
 
   // The directory checks need nothing beyond the listing.
@@ -1005,6 +1485,274 @@ export async function scanSecurityPage(
 }
 
 /**
+ * Turn off a mailbox's auto-forwarding.
+ *
+ * Reads the setting first and does nothing if forwarding is already off, or if
+ * it now points somewhere other than `expectedTarget`: the operator confirmed
+ * a specific forward they saw in a scan, and a mailbox that has changed since
+ * deserves a fresh look rather than a blind write.
+ *
+ * Writing the forwarding setting needs the sharing scope; the basic scope the
+ * scan reads with can't.
+ */
+export async function disableAutoForwarding(
+  tenant: Tenant | null,
+  userEmail: string,
+  expectedTarget: string
+): Promise<{ changed: boolean; previousTarget: string | null }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  const gmail = buildGmailClient(tenant, userEmail, [
+    "https://www.googleapis.com/auth/gmail.settings.sharing",
+  ]);
+  const current = await withGoogleRetry(
+    () =>
+      gmail.users.settings.getAutoForwarding(
+        { userId: "me" },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  const target = (current.data.emailAddress || "").trim().toLowerCase();
+  if (!current.data.enabled) return { changed: false, previousTarget: null };
+  if (target !== expectedTarget.trim().toLowerCase()) {
+    throw new SecurityFixStaleError(
+      `This mailbox now forwards to ${target || "a different address"}, not ` +
+        `${expectedTarget}. Run the check again before changing it.`
+    );
+  }
+  // Setting the forwarding state is idempotent, so a 5xx blip can retry.
+  await withGoogleRetry(
+    () =>
+      gmail.users.settings.updateAutoForwarding(
+        { userId: "me", requestBody: { enabled: false } },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { changed: true, previousTarget: target };
+}
+
+/**
+ * Delete one Gmail filter that forwards mail to `expectedTarget`.
+ *
+ * The filter is fetched first and deleted only if it still forwards there. A
+ * filter id names exactly one filter (editing one replaces it under a new id),
+ * so this is a guard against acting on a stale or mistaken id, never a way to
+ * delete some other filter. One that is already gone counts as done.
+ */
+export async function deleteForwardingFilter(
+  tenant: Tenant | null,
+  userEmail: string,
+  filterId: string,
+  expectedTarget: string
+): Promise<{ changed: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(filterId)) {
+    throw new Error("filterId is malformed");
+  }
+  const gmail = buildGmailClient(tenant, userEmail, [
+    ...GMAIL_SETTINGS_READ_SCOPES,
+  ]);
+  let forward: string;
+  try {
+    const found = await withGoogleRetry(
+      () =>
+        gmail.users.settings.filters.get(
+          { userId: "me", id: filterId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+    forward = (found.data.action?.forward || "").trim().toLowerCase();
+  } catch (e) {
+    if (isNotFoundError(e)) return { changed: false };
+    throw e;
+  }
+  if (forward !== expectedTarget.trim().toLowerCase()) {
+    throw new SecurityFixStaleError(
+      "That filter no longer forwards to " +
+        `${expectedTarget}. Run the check again before changing it.`
+    );
+  }
+  try {
+    await withGoogleRetry(
+      () =>
+        gmail.users.settings.filters.delete(
+          { userId: "me", id: filterId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+  } catch (e) {
+    if (isNotFoundError(e)) return { changed: false };
+    throw e;
+  }
+  return { changed: true };
+}
+
+/**
+ * Revoke one app's access for one account. An app the account no longer has
+ * connected counts as done. The person can connect the app again unless it is
+ * blocked in the Admin console; this removes the access it holds today.
+ */
+export async function revokeAppForUser(
+  tenant: Tenant | null,
+  userEmail: string,
+  clientId: string
+): Promise<{ changed: boolean }> {
+  if (!isValidEmail(userEmail)) {
+    throw new Error("userEmail must be a valid email address");
+  }
+  if (!clientId || clientId.length > 300 || /[\s/?#]/.test(clientId)) {
+    throw new Error("clientId is malformed");
+  }
+  const { client } = getAdminClient(tenant);
+  try {
+    await withGoogleRetry(
+      () =>
+        client.tokens.delete(
+          { userKey: userEmail, clientId },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+  } catch (e) {
+    if (isNotFoundError(e)) return { changed: false };
+    throw e;
+  }
+  return { changed: true };
+}
+
+/**
+ * A Security Check fix was refused because what it was about to change is no
+ * longer what the operator confirmed. Not a Google failure and not a bad
+ * request: the answer is to scan again.
+ */
+export class SecurityFixStaleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecurityFixStaleError";
+  }
+}
+
+/**
+ * The admin log's names for a domain-wide delegation grant and its removal
+ * (Admin console: Security, API controls, Manage Domain Wide Delegation).
+ */
+const DELEGATION_EVENTS = [
+  ["AUTHORIZE_API_CLIENT_ACCESS", "authorize"],
+  ["REMOVE_API_CLIENT_ACCESS", "remove"],
+] as const;
+
+// Far more than any tenant changes delegation in six months. Past this the
+// caller is told the list is cut short rather than waiting on an endless log.
+const DELEGATION_MAX_PAGES = 5;
+const DELEGATION_PAGE_SIZE = 1000;
+
+/**
+ * The client id of the service account this tenant runs as, or null when the
+ * key file doesn't carry one. It is the id a domain-wide delegation entry is
+ * filed under, which is how the Security Check recognises its own entry.
+ */
+export function serviceAccountClientId(tenant: Tenant | null): string | null {
+  const credFile =
+    tenant?.credentialsFile ||
+    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
+  if (!credFile) return null;
+  try {
+    const id = loadCredentials(credFile).client_id;
+    return typeof id === "string" && id.trim() ? id.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every change to domain-wide delegation the admin log still holds: each time
+ * a client was authorised (with which scopes, by whom) and each removal.
+ *
+ * Google gives an app no way to read the delegation list itself; that lives
+ * only in the Admin console. The log is the nearest thing, and it is a history,
+ * not a snapshot: a client authorised before the log's reach (about six
+ * months) and never touched since is simply absent. Callers must say so
+ * rather than present the result as the full list.
+ *
+ * Read-only, as the admin, with the reports scope alone.
+ */
+export async function listDelegationChanges(
+  tenant: Tenant | null,
+  opts: { now?: number; signal?: AbortSignal } = {}
+): Promise<{ events: DelegationEvent[]; truncated: boolean }> {
+  const { client } = getReportsClient(tenant);
+  const startTime = new Date(
+    (opts.now ?? Date.now()) - DELEGATION_WINDOW_DAYS * 86_400_000
+  ).toISOString();
+
+  const events: DelegationEvent[] = [];
+  let truncated = false;
+
+  for (const [eventName, kind] of DELEGATION_EVENTS) {
+    let pageToken: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page >= DELEGATION_MAX_PAGES) {
+        truncated = true;
+        break;
+      }
+      const res = await withGoogleRetry(
+        () =>
+          client.activities.list(
+            {
+              userKey: "all",
+              applicationName: "admin",
+              eventName,
+              startTime,
+              maxResults: DELEGATION_PAGE_SIZE,
+              pageToken,
+            },
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+          ),
+        { retryServerErrors: true, signal: opts.signal }
+      );
+
+      for (const item of res.data.items || []) {
+        const time = item.id?.time || "";
+        const actor = item.actor?.email || item.actor?.callerType || "(unknown)";
+        for (const ev of item.events || []) {
+          // The filter is Google's; this is ours, in case an item carries
+          // other events alongside the one that matched.
+          if (ev.name !== eventName) continue;
+          let clientId = "";
+          let scopes: string[] = [];
+          for (const p of ev.parameters || []) {
+            if (p.name === "API_CLIENT_NAME") clientId = (p.value || "").trim();
+            if (p.name === "API_SCOPES") {
+              scopes = parseScopeList(p.multiValue ?? p.value);
+            }
+          }
+          if (!clientId || !time) continue;
+          events.push({
+            time,
+            actor,
+            kind,
+            clientId,
+            scopes: kind === "authorize" ? scopes : [],
+          });
+        }
+      }
+
+      pageToken = res.data.nextPageToken || undefined;
+      if (!pageToken) break;
+    }
+  }
+
+  return { events, truncated };
+}
+
+/**
  * Change a user's primary domain. (Preflight + read-after-write — see the
  * domain-change route handler for the full safety story.)
  */
@@ -1052,6 +1800,11 @@ export async function changePrimaryDomain(
   }
   if (!targetDomain.verified) {
     throw new Error(`Domain "${newDomain}" is not verified — refusing to change primary email to an unverified domain`);
+  }
+  if (targetDomain.isAlias) {
+    throw new Error(
+      `Domain "${newDomain}" is a domain alias. Every user already has an address there, but a primary email can only be on a full domain of the tenant.`
+    );
   }
 
   // `userKey` resolves aliases to the same account, so the string compare above
@@ -1141,6 +1894,207 @@ export async function changePrimaryDomain(
 // ---------------------------------------------------------------------------
 // Offboarding primitives
 // ---------------------------------------------------------------------------
+
+// The characters a temporary password is drawn from. Look-alikes (0/O, 1/l/I)
+// are left out because a temporary password is read off a screen and typed,
+// or read out over the phone.
+const TEMP_PASSWORD_ALPHABET =
+  "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+const TEMP_PASSWORD_SYMBOLS = "-_.!?";
+export const TEMP_PASSWORD_LENGTH = 16;
+
+/**
+ * A temporary password: long, random, and typeable. Always contains an upper
+ * and a lower case letter, a digit and a symbol, so it passes any complexity
+ * rule a tenant has set. It is meant to be used once: every account given one
+ * is also made to choose its own at the next sign-in.
+ */
+export function generateTemporaryPassword(
+  randomInt: (max: number) => number = (max) => randomIntBelow(max)
+): string {
+  const pick = (chars: string) => chars[randomInt(chars.length)];
+  const upper = TEMP_PASSWORD_ALPHABET.slice(0, 24);
+  const lower = TEMP_PASSWORD_ALPHABET.slice(24, 49);
+  const digits = TEMP_PASSWORD_ALPHABET.slice(49);
+  const chars = [pick(upper), pick(lower), pick(digits), pick(TEMP_PASSWORD_SYMBOLS)];
+  while (chars.length < TEMP_PASSWORD_LENGTH) chars.push(pick(TEMP_PASSWORD_ALPHABET));
+  // Shuffle, so the guaranteed characters aren't always in the same places.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+/** A uniform random integer in [0, max), from the system's secure source. */
+function randomIntBelow(max: number): number {
+  const limit = Math.floor(0x100000000 / max) * max;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return buf[0] % max;
+  }
+}
+
+export interface NewUserInput {
+  givenName: string;
+  familyName: string;
+  primaryEmail: string;
+  /** Organisational unit path. Defaults to the root, "/". */
+  orgUnitPath?: string;
+}
+
+const NAME_MAX_CHARS = 60;
+
+function cleanName(value: string, field: string): string {
+  const name = String(value ?? "").trim();
+  // Control characters have no business in a name and can hide text.
+  if (!name || name.length > NAME_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new ValidationError(`${field} must be between 1 and ${NAME_MAX_CHARS} characters`);
+  }
+  return name;
+}
+
+function cleanOrgUnitPath(value: string | undefined): string {
+  const path = String(value ?? "/").trim() || "/";
+  if (!path.startsWith("/") || path.length > 300 || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new ValidationError('The organisational unit must start with "/", like /Sales or /Sales/EMEA');
+  }
+  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+}
+
+/**
+ * Create a user account with a temporary password that must be changed at the
+ * first sign-in.
+ *
+ * Checked before anything is created: the address must be on one of the
+ * tenant's own verified domains (and not a domain alias, where primary
+ * addresses can't live), and must not already belong to someone. Creation is
+ * never retried on a server error: Google may have created the account before
+ * the error, and a second attempt would fail confusingly or, worse, be
+ * mistaken for the first.
+ *
+ * The password is returned to the caller and nowhere else. It is not logged
+ * and not stored.
+ */
+export async function createUser(
+  tenant: Tenant | null,
+  input: NewUserInput
+): Promise<{ primaryEmail: string; orgUnitPath: string; temporaryPassword: string }> {
+  const primaryEmail = String(input.primaryEmail ?? "").trim().toLowerCase();
+  if (!isValidEmail(primaryEmail)) {
+    throw new ValidationError("primaryEmail must be a valid email address");
+  }
+  const givenName = cleanName(input.givenName, "First name");
+  const familyName = cleanName(input.familyName, "Last name");
+  const orgUnitPath = cleanOrgUnitPath(input.orgUnitPath);
+
+  const domain = (await listDomains(tenant)).find(
+    (d) => d.domainName === emailDomain(primaryEmail)
+  );
+  if (!domain || !domain.verified) {
+    throw new ValidationError(
+      `${emailDomain(primaryEmail)} is not a verified domain of this tenant`
+    );
+  }
+  if (domain.isAlias) {
+    throw new ValidationError(
+      `${domain.domainName} is a domain alias. Create the account on the domain it mirrors; the alias address comes with it.`
+    );
+  }
+  if (await userExists(tenant, primaryEmail)) {
+    throw new UserAlreadyExistsError(`${primaryEmail} already belongs to an account`);
+  }
+
+  const temporaryPassword = generateTemporaryPassword();
+  const { client } = getAdminClient(tenant);
+  await withGoogleRetry(
+    () =>
+      client.users.insert(
+        {
+          requestBody: {
+            primaryEmail,
+            name: { givenName, familyName },
+            password: temporaryPassword,
+            changePasswordAtNextLogin: true,
+            orgUnitPath,
+          },
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: false }
+  );
+  return { primaryEmail, orgUnitPath, temporaryPassword };
+}
+
+/**
+ * An address that reaches no account. Said in a sentence, because the people
+ * using this are not going to know what "Resource Not Found: userKey" means.
+ */
+export class NoSuchAccountError extends Error {
+  constructor(email: string) {
+    super(`There is no account with the address ${email}.`);
+    this.name = "NoSuchAccountError";
+  }
+}
+
+/** The address a new account was to be created with is already taken. */
+export class UserAlreadyExistsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UserAlreadyExistsError";
+  }
+}
+
+/**
+ * Give an account a new temporary password that must be changed at the next
+ * sign-in. Sessions that are already signed in stay signed in: a new password
+ * alone does not end them (signOutAllSessions does).
+ *
+ * The password is returned to the caller and nowhere else.
+ */
+export async function resetUserPassword(
+  tenant: Tenant | null,
+  userEmail: string
+): Promise<{ primaryEmail: string; temporaryPassword: string }> {
+  if (!isValidEmail(userEmail)) {
+    throw new ValidationError("userEmail must be a valid email address");
+  }
+  // Resolve first: the key may be an alias, and the caller should be told
+  // which account was actually changed.
+  const target = await getUser(tenant, userEmail).catch((e) => {
+    throw isNotFoundError(e) ? new NoSuchAccountError(userEmail.toLowerCase()) : e;
+  });
+  const primaryEmail = target.primaryEmail.toLowerCase();
+  // The account Open Admin acts as. If its temporary password were lost (a
+  // closed tab is enough) and it is the only super admin, nobody could get
+  // back into the Admin console. That one is changed by its owner, at Google.
+  const { client, impersonatedAdmin } = getAdminClient(tenant);
+  if (primaryEmail === impersonatedAdmin || userEmail.toLowerCase() === impersonatedAdmin) {
+    throw new ValidationError(
+      `${primaryEmail} is the admin account Open Admin acts as. Change its password from that account's own Google settings.`
+    );
+  }
+  if (target.suspended) {
+    throw new ValidationError(
+      `${primaryEmail} is suspended. A new password would not let them sign in; re-enable the account first.`
+    );
+  }
+  const temporaryPassword = generateTemporaryPassword();
+  // Setting the same password again changes nothing, so a server error can retry.
+  await withGoogleRetry(
+    () =>
+      client.users.update(
+        {
+          userKey: primaryEmail,
+          requestBody: { password: temporaryPassword, changePasswordAtNextLogin: true },
+        },
+        { timeout: ADMIN_API_TIMEOUT_MS }
+      ),
+    { retryServerErrors: true }
+  );
+  return { primaryEmail, temporaryPassword };
+}
 
 /** Suspend a user. Refuses to suspend the impersonated admin themselves. */
 export async function suspendUser(
@@ -2060,6 +3014,376 @@ export async function listExternallySharedFiles(
     nextPageToken: pageToken ?? null,
     files: matches,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Shared drives
+// ---------------------------------------------------------------------------
+
+/**
+ * A shared drive, and what the audit could learn about it without opening it.
+ *
+ * Files in a shared drive belong to the drive, not to a person, so the
+ * per-user scan above ('me' in owners) never sees them. They are also where an
+ * organisation keeps what it shares most widely.
+ */
+export interface SharedDriveSummary {
+  id: string;
+  name: string;
+  /** People, groups and domains outside the organisation that are members. */
+  externalMembers: ExternalSharedFile["external"];
+  memberCount: number;
+  /**
+   * Internal people who are members, best-placed first. The drive's files can
+   * only be listed by a member, so the file scan runs as one of these; empty
+   * when the drive has none (its members are all groups, or all external).
+   */
+  scanCandidates: string[];
+  /** Set when the drive's members could not be read. */
+  error: string | null;
+}
+
+export const SHARED_DRIVES_DEFAULT_PAGE = 20;
+export const SHARED_DRIVES_MAX_PAGE = 50;
+const SHARED_DRIVE_CONCURRENCY = 4;
+const SHARED_DRIVE_MAX_CANDIDATES = 3;
+const SHARED_DRIVE_ID_RE = /^[A-Za-z0-9_-]{5,100}$/;
+
+// Which member the file listing should run as: someone who can see the whole
+// drive, with the most senior first because they are the least likely to have
+// had individual folders hidden from them.
+const MEMBER_ROLE_RANK: Record<string, number> = {
+  organizer: 5,
+  fileOrganizer: 4,
+  writer: 3,
+  commenter: 2,
+  reader: 1,
+};
+
+/**
+ * One page of the tenant's shared drives, each with its external members.
+ *
+ * Runs as the admin with domain admin access, which is what lets it see every
+ * drive and its membership without being a member. That takes the full Drive
+ * scope (the narrower metadata scope does not cover the drives collection);
+ * nothing here writes.
+ *
+ * A drive whose members can't be read is returned with `error` set rather
+ * than failing the page.
+ */
+export async function listSharedDrives(
+  tenant: Tenant | null,
+  opts: { pageToken?: string; pageSize?: number; signal?: AbortSignal } = {}
+): Promise<{ drives: SharedDriveSummary[]; nextPageToken: string | null }> {
+  const verifiedDomains = await internalDomainsOrThrow(tenant, "list shared drives");
+  const drive = getDriveClientAsAdmin(tenant);
+  const pageSize = Math.min(
+    SHARED_DRIVES_MAX_PAGE,
+    Math.max(1, opts.pageSize ?? SHARED_DRIVES_DEFAULT_PAGE)
+  );
+  const call = { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal };
+  const retry = { retryServerErrors: true, signal: opts.signal };
+
+  const listed = await withGoogleRetry(
+    () =>
+      drive.drives.list(
+        {
+          useDomainAdminAccess: true,
+          pageSize,
+          pageToken: opts.pageToken,
+          fields: "nextPageToken, drives(id, name)",
+        },
+        call
+      ),
+    retry
+  );
+  const found = (listed.data.drives || []).filter((d) => d.id);
+
+  const summarise = async (d: drive_v3.Schema$Drive): Promise<SharedDriveSummary> => {
+    const summary: SharedDriveSummary = {
+      id: d.id || "",
+      name: d.name || "(unnamed drive)",
+      externalMembers: [],
+      memberCount: 0,
+      scanCandidates: [],
+      error: null,
+    };
+    try {
+      const members: drive_v3.Schema$Permission[] = [];
+      let pageToken: string | undefined;
+      do {
+        const r = await withGoogleRetry(
+          () =>
+            drive.permissions.list(
+              {
+                fileId: summary.id,
+                supportsAllDrives: true,
+                useDomainAdminAccess: true,
+                pageSize: 100,
+                pageToken,
+                fields:
+                  "nextPageToken, permissions(type, role, emailAddress, domain, deleted, allowFileDiscovery)",
+              },
+              call
+            ),
+          retry
+        );
+        members.push(...(r.data.permissions || []));
+        pageToken = r.data.nextPageToken ?? undefined;
+      } while (pageToken);
+
+      summary.memberCount = members.length;
+      const candidates: Array<{ email: string; rank: number }> = [];
+      for (const m of members) {
+        const external = classifyPermission(m, verifiedDomains);
+        if (external) {
+          summary.externalMembers.push(external);
+        } else if (m.type === "user" && m.emailAddress && !m.deleted) {
+          candidates.push({
+            email: m.emailAddress.toLowerCase(),
+            rank: MEMBER_ROLE_RANK[m.role || ""] ?? 0,
+          });
+        }
+      }
+      summary.scanCandidates = candidates
+        .sort((a, b) => b.rank - a.rank || a.email.localeCompare(b.email))
+        .slice(0, SHARED_DRIVE_MAX_CANDIDATES)
+        .map((c) => c.email);
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      summary.error = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+    }
+    return summary;
+  };
+
+  const drives: SharedDriveSummary[] = new Array(found.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < found.length) {
+      if (opts.signal?.aborted) throw new RequestAbortedError();
+      const i = next++;
+      drives[i] = await summarise(found[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SHARED_DRIVE_CONCURRENCY, found.length) }, worker)
+  );
+
+  return { drives, nextPageToken: listed.data.nextPageToken || null };
+}
+
+/** A file-scan result that also says which member it was read as. */
+export interface SharedDriveFilesResult extends SharingAuditResult {
+  driveId: string;
+}
+
+/**
+ * Scan one shared drive for files shared outside the organisation on top of
+ * the drive's own membership.
+ *
+ * Only a member can list a shared drive's files, so this runs as one of
+ * `asUsers` (the candidates from listSharedDrives), trying each in turn when
+ * starting and failing only if none can read it. A continuation must name the
+ * single user the first call reported in `user`: Drive's page tokens belong to
+ * whoever was issued them.
+ *
+ * Drive does not return permissions inline for shared-drive items. It does
+ * say which files have permissions of their own (`hasAugmentedPermissions`),
+ * so only those are looked up, and of their permissions only the ones set on
+ * the file itself count: what a file inherits from the drive is the drive's
+ * membership, already reported once for the drive.
+ *
+ * Same caps and resume contract as the per-user scan. Metadata only.
+ */
+export async function listExternallySharedDriveFiles(
+  tenant: Tenant | null,
+  opts: {
+    driveId: string;
+    asUsers: string[];
+    pageToken?: string;
+    signal?: AbortSignal;
+  }
+): Promise<SharedDriveFilesResult> {
+  if (!SHARED_DRIVE_ID_RE.test(opts.driveId)) {
+    throw new Error("driveId is malformed");
+  }
+  const verifiedDomains = await internalDomainsOrThrow(tenant, "scan a shared drive");
+  const asUsers = [...new Set(opts.asUsers.map((u) => u.trim().toLowerCase()))].filter(Boolean);
+  if (asUsers.length === 0) {
+    throw new Error("No internal member to read this shared drive as");
+  }
+  for (const user of asUsers) {
+    if (!isValidEmail(user)) throw new Error("asUsers must be valid email addresses");
+    // Never impersonate someone outside the organisation, whatever a caller sends.
+    if (!verifiedDomains.has(emailDomain(user))) {
+      throw new Error(`${user} is not in one of this tenant's domains`);
+    }
+  }
+  if (opts.pageToken && asUsers.length !== 1) {
+    throw new Error("A continued scan must name the one user it started as");
+  }
+
+  const call = { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal };
+  const retry = { retryServerErrors: true, signal: opts.signal };
+  const listPage = (drive: drive_v3.Drive, pageToken: string | undefined, pageSize: number) =>
+    withGoogleRetry(
+      () =>
+        drive.files.list(
+          {
+            corpora: "drive",
+            driveId: opts.driveId,
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+            q: "trashed = false",
+            pageSize,
+            pageToken,
+            fields:
+              "nextPageToken, files(id, name, mimeType, webViewLink, hasAugmentedPermissions)",
+          },
+          call
+        ),
+      retry
+    );
+
+  // Find a member who can actually read the drive. A suspended account, or one
+  // removed since the members were listed, fails here and the next is tried.
+  let drive: drive_v3.Drive | null = null;
+  let scannedAs = "";
+  let firstPage: { data: drive_v3.Schema$FileList } | null = null;
+  let lastError: unknown = null;
+  for (const user of asUsers) {
+    try {
+      const candidate = getDriveClient(tenant, user);
+      firstPage = await listPage(candidate, opts.pageToken, 100);
+      drive = candidate;
+      scannedAs = user;
+      break;
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      lastError = e;
+    }
+  }
+  if (!drive || !firstPage) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("No member could read this shared drive");
+  }
+
+  const matches: ExternalSharedFile[] = [];
+  let scanned = 0;
+  let pagesFetched = 1;
+  let page: { data: drive_v3.Schema$FileList } = firstPage;
+  let pageToken: string | undefined;
+  const SHARED_DRIVE_MAX_PAGES = 50;
+
+  const ownExternalPermissions = async (
+    fileId: string
+  ): Promise<ExternalSharedFile["external"]> => {
+    const out: ExternalSharedFile["external"] = [];
+    let permPageToken: string | undefined;
+    do {
+      const r = await withGoogleRetry(
+        () =>
+          drive.permissions.list(
+            {
+              fileId,
+              supportsAllDrives: true,
+              pageSize: 100,
+              pageToken: permPageToken,
+              fields:
+                "nextPageToken, permissions(type, role, emailAddress, domain, allowFileDiscovery, permissionDetails(inherited))",
+            },
+            call
+          ),
+        retry
+      );
+      for (const p of r.data.permissions || []) {
+        // Set on this file (or a folder below the drive), not handed down
+        // from the drive's membership. No details at all means Drive did not
+        // say, and an unexplained external permission is reported.
+        const details = p.permissionDetails || [];
+        const ownGrant = details.length === 0 || details.some((d) => d.inherited !== true);
+        if (!ownGrant) continue;
+        const external = classifyPermission(p, verifiedDomains);
+        if (external) out.push(external);
+      }
+      permPageToken = r.data.nextPageToken ?? undefined;
+    } while (permPageToken);
+    return out;
+  };
+
+  for (;;) {
+    const files = page.data.files || [];
+    scanned += files.length;
+    const augmented = files.filter((f) => f.id && f.hasAugmentedPermissions);
+    let next = 0;
+    const worker = async () => {
+      while (next < augmented.length) {
+        if (opts.signal?.aborted) throw new RequestAbortedError();
+        const f = augmented[next++];
+        let externals: ExternalSharedFile["external"];
+        try {
+          externals = await ownExternalPermissions(f.id as string);
+        } catch (e) {
+          if (isAbortError(e)) throw e;
+          // One unreadable file must not hide the rest of the drive.
+          continue;
+        }
+        if (externals.length > 0) {
+          matches.push({
+            id: f.id || "",
+            name: f.name || "(untitled)",
+            webViewLink: f.webViewLink || null,
+            mimeType: f.mimeType || "",
+            ownedByMe: false,
+            externalCount: externals.length,
+            external: externals,
+          });
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SHARED_DRIVE_CONCURRENCY, augmented.length) }, worker)
+    );
+
+    pageToken = page.data.nextPageToken ?? undefined;
+    if (!pageToken) break;
+    if (scanned >= SHARING_AUDIT_FILE_CAP || pagesFetched >= SHARED_DRIVE_MAX_PAGES) break;
+    pagesFetched++;
+    page = await listPage(drive, pageToken, Math.min(100, SHARING_AUDIT_FILE_CAP - scanned));
+  }
+
+  matches.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return {
+    driveId: opts.driveId,
+    user: scannedAs,
+    scannedFiles: scanned,
+    truncated: !!pageToken,
+    nextPageToken: pageToken ?? null,
+    files: matches,
+  };
+}
+
+/**
+ * The tenant's verified domains (aliases included), or an error rather than
+ * an empty set: with nothing to compare against, every collaborator would be
+ * classified as external.
+ */
+async function internalDomainsOrThrow(
+  tenant: Tenant | null,
+  doing: string
+): Promise<Set<string>> {
+  const verified = new Set(
+    (await listDomains(tenant))
+      .filter((d) => d.verified)
+      .map((d) => d.domainName.toLowerCase())
+  );
+  if (verified.size === 0) {
+    throw new Error(
+      `No verified domains resolved for this tenant — refusing to ${doing}, as every collaborator would be misclassified as external. Check the tenant's domain configuration and try again.`
+    );
+  }
+  return verified;
 }
 
 /**

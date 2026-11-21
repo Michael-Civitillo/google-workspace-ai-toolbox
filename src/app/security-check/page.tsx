@@ -9,10 +9,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert, type Feedback } from "@/components/feedback-alert";
+import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -24,31 +25,58 @@ import {
   Forward,
   KeyRound,
   Loader2,
+  MailCheck,
   Plug,
   ShieldAlert,
   ShieldCheck,
+  Waypoints,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 import {
   compareApps,
+  delegationNeedsReview,
+  emailAuthKeys,
+  findingKey,
   INACTIVE_DEFAULT_DAYS,
   INACTIVE_THRESHOLDS,
   isInactiveAt,
   mergeAppGrants,
+  REVOKE_APP_BATCH,
+  SNAPSHOT_MAX_KEYS,
+  snapshotKeys,
   summariseAccess,
   type AccessLevel,
   type AppGrant,
+  type CheckName,
+  type DelegatedClient,
+  type DelegationReport,
   type ForwardingFinding,
   type InactiveFinding,
   type SecurityCheckPage,
   type TwoStepFinding,
   type UnreadAccount,
 } from "@/lib/security-check";
+import type { OwnKeyResult } from "@/lib/preflight";
+import {
+  emailAuthIncomplete,
+  emailAuthNeedsReview,
+  type DomainEmailAuth,
+  type EmailAuthReport,
+  type RecordCheck,
+  type Verdict,
+} from "@/lib/email-auth";
 
-type CheckId = "twoStep" | "inactive" | "forwarding" | "apps";
-type Status = "idle" | "running" | "good" | "warning" | "critical" | "incomplete";
+type CheckId = CheckName;
+type Status =
+  | "idle"
+  | "running"
+  | "good"
+  | "warning"
+  | "critical"
+  | "incomplete"
+  | "quiet";
 
 interface Totals {
   accounts: number;
@@ -76,6 +104,15 @@ const NO_TOTALS: Totals = {
   appErrors: 0,
 };
 
+/** A finding the operator has chosen to fix, awaiting their confirmation. */
+type Fix =
+  | { type: "forwarding"; finding: ForwardingFinding }
+  | { type: "app-user"; app: AppGrant; user: string }
+  | { type: "app-all"; app: AppGrant };
+
+/** People listed individually (each with its own Revoke) under an app. */
+const APP_USERS_SHOWN = 50;
+
 /** Rows shown per list until the operator asks for the rest. */
 const ROW_LIMIT = 100;
 /** Per-account failure details kept for display; the counts are exact. */
@@ -91,6 +128,24 @@ const STATUS: Record<
   warning: { label: "Worth a look", icon: AlertTriangle, className: "text-warning-fg" },
   critical: { label: "Needs attention", icon: ShieldAlert, className: "text-danger-fg" },
   incomplete: { label: "Incomplete", icon: CircleDashed, className: "text-muted-foreground" },
+  // For a check that can only see recent history: nothing to act on, which is
+  // not the same as a clean bill of health.
+  quiet: {
+    label: "Nothing recent to review",
+    icon: CircleDashed,
+    className: "text-muted-foreground",
+  },
+};
+
+const VERDICT: Record<
+  Verdict,
+  { label: string; icon: typeof CheckCircle2; className: string }
+> = {
+  ok: { label: "In place", icon: CheckCircle2, className: "text-success-fg" },
+  warn: { label: "Weak", icon: AlertTriangle, className: "text-warning-fg" },
+  bad: { label: "Missing or broken", icon: ShieldAlert, className: "text-danger-fg" },
+  unknown: { label: "Can't tell", icon: CircleDashed, className: "text-muted-foreground" },
+  error: { label: "Not checked", icon: CircleDashed, className: "text-muted-foreground" },
 };
 
 const ACCESS: Record<
@@ -149,7 +204,9 @@ function toCsv(
   twoStep: TwoStepFinding[],
   inactive: InactiveFinding[],
   forwarding: ForwardingFinding[],
-  apps: AppGrant[]
+  apps: AppGrant[],
+  delegated: DelegatedClient[],
+  domains: DomainEmailAuth[]
 ): string {
   const rows: string[][] = [
     ["check", "account", "name", "administrator", "finding", "target", "detail"],
@@ -201,6 +258,37 @@ function toCsv(
       ]);
     }
   }
+  for (const client of delegated) {
+    rows.push([
+      "Domain-wide delegation",
+      client.lastActor,
+      "",
+      "",
+      `${client.status === "authorized" ? "Delegation granted" : "Delegation removed"}${
+        client.ownApp ? " (Open Admin's own service account)" : ""
+      } on ${client.lastChange}`,
+      client.clientId,
+      client.scopes.join(" "),
+    ]);
+  }
+  for (const d of domains) {
+    for (const [name, check] of [
+      ["SPF", d.spf],
+      ["DKIM", d.dkim],
+      ["DMARC", d.dmarc],
+    ] as Array<[string, RecordCheck]>) {
+      if (check.verdict === "ok") continue;
+      rows.push([
+        "Email authentication",
+        d.domain,
+        "",
+        "",
+        `${name}: ${VERDICT[check.verdict].label}`,
+        check.record ?? "",
+        check.summary,
+      ]);
+    }
+  }
   return rows.map((r) => r.map((c) => `"${csvCell(c)}"`).join(",")).join("\n");
 }
 
@@ -210,6 +298,7 @@ function Tile({
   value,
   note,
   status,
+  fresh = 0,
   selected,
   onSelect,
 }: {
@@ -218,6 +307,8 @@ function Tile({
   value: string;
   note: string;
   status: Status;
+  /** Findings in this check that the previous scan did not have. */
+  fresh?: number;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -234,13 +325,18 @@ function Tile({
         selected ? "border-primary ring-1 ring-primary" : "border-border"
       )}
     >
-      <span className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Icon className="h-4 w-4" />
+      <span className="flex min-h-10 items-start gap-2 text-sm text-muted-foreground xl:min-h-0">
+        <Icon className="mt-0.5 h-4 w-4 shrink-0" />
         {label}
       </span>
-      <span className="text-3xl font-semibold tabular-nums tracking-tight">{value}</span>
+      <span className="flex items-center gap-2">
+        <span className="text-3xl font-semibold tabular-nums tracking-tight">{value}</span>
+        {fresh > 0 && <Badge variant="accent">{fresh.toLocaleString()} new</Badge>}
+      </span>
       <span className="text-xs text-muted-foreground">{note}</span>
-      <span className={cn("flex items-center gap-1.5 text-xs font-medium", s.className)}>
+      <span
+        className={cn("mt-auto flex items-center gap-1.5 text-xs font-medium", s.className)}
+      >
         <StatusIcon className={cn("h-3.5 w-3.5", s.spin && "animate-spin")} />
         {s.label}
       </span>
@@ -261,7 +357,7 @@ function Person({ name, user }: { name: string; user: string }) {
 }
 
 export default function SecurityCheck() {
-  const { id: tenantId } = useCurrentTenant();
+  const { tenant, id: tenantId } = useCurrentTenant();
 
   const [scanning, setScanning] = useState(false);
   const [done, setDone] = useState(false);
@@ -274,15 +370,44 @@ export default function SecurityCheck() {
   const [apps, setApps] = useState<AppGrant[]>([]);
   const [mailboxErrors, setMailboxErrors] = useState<UnreadAccount[]>([]);
   const [appErrors, setAppErrors] = useState<UnreadAccount[]>([]);
+  // Domain-wide delegation is tenant-wide, so it is one request beside the
+  // account scan rather than part of each page of it.
+  const [delegation, setDelegation] = useState<DelegationReport | null>(null);
+  const [delegationError, setDelegationError] = useState<string | null>(null);
+  const [delegationLoading, setDelegationLoading] = useState(false);
+  // Email authentication is tenant-wide too: one request, public DNS.
+  const [emailAuth, setEmailAuth] = useState<EmailAuthReport | null>(null);
+  const [emailAuthError, setEmailAuthError] = useState<string | null>(null);
+  const [emailAuthLoading, setEmailAuthLoading] = useState(false);
+  const [openDomain, setOpenDomain] = useState<string | null>(null);
+  // The direct test of Open Admin's own key, run only when asked for.
+  const [ownKey, setOwnKey] = useState<OwnKeyResult | null>(null);
+  const [ownKeyError, setOwnKeyError] = useState<string | null>(null);
+  const [ownKeyBusy, setOwnKeyBusy] = useState(false);
   const [message, setMessage] = useState<Feedback | null>(null);
 
   const [selected, setSelected] = useState<CheckId>("twoStep");
   const [threshold, setThreshold] = useState<number>(INACTIVE_DEFAULT_DAYS);
   const [showAll, setShowAll] = useState(false);
   const [openApp, setOpenApp] = useState<string | null>(null);
+  const [openClient, setOpenClient] = useState<string | null>(null);
   const [showUnread, setShowUnread] = useState(false);
+  const [fix, setFix] = useState<Fix | null>(null);
+  const [fixBusy, setFixBusy] = useState(false);
+  const [fixError, setFixError] = useState<string | null>(null);
+  // The scan before this one, read when a scan starts: what "new" is measured
+  // against. null means there is nothing to compare with.
+  const [baseline, setBaseline] = useState<{
+    completedAt: string;
+    keys: Set<string>;
+    covered: Set<string>;
+  } | null>(null);
+  const [onlyNew, setOnlyNew] = useState(false);
 
   const cancelRef = useRef(false);
+  // The run whose result has been stored as the next baseline, so a finished
+  // scan is remembered once however often the page re-renders afterwards.
+  const savedRunRef = useRef<AbortController | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
@@ -297,9 +422,25 @@ export default function SecurityCheck() {
     setApps([]);
     setMailboxErrors([]);
     setAppErrors([]);
+    setDelegation(null);
+    setDelegationError(null);
+    setDelegationLoading(false);
+    setEmailAuth(null);
+    setEmailAuthError(null);
+    setEmailAuthLoading(false);
+    setOpenDomain(null);
+    setOwnKey(null);
+    setOwnKeyError(null);
+    setOwnKeyBusy(false);
     setShowAll(false);
     setOpenApp(null);
+    setOpenClient(null);
     setShowUnread(false);
+    setFix(null);
+    setFixBusy(false);
+    setFixError(null);
+    setBaseline(null);
+    setOnlyNew(false);
   };
 
   // Findings from tenant A must never be read as tenant B's: stop any scan in
@@ -331,11 +472,72 @@ export default function SecurityCheck() {
     setTotals(NO_TOTALS);
     setScanning(true);
 
+    // Not awaited: the admin log is read while the accounts are scanned. The
+    // `abortRef.current === ac` checks keep a slow answer from an earlier run
+    // from landing in this one.
+    const current = () =>
+      tenantIdRef.current === pinnedTenantId && abortRef.current === ac;
+    const tenantWide = async <T,>(
+      url: string,
+      onData: (data: T) => void,
+      onError: (error: string) => void,
+      setLoading: (loading: boolean) => void,
+      fallback: string
+    ) => {
+      setLoading(true);
+      try {
+        const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
+        const result = await res.json();
+        if (!current()) return;
+        if (result.success) onData(result.data as T);
+        else onError(result.error || fallback);
+      } catch {
+        if (current() && !ac.signal.aborted) onError("Failed to connect to the API");
+      } finally {
+        if (current()) setLoading(false);
+      }
+    };
+    void tenantWide<DelegationReport>(
+      "/api/admin/security-check/delegation",
+      setDelegation,
+      setDelegationError,
+      setDelegationLoading,
+      "The admin log could not be read"
+    );
+    void tenantWide<EmailAuthReport>(
+      "/api/admin/security-check/email-auth",
+      setEmailAuth,
+      setEmailAuthError,
+      setEmailAuthLoading,
+      "The domains could not be checked"
+    );
+
     const allApps = new Map<string, AppGrant>();
     let pageToken: string | null = null;
     let pages = 0;
 
     try {
+      // What the last finished scan found, so this one can mark what is new.
+      // Local and quick; if it can't be read the scan simply has no markers.
+      try {
+        const res = await tfetch(
+          "/api/admin/security-check/history",
+          { signal: ac.signal },
+          pinnedTenantId
+        );
+        const result = await res.json();
+        if (tenantIdRef.current !== pinnedTenantId) return;
+        if (result.success && result.data) {
+          setBaseline({
+            completedAt: result.data.completedAt,
+            keys: new Set<string>(result.data.keys),
+            covered: new Set<string>(result.data.covered),
+          });
+        }
+      } catch {
+        if (ac.signal.aborted) throw new Error("aborted");
+      }
+
       while (true) {
         const qs = new URLSearchParams();
         if (pageToken) qs.set("pageToken", pageToken);
@@ -441,6 +643,161 @@ export default function SecurityCheck() {
     abortRef.current?.abort();
   };
 
+  const postJson = (url: string, body: unknown) =>
+    tfetch(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      tenantId
+    );
+
+  const openFix = (next: Fix) => {
+    setMessage(null);
+    setFixError(null);
+    setFix(next);
+  };
+
+  const fixForwarding = async (f: ForwardingFinding) => {
+    setFixBusy(true);
+    setFixError(null);
+    try {
+      const res = await postJson("/api/admin/security-check/forwarding", {
+        user: f.user,
+        kind: f.kind,
+        filterId: f.filterId ?? undefined,
+        target: f.target,
+        // The dialog only enables Confirm once this exact address was typed.
+        confirm: f.user,
+      });
+      const result = await res.json();
+      if (!result.success) {
+        // Stay in the dialog: that is where the operator is looking.
+        setFixError(result.error || "The change could not be made");
+        return;
+      }
+      setForwarding((prev) => prev.filter((x) => x !== f));
+      setFix(null);
+      setMessage({
+        type: "success",
+        text: !result.data?.changed
+          ? `${f.user} was already no longer forwarding to ${f.target}`
+          : f.kind === "filter"
+            ? `Deleted the filter that forwarded ${f.user}'s mail to ${f.target}`
+            : `Turned off forwarding from ${f.user} to ${f.target}`,
+      });
+    } catch {
+      setFixError("Failed to connect to the API");
+    } finally {
+      setFixBusy(false);
+    }
+  };
+
+  const revokeApp = async (app: AppGrant, users: string[]) => {
+    if (users.length === 0) {
+      setFix(null);
+      return;
+    }
+    setFixBusy(true);
+    setFixError(null);
+    const single = users.length === 1;
+    const revoked: string[] = [];
+    let firstError: string | null = null;
+    let failed = 0;
+    try {
+      for (let i = 0; i < users.length; i += REVOKE_APP_BATCH) {
+        const batch = users.slice(i, i + REVOKE_APP_BATCH);
+        const res = await postJson("/api/admin/security-check/revoke-app", {
+          clientId: app.clientId,
+          users: batch,
+          batchOf: users.length,
+          confirm: single ? users[0] : "REVOKE",
+        });
+        const result = await res.json();
+        if (!result.success) {
+          failed += users.length - i;
+          firstError ??= result.error || "The request was refused";
+          break;
+        }
+        for (const r of result.data.results as Array<{ user: string; error?: string }>) {
+          if (r.error) {
+            failed++;
+            firstError ??= `${r.user}: ${r.error}`;
+          } else {
+            revoked.push(r.user);
+          }
+        }
+      }
+    } catch {
+      failed += users.length - revoked.length - failed;
+      firstError ??= "Failed to connect to the API";
+    } finally {
+      setFixBusy(false);
+    }
+
+    if (revoked.length > 0) {
+      const gone = new Set(revoked);
+      setApps((prev) =>
+        prev
+          .map((a) =>
+            a.clientId === app.clientId
+              ? { ...a, users: a.users.filter((u) => !gone.has(u)) }
+              : a
+          )
+          .filter((a) => a.users.length > 0)
+      );
+    }
+    const name = app.name || app.clientId;
+    if (failed > 0) {
+      setFixError(
+        `${revoked.length > 0 ? `Revoked for ${plural(revoked.length, "account")}. ` : ""}${plural(failed, "account")} could not be revoked. ${firstError ?? ""}`
+      );
+      return;
+    }
+    setFix(null);
+    setMessage({
+      type: "success",
+      text: single
+        ? `Revoked ${name}'s access to ${users[0]}`
+        : `Revoked ${name}'s access for ${plural(revoked.length, "account")}`,
+    });
+  };
+
+  const testOwnKey = async () => {
+    const pinnedTenantId = tenantId;
+    setOwnKeyBusy(true);
+    setOwnKeyError(null);
+    try {
+      const res = await tfetch(
+        "/api/admin/security-check/own-key",
+        { method: "POST" },
+        pinnedTenantId
+      );
+      const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
+      if (result.success) setOwnKey(result.data as OwnKeyResult);
+      else setOwnKeyError(result.error || "The key could not be tested");
+    } catch {
+      if (tenantIdRef.current === pinnedTenantId) {
+        setOwnKeyError("Failed to connect to the API");
+      }
+    } finally {
+      if (tenantIdRef.current === pinnedTenantId) setOwnKeyBusy(false);
+    }
+  };
+
+  const confirmFix = () => {
+    if (!fix) return;
+    if (fix.type === "forwarding") return fixForwarding(fix.finding);
+    if (fix.type === "app-user") return revokeApp(fix.app, [fix.user]);
+    // Whoever still has it connected now, not when the dialog opened: a retry
+    // after a partial failure must not re-send the accounts already done.
+    const current = apps.find((a) => a.clientId === fix.app.clientId);
+    return revokeApp(fix.app, current?.users ?? []);
+  };
+
   const twoStepSorted = useMemo(
     () =>
       [...twoStep].sort(
@@ -465,10 +822,107 @@ export default function SecurityCheck() {
     [apps]
   );
 
+  const delegatedAll = useMemo(() => delegation?.clients ?? [], [delegation]);
+  const domainsAll = useMemo(() => emailAuth?.domains ?? [], [emailAuth]);
+
+  // Remember a scan that covered the whole tenant as the baseline for the next
+  // one. Waits for the delegation request, which runs beside the account scan.
+  useEffect(() => {
+    if (!done || scanning || stopped !== null || delegationLoading || emailAuthLoading) {
+      return;
+    }
+    const run = abortRef.current;
+    if (!run || savedRunRef.current === run) return;
+    savedRunRef.current = run;
+    const keys = snapshotKeys({
+      twoStep,
+      inactive,
+      forwarding,
+      apps,
+      delegated: delegatedAll,
+      domains: domainsAll,
+    });
+    if (keys.length > SNAPSHOT_MAX_KEYS) return;
+    const covered: CheckName[] = ["twoStep", "inactive", "forwarding", "apps"];
+    if (delegation) covered.push("delegation");
+    // Only a run where every lookup was answered is a baseline: a record
+    // that could not be looked up then must not look new when it can be.
+    if (emailAuth && !domainsAll.some(emailAuthIncomplete)) covered.push("emailAuth");
+    tfetch(
+      "/api/admin/security-check/history",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completedAt: new Date().toISOString(), keys, covered }),
+      },
+      tenantId
+    ).catch(() => {
+      // Losing the baseline costs the next scan its "new" markers, nothing more.
+    });
+  }, [
+    done,
+    scanning,
+    stopped,
+    delegationLoading,
+    delegation,
+    delegatedAll,
+    emailAuthLoading,
+    emailAuth,
+    domainsAll,
+    twoStep,
+    inactive,
+    forwarding,
+    apps,
+    tenantId,
+  ]);
+
+  /** New since the previous scan, for a check that scan actually covered. */
+  const isNew = (check: CheckName, key: string) =>
+    baseline !== null && baseline.covered.has(check) && !baseline.keys.has(key);
+  const newTwoStep = (f: TwoStepFinding) => isNew("twoStep", findingKey.twoStep(f));
+  const newInactive = (f: InactiveFinding) =>
+    isNew("inactive", findingKey.inactive(f, threshold));
+  const newForwarding = (f: ForwardingFinding) =>
+    isNew("forwarding", findingKey.forwarding(f));
+  const newApp = (app: AppGrant) => isNew("apps", findingKey.app(app));
+  const newClient = (client: DelegatedClient) =>
+    isNew("delegation", findingKey.delegation(client));
+  const newDomain = (d: DomainEmailAuth) =>
+    emailAuthKeys(d).some((key) => isNew("emailAuth", key));
+
   const adminsWithoutTwoStep = twoStep.filter((f) => f.admin).length;
   const forwardingMailboxes = new Set(forwarding.map((f) => f.user)).size;
   const hiddenForwards = forwarding.filter((f) => f.hidesOriginal).length;
   const broadApps = appRows.filter((r) => r.access.level === "high").length;
+  const delegationToReview = delegatedAll.filter(delegationNeedsReview).length;
+
+  // The lists as shown: everything, or only what the last scan didn't have.
+  const twoStepList = onlyNew ? twoStepSorted.filter(newTwoStep) : twoStepSorted;
+  const inactiveList = onlyNew ? inactiveShown.filter(newInactive) : inactiveShown;
+  const forwardingList = onlyNew ? forwarding.filter(newForwarding) : forwarding;
+  const appList = onlyNew ? appRows.filter((r) => newApp(r.app)) : appRows;
+  const delegatedClients = onlyNew ? delegatedAll.filter(newClient) : delegatedAll;
+  const domainList = onlyNew ? domainsAll.filter(newDomain) : domainsAll;
+  const domainsToReview = domainsAll.filter(emailAuthNeedsReview).length;
+  const domainsUnchecked = domainsAll.filter(emailAuthIncomplete).length;
+  const domainsBroken = domainsAll.some((d) =>
+    [d.spf, d.dkim, d.dmarc].some((c) => c.verdict === "bad")
+  );
+  const freshCount = {
+    twoStep: twoStepSorted.filter(newTwoStep).length,
+    inactive: inactiveShown.filter(newInactive).length,
+    forwarding: new Set(forwarding.filter(newForwarding).map((f) => f.user)).size,
+    apps: appRows.filter((r) => r.access.level === "high" && newApp(r.app)).length,
+    delegation: delegatedAll.filter((c) => delegationNeedsReview(c) && newClient(c)).length,
+    emailAuth: domainsAll.filter((d) => emailAuthNeedsReview(d) && newDomain(d)).length,
+  };
+  const anythingNew =
+    twoStepSorted.some(newTwoStep) ||
+    inactiveShown.some(newInactive) ||
+    forwarding.some(newForwarding) ||
+    apps.some(newApp) ||
+    delegatedAll.some(newClient) ||
+    domainsAll.some(newDomain);
   const hasResults = totals !== null;
   const partial = stopped !== null;
 
@@ -497,6 +951,32 @@ export default function SecurityCheck() {
       totals?.mailboxErrors ?? 0
     ),
     apps: statusFor(broadApps, "warning", totals?.appErrors ?? 0),
+    // Never "Nothing found": the log only reaches back six months, so an empty
+    // answer is not evidence that no app holds delegation.
+    delegation: !hasResults
+      ? "idle"
+      : delegationLoading
+        ? "running"
+        : !delegation
+          ? "incomplete"
+          : delegationToReview > 0
+            ? "warning"
+            : "quiet",
+    // DNS answers are complete answers, so this check can say "Nothing found",
+    // but only when every lookup for every domain was actually answered.
+    emailAuth: !hasResults
+      ? "idle"
+      : emailAuthLoading
+        ? "running"
+        : !emailAuth
+          ? "incomplete"
+          : domainsToReview > 0
+            ? domainsBroken
+              ? "critical"
+              : "warning"
+            : domainsUnchecked > 0
+              ? "incomplete"
+              : "good",
   };
 
   const progressLine = () => {
@@ -520,7 +1000,7 @@ export default function SecurityCheck() {
   const exportCsv = () => {
     downloadCsv(
       `security-check-${new Date().toISOString().slice(0, 10)}.csv`,
-      toCsv(twoStepSorted, inactiveShown, forwarding, apps)
+      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedAll, domainsAll)
     );
   };
 
@@ -528,6 +1008,8 @@ export default function SecurityCheck() {
     setSelected(id);
     setShowAll(false);
     setOpenApp(null);
+    setOpenClient(null);
+    setOpenDomain(null);
   };
 
   const limited = <T,>(rows: T[]): T[] => (showAll ? rows : rows.slice(0, ROW_LIMIT));
@@ -541,21 +1023,29 @@ export default function SecurityCheck() {
   const emptyText = (clean: string) =>
     !hasResults
       ? "Run the check to see results."
-      : scanning
+      : onlyNew
+        ? "Nothing new here since the last scan."
+        : scanning
         ? "Nothing found yet…"
         : partial
           ? "Nothing found in the part of the tenant that was checked."
           : clean;
 
   const anythingFound =
-    twoStep.length + inactive.length + forwarding.length + apps.length > 0;
+    twoStep.length +
+      inactive.length +
+      forwarding.length +
+      apps.length +
+      delegatedAll.length +
+      domainsToReview >
+    0;
   const unreadTotal = (totals?.mailboxErrors ?? 0) + (totals?.appErrors ?? 0);
 
   return (
     <>
       <PageHeader
         title="Security Check"
-        description="One pass over the tenant for the four things that most often lead to trouble: accounts without 2-Step Verification, accounts nobody uses, mail forwarded outside the organisation, and outside apps holding access to your data. It only reads; nothing is changed."
+        description="One pass over the tenant for the things that most often lead to trouble: accounts without 2-Step Verification, accounts nobody uses, mail forwarded outside the organisation, outside apps holding access to your data, apps granted domain-wide delegation, and domains other people could send mail as. Scanning only reads; nothing changes unless you press a fix button and confirm it."
         badge="Audit"
         actions={
           <>
@@ -594,7 +1084,7 @@ export default function SecurityCheck() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Tile
           icon={KeyRound}
           label="No 2-Step Verification"
@@ -607,6 +1097,7 @@ export default function SecurityCheck() {
                 : `of ${plural(totals.activeAccounts, "active account")}`
           }
           status={status.twoStep}
+          fresh={freshCount.twoStep}
           selected={selected === "twoStep"}
           onSelect={() => select("twoStep")}
         />
@@ -616,6 +1107,7 @@ export default function SecurityCheck() {
           value={hasResults ? inactiveShown.length.toLocaleString() : "–"}
           note={`No sign-in for ${threshold} days or more`}
           status={status.inactive}
+          fresh={freshCount.inactive}
           selected={selected === "inactive"}
           onSelect={() => select("inactive")}
         />
@@ -631,6 +1123,7 @@ export default function SecurityCheck() {
                 : `of ${plural(totals.mailboxesChecked, "mailbox", "mailboxes")} read`
           }
           status={status.forwarding}
+          fresh={freshCount.forwarding}
           selected={selected === "forwarding"}
           onSelect={() => select("forwarding")}
         />
@@ -644,10 +1137,78 @@ export default function SecurityCheck() {
               : `of ${plural(apps.length, "connected app")}`
           }
           status={status.apps}
+          fresh={freshCount.apps}
           selected={selected === "apps"}
           onSelect={() => select("apps")}
         />
+        <Tile
+          icon={Waypoints}
+          label="Domain-wide delegation"
+          value={hasResults && delegation ? delegationToReview.toLocaleString() : "–"}
+          note={
+            !hasResults
+              ? "Apps allowed to act as any user"
+              : delegationError
+                ? "The admin log couldn't be read"
+                : "Granted or changed in the last 6 months"
+          }
+          status={status.delegation}
+          fresh={freshCount.delegation}
+          selected={selected === "delegation"}
+          onSelect={() => select("delegation")}
+        />
+        <Tile
+          icon={MailCheck}
+          label="Email spoofing protection"
+          value={hasResults && emailAuth ? domainsToReview.toLocaleString() : "–"}
+          note={
+            !hasResults
+              ? "Domains missing SPF, DKIM or DMARC"
+              : emailAuthError
+                ? "The domains couldn't be checked"
+                : `of ${plural(domainsAll.length, "domain")}`
+          }
+          status={status.emailAuth}
+          fresh={freshCount.emailAuth}
+          selected={selected === "emailAuth"}
+          onSelect={() => select("emailAuth")}
+        />
       </div>
+
+      {hasResults && (baseline || (done && !partial)) && (
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
+          {baseline ? (
+            <>
+              <span>
+                Compared with the scan on {formatDate(baseline.completedAt)}:{" "}
+                {anythingNew
+                  ? "what it didn't have is marked new."
+                  : scanning
+                    ? "nothing new so far."
+                    : "nothing new."}
+              </span>
+              {(anythingNew || onlyNew) && (
+                <Button
+                  size="xs"
+                  variant={onlyNew ? "default" : "outline"}
+                  aria-pressed={onlyNew}
+                  onClick={() => {
+                    setOnlyNew((v) => !v);
+                    setShowAll(false);
+                  }}
+                >
+                  Only show what&apos;s new
+                </Button>
+              )}
+            </>
+          ) : (
+            <span>
+              First scan on this install. The next one will mark what has
+              changed since today.
+            </span>
+          )}
+        </div>
+      )}
 
       <Card className="mt-6">
         {selected === "twoStep" && (
@@ -673,13 +1234,13 @@ export default function SecurityCheck() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {twoStepSorted.length === 0 ? (
+              {twoStepList.length === 0 ? (
                 <Empty>
                   {emptyText("Every active account is enrolled in 2-Step Verification.")}
                 </Empty>
               ) : (
                 <>
-                  {limited(twoStepSorted).map((f) => (
+                  {limited(twoStepList).map((f) => (
                     <div
                       key={f.user}
                       className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3"
@@ -692,10 +1253,13 @@ export default function SecurityCheck() {
                           </p>
                         )}
                       </div>
-                      {f.admin && <Badge variant="destructive">administrator</Badge>}
+                      <div className="flex shrink-0 items-center gap-2">
+                        {newTwoStep(f) && <Badge variant="accent">new</Badge>}
+                        {f.admin && <Badge variant="destructive">administrator</Badge>}
+                      </div>
                     </div>
                   ))}
-                  {more(twoStepSorted.length)}
+                  {more(twoStepList.length)}
                 </>
               )}
             </CardContent>
@@ -745,7 +1309,7 @@ export default function SecurityCheck() {
                   </Button>
                 ))}
               </div>
-              {inactiveShown.length === 0 ? (
+              {inactiveList.length === 0 ? (
                 <Empty>
                   {emptyText(
                     `Every active account has been signed in to within the last ${threshold} days.`
@@ -753,7 +1317,7 @@ export default function SecurityCheck() {
                 </Empty>
               ) : (
                 <>
-                  {limited(inactiveShown).map((f) => (
+                  {limited(inactiveList).map((f) => (
                     <div
                       key={f.user}
                       className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3"
@@ -776,10 +1340,19 @@ export default function SecurityCheck() {
                           )}
                         </p>
                       </div>
-                      {f.admin && <Badge variant="warning">administrator</Badge>}
+                      <div className="flex shrink-0 items-center gap-2">
+                        {newInactive(f) && <Badge variant="accent">new</Badge>}
+                        {f.admin && <Badge variant="warning">administrator</Badge>}
+                        <Link
+                          href={`/offboarding?user=${encodeURIComponent(f.user)}`}
+                          className={buttonVariants({ variant: "outline", size: "sm" })}
+                        >
+                          Offboard…
+                        </Link>
+                      </div>
                     </div>
                   ))}
-                  {more(inactiveShown.length)}
+                  {more(inactiveList.length)}
                 </>
               )}
             </CardContent>
@@ -817,32 +1390,46 @@ export default function SecurityCheck() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {forwarding.length === 0 ? (
+              {forwardingList.length === 0 ? (
                 <Empty>{emptyText("No mailbox forwards mail outside the organisation.")}</Empty>
               ) : (
                 <>
-                  {limited(forwarding).map((f, i) => (
+                  {limited(forwardingList).map((f, i) => (
                     <div
                       key={`${f.user}|${f.kind}|${f.target}|${i}`}
-                      className="space-y-1 rounded-lg border bg-muted/30 p-3"
+                      className="flex items-start justify-between gap-3 rounded-lg border bg-muted/30 p-3"
                     >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Person name={f.name} user={f.user} />
-                        <Badge variant="outline">
-                          {f.kind === "auto-forward" ? "all mail" : "filter"}
-                        </Badge>
-                        {f.hidesOriginal && (
-                          <Badge variant="destructive">hides the original</Badge>
-                        )}
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Person name={f.name} user={f.user} />
+                          <Badge variant="outline">
+                            {f.kind === "auto-forward" ? "all mail" : "filter"}
+                          </Badge>
+                          {f.hidesOriginal && (
+                            <Badge variant="destructive">hides the original</Badge>
+                          )}
+                          {newForwarding(f) && <Badge variant="accent">new</Badge>}
+                        </div>
+                        <p className="text-sm">
+                          <span className="text-muted-foreground">to </span>
+                          <span className="font-medium break-all">{f.target}</span>
+                        </p>
+                        <p className="text-xs text-muted-foreground break-words">{f.detail}</p>
                       </div>
-                      <p className="text-sm">
-                        <span className="text-muted-foreground">to </span>
-                        <span className="font-medium break-all">{f.target}</span>
-                      </p>
-                      <p className="text-xs text-muted-foreground break-words">{f.detail}</p>
+                      {(f.kind === "auto-forward" || f.filterId) && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          disabled={scanning}
+                          onClick={() => openFix({ type: "forwarding", finding: f })}
+                        >
+                          {f.kind === "auto-forward" ? "Turn off…" : "Delete filter…"}
+                        </Button>
+                      )}
                     </div>
                   ))}
-                  {more(forwarding.length)}
+                  {more(forwardingList.length)}
                 </>
               )}
             </CardContent>
@@ -874,11 +1461,11 @@ export default function SecurityCheck() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {appRows.length === 0 ? (
+              {appList.length === 0 ? (
                 <Empty>{emptyText("Nobody has connected an outside app.")}</Empty>
               ) : (
                 <>
-                  {limited(appRows).map(({ app, access }) => {
+                  {limited(appList).map(({ app, access }) => {
                     const open = openApp === app.clientId;
                     return (
                       <div key={app.clientId} className="rounded-lg border bg-muted/30">
@@ -897,6 +1484,7 @@ export default function SecurityCheck() {
                                 {ACCESS[access.level].label}
                               </Badge>
                               {app.anonymous && <Badge variant="warning">anonymous</Badge>}
+                              {newApp(app) && <Badge variant="accent">new</Badge>}
                             </div>
                             <p className="text-xs text-muted-foreground">
                               {access.areas.length > 0
@@ -922,13 +1510,45 @@ export default function SecurityCheck() {
                               </p>
                             </div>
                             <div>
-                              <p className="font-medium">Granted by</p>
-                              <p className="text-muted-foreground break-words">
-                                {app.users.slice(0, 50).join(", ")}
-                                {app.users.length > 50
-                                  ? `, and ${(app.users.length - 50).toLocaleString()} more (all in the CSV export)`
-                                  : ""}
-                              </p>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="font-medium">Granted by</p>
+                                <Button
+                                  variant="outline"
+                                  size="xs"
+                                  disabled={scanning}
+                                  onClick={() => openFix({ type: "app-all", app })}
+                                >
+                                  {app.users.length === 1
+                                    ? "Revoke access…"
+                                    : `Revoke for all ${app.users.length.toLocaleString()}…`}
+                                </Button>
+                              </div>
+                              <ul className="mt-1 text-muted-foreground">
+                                {app.users.slice(0, APP_USERS_SHOWN).map((user) => (
+                                  <li
+                                    key={user}
+                                    className="flex items-center justify-between gap-2 py-0.5"
+                                  >
+                                    <span className="break-all">{user}</span>
+                                    {app.users.length > 1 && (
+                                      <button
+                                        type="button"
+                                        className="shrink-0 underline underline-offset-2 disabled:opacity-50"
+                                        disabled={scanning}
+                                        onClick={() => openFix({ type: "app-user", app, user })}
+                                      >
+                                        Revoke
+                                      </button>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                              {app.users.length > APP_USERS_SHOWN && (
+                                <p className="mt-1 text-muted-foreground">
+                                  and {(app.users.length - APP_USERS_SHOWN).toLocaleString()} more
+                                  (all in the CSV export)
+                                </p>
+                              )}
                             </div>
                             <div>
                               <p className="font-medium">Permissions</p>
@@ -945,7 +1565,350 @@ export default function SecurityCheck() {
                       </div>
                     );
                   })}
-                  {more(appRows.length)}
+                  {more(appList.length)}
+                </>
+              )}
+            </CardContent>
+          </>
+        )}
+        {selected === "delegation" && (
+          <>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Waypoints className="h-5 w-5" />
+                Domain-wide delegation
+              </CardTitle>
+              <CardDescription className="space-y-2">
+                <span className="block">
+                  Domain-wide delegation lets an app act as any user in the
+                  organisation: read their mail, their files and their
+                  calendar, with no password and no consent screen. Whoever
+                  holds that app&apos;s key has the same reach, so every entry
+                  should be one you recognise and still need.
+                </span>
+                <span className="block">
+                  <span className="font-medium text-foreground">
+                    This is not the full list.
+                  </span>{" "}
+                  Google keeps that in the Admin console (Security → Access and
+                  data control → API controls → Manage Domain Wide Delegation)
+                  and gives apps no way to read it. What is shown here comes
+                  from the admin log: each time delegation was granted, changed
+                  or removed in about the last six months. An app granted
+                  earlier and untouched since will not appear, so check the
+                  list in the Admin console as well.
+                </span>
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!hasResults ? (
+                <Empty>Run the check to see results.</Empty>
+              ) : delegationLoading ? (
+                <Empty>Reading the admin log…</Empty>
+              ) : delegationError ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+                  <p className="font-medium">The admin log could not be read.</p>
+                  <p className="mt-1 text-xs text-muted-foreground break-words">
+                    {delegationError}
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    This check needs the service account to be granted the
+                    reports permission (admin.reports.audit.readonly).{" "}
+                    <Link href="/tenants" className="underline underline-offset-2">
+                      Tenants
+                    </Link>{" "}
+                    → Test scopes shows whether it is.
+                  </p>
+                </div>
+              ) : !delegation ? (
+                <Empty>The check was stopped before the admin log was read.</Empty>
+              ) : delegatedClients.length === 0 ? (
+                <Empty>
+                  {onlyNew
+                    ? "Nothing new here since the last scan."
+                    : "No delegation was granted, changed or removed in the last six months. That says nothing about older entries."}
+                </Empty>
+              ) : (
+                <>
+                  {limited(delegatedClients).map((client) => {
+                    const open = openClient === client.clientId;
+                    const access = summariseAccess(client.scopes);
+                    const authorized = client.status === "authorized";
+                    return (
+                      <div key={client.clientId} className="rounded-lg border bg-muted/30">
+                        <button
+                          type="button"
+                          aria-expanded={open}
+                          onClick={() => setOpenClient(open ? null : client.clientId)}
+                          className="flex w-full items-start justify-between gap-3 p-3 text-left"
+                        >
+                          <div className="min-w-0 space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="font-mono text-sm font-medium break-all">
+                                {client.clientId}
+                              </p>
+                              {client.ownApp && <Badge variant="accent">Open Admin</Badge>}
+                              {authorized ? (
+                                <Badge variant={ACCESS[access.level].variant}>
+                                  {ACCESS[access.level].label}
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline">removed</Badge>
+                              )}
+                              {newClient(client) && <Badge variant="accent">new</Badge>}
+                              {client.unusedScopes.length > 0 && (
+                                <Badge variant="warning">
+                                  {`${plural(client.unusedScopes.length, "permission")} it doesn't use`}
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {authorized ? "Granted" : "Removed"} by {client.lastActor} on{" "}
+                              {formatDate(client.lastChange)}
+                              {authorized && access.areas.length > 0
+                                ? ` · ${access.areas.map((a) => a.area).join(" · ")}`
+                                : ""}
+                            </p>
+                          </div>
+                          <span className="flex shrink-0 items-center text-muted-foreground">
+                            {open ? (
+                              <ChevronDown className="h-4 w-4" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4" />
+                            )}
+                          </span>
+                        </button>
+                        {open && (
+                          <div className="space-y-3 border-t px-3 py-3 text-xs">
+                            {client.ownApp && (
+                              <p className="text-muted-foreground">
+                                This is the service account Open Admin itself runs as.
+                                {client.unusedScopes.length > 0
+                                  ? " The permissions marked unused can be removed from its entry in the Admin console without affecting anything here."
+                                  : ""}
+                              </p>
+                            )}
+                            <div>
+                              <p className="font-medium">
+                                {authorized ? "Permissions" : "Permissions it had"}
+                              </p>
+                              {client.scopes.length === 0 ? (
+                                <p className="text-muted-foreground">Not recorded in the log</p>
+                              ) : (
+                                <ul className="font-mono text-muted-foreground">
+                                  {client.scopes.map((scope) => (
+                                    <li key={scope} className="break-all">
+                                      {scope}
+                                      {client.unusedScopes.includes(scope) && (
+                                        <span className="ml-2 font-sans font-medium text-warning-fg">
+                                          unused
+                                        </span>
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                            <div>
+                              <p className="font-medium">Changes in the last six months</p>
+                              <ul className="text-muted-foreground">
+                                {client.history.map((event, i) => (
+                                  <li key={`${event.time}|${event.kind}|${i}`}>
+                                    {formatDate(event.time)}:{" "}
+                                    {event.kind === "authorize" ? "granted" : "removed"} by{" "}
+                                    {event.actor}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {more(delegatedClients.length)}
+                  {delegation.truncated && (
+                    <p className="text-xs text-muted-foreground">
+                      The admin log held more changes than were read, so older
+                      ones in this period may be missing.
+                    </p>
+                  )}
+                </>
+              )}
+              <div className="rounded-lg border border-dashed p-3 text-xs">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 max-w-3xl space-y-1">
+                    <p className="text-sm font-medium">Test Open Admin&apos;s own key</p>
+                    <p className="text-muted-foreground">
+                      The admin log only reaches back six months. This asks
+                      Google directly whether Open Admin&apos;s service account
+                      has been given broad access it never uses: full Gmail,
+                      sending mail, admin roles, Google Cloud, Vault. It asks
+                      for a token for each and throws it away, so nothing is
+                      read or changed, but each request is recorded in
+                      Google&apos;s logs as coming from this app.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    disabled={ownKeyBusy}
+                    onClick={() => void testOwnKey()}
+                  >
+                    {ownKeyBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {ownKey ? "Test again" : "Run the test"}
+                  </Button>
+                </div>
+                {ownKeyError && (
+                  <p className="mt-2 text-danger-fg break-words">{ownKeyError}</p>
+                )}
+                {ownKey && (
+                  <ul className="mt-3 space-y-1.5">
+                    {ownKey.probes.map((probe) => {
+                      const v =
+                        probe.granted === true
+                          ? VERDICT.warn
+                          : probe.granted === false
+                            ? VERDICT.ok
+                            : VERDICT.error;
+                      const ProbeIcon = v.icon;
+                      return (
+                        <li key={probe.scope} className="grid grid-cols-[1rem_1fr] gap-x-2">
+                          <ProbeIcon className={cn("mt-0.5 h-3.5 w-3.5", v.className)} />
+                          <span>
+                            <span className={cn("font-medium", v.className)}>
+                              {probe.label}:{" "}
+                              {probe.granted === true
+                                ? "granted, and not needed"
+                                : probe.granted === false
+                                  ? "not granted"
+                                  : "couldn't tell"}
+                            </span>
+                            <span className="block text-muted-foreground">
+                              {probe.granted === true
+                                ? `Whoever holds this key could ${probe.meaning}. Remove ${probe.scope} from the app's entry in the Admin console.`
+                                : probe.granted === false
+                                  ? `The key cannot ${probe.meaning}.`
+                                  : probe.error}
+                            </span>
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </CardContent>
+          </>
+        )}
+        {selected === "emailAuth" && (
+          <>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <MailCheck className="h-5 w-5" />
+                Email spoofing protection
+              </CardTitle>
+              <CardDescription className="space-y-2">
+                <span className="block">
+                  Three public DNS records tell other mail systems which mail
+                  really comes from you. Without them anyone can send mail that
+                  appears to come from your domain, and more of your own mail
+                  lands in spam. SPF lists the servers allowed to send, DKIM
+                  lets receivers check a signature on each message, and DMARC
+                  says what to do with mail that fails both.
+                </span>
+                <span className="block">
+                  SPF and DMARC are records you add with whoever hosts your
+                  DNS. DKIM is switched on in the Google Admin console (Apps →
+                  Google Workspace → Gmail → Authenticate email), which also
+                  gives you the record to publish. DKIM is looked for under
+                  Google&apos;s default name only; one set up under another
+                  name can&apos;t be found from outside.
+                </span>
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!hasResults ? (
+                <Empty>Run the check to see results.</Empty>
+              ) : emailAuthLoading ? (
+                <Empty>Looking up DNS records…</Empty>
+              ) : emailAuthError ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+                  <p className="font-medium">The domains could not be checked.</p>
+                  <p className="mt-1 text-xs text-muted-foreground break-words">
+                    {emailAuthError}
+                  </p>
+                </div>
+              ) : !emailAuth ? (
+                <Empty>The check was stopped before the domains were looked up.</Empty>
+              ) : domainList.length === 0 ? (
+                <Empty>
+                  {onlyNew
+                    ? "Nothing new here since the last scan."
+                    : "This tenant has no verified domains to check."}
+                </Empty>
+              ) : (
+                <>
+                  {limited(domainList).map((d) => {
+                    const open = openDomain === d.domain;
+                    return (
+                      <div key={d.domain} className="rounded-lg border bg-muted/30 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-medium break-all">{d.domain}</p>
+                            {d.primary && <Badge variant="outline">primary</Badge>}
+                            {newDomain(d) && <Badge variant="accent">new</Badge>}
+                          </div>
+                          <button
+                            type="button"
+                            aria-expanded={open}
+                            className="text-xs text-muted-foreground underline underline-offset-2"
+                            onClick={() => setOpenDomain(open ? null : d.domain)}
+                          >
+                            {open ? "Hide records" : "Show records"}
+                          </button>
+                        </div>
+                        <dl className="mt-2 space-y-2">
+                          {(
+                            [
+                              ["SPF", d.spf],
+                              ["DKIM", d.dkim],
+                              ["DMARC", d.dmarc],
+                            ] as Array<[string, RecordCheck]>
+                          ).map(([name, check]) => {
+                            const v = VERDICT[check.verdict];
+                            const VerdictIcon = v.icon;
+                            return (
+                              <div key={name} className="grid grid-cols-[4rem_1fr] gap-x-3 text-xs">
+                                <dt className="font-medium">{name}</dt>
+                                <dd className="min-w-0">
+                                  <span
+                                    className={cn(
+                                      "flex items-center gap-1.5 font-medium",
+                                      v.className
+                                    )}
+                                  >
+                                    <VerdictIcon className="h-3.5 w-3.5 shrink-0" />
+                                    {v.label}
+                                  </span>
+                                  <span className="mt-0.5 block text-muted-foreground">
+                                    {check.summary}
+                                  </span>
+                                  {open && (
+                                    <span className="mt-1 block font-mono text-muted-foreground break-all">
+                                      {check.record ?? "(no single record to show)"}
+                                    </span>
+                                  )}
+                                </dd>
+                              </div>
+                            );
+                          })}
+                        </dl>
+                      </div>
+                    );
+                  })}
+                  {more(domainList.length)}
                 </>
               )}
             </CardContent>
@@ -1007,6 +1970,93 @@ export default function SecurityCheck() {
           )}
         </Card>
       )}
+
+      <ConfirmActionDialog
+        open={!!fix}
+        onOpenChange={(o) => {
+          if (fixBusy) return;
+          if (!o) {
+            setFixError(null);
+            setFix(null);
+          }
+        }}
+        tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
+        severity="high"
+        busy={fixBusy}
+        error={fixError}
+        onConfirm={() => void confirmFix()}
+        {...(fix?.type === "forwarding"
+          ? {
+              title:
+                fix.finding.kind === "filter"
+                  ? "Delete forwarding filter"
+                  : "Turn off forwarding",
+              summary: `Mail arriving in ${fix.finding.user} will no longer be sent to ${fix.finding.target}.`,
+              confirmPhrase: fix.finding.user,
+              confirmLabel: fixError
+                ? "Try again"
+                : fix.finding.kind === "filter"
+                  ? "Delete filter"
+                  : "Turn off forwarding",
+              changes: [
+                { label: "Mailbox", after: fix.finding.user },
+                {
+                  label: fix.finding.kind === "filter" ? "Filter" : "Forwarding",
+                  before: `to ${fix.finding.target}`,
+                  after: fix.finding.kind === "filter" ? "deleted" : "off",
+                  emphasis: true,
+                },
+              ],
+              warnings:
+                fix.finding.kind === "filter"
+                  ? `The whole filter is deleted, including anything else it did (labels, archiving). ${fix.finding.detail}.`
+                  : "Mail that has already been forwarded is not recalled.",
+            }
+          : fix?.type === "app-user"
+            ? {
+                title: "Revoke app access",
+                summary: `${fix.app.name || "This app"} will lose its access to ${fix.user}'s account.`,
+                confirmPhrase: fix.user,
+                confirmLabel: fixError ? "Try again" : "Revoke access",
+                changes: [
+                  {
+                    label: "App",
+                    after: `${fix.app.name || "(unnamed app)"} · ${fix.app.clientId}`,
+                  },
+                  {
+                    label: "Account",
+                    before: fix.user,
+                    after: "access revoked",
+                    emphasis: true,
+                  },
+                ],
+                warnings:
+                  "They can connect the app again unless it is blocked in the Google Admin console (Security → Access and data control → API controls).",
+              }
+            : {
+                title: "Revoke app access for everyone",
+                summary: `${fix?.app.name || "This app"} will lose its access to every account that granted it.`,
+                confirmPhrase: "REVOKE",
+                confirmLabel: fixError ? "Try again" : "Revoke for everyone",
+                changes: [
+                  {
+                    label: "App",
+                    after: `${fix?.app.name || "(unnamed app)"} · ${fix?.app.clientId ?? ""}`,
+                  },
+                  {
+                    label: "Accounts",
+                    before: plural(
+                      apps.find((a) => a.clientId === fix?.app.clientId)?.users.length ?? 0,
+                      "account"
+                    ),
+                    after: "access revoked",
+                    emphasis: true,
+                  },
+                ],
+                warnings:
+                  "People can connect the app again unless it is blocked in the Google Admin console (Security → Access and data control → API controls).",
+              })}
+      />
 
       {totals && totals.withoutMailbox > 0 && !scanning && (
         <p className="mt-4 text-xs text-muted-foreground">

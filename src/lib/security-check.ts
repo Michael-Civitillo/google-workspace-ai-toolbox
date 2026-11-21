@@ -9,6 +9,8 @@
  * matters for a report people use to decide that nothing is wrong.
  */
 
+import type { DomainEmailAuth, Verdict } from "./email-auth";
+
 // ---------------------------------------------------------------------------
 // Accounts: 2-Step Verification and inactivity
 // ---------------------------------------------------------------------------
@@ -126,6 +128,12 @@ export function inactiveFinding(
   };
 }
 
+/**
+ * The most accounts one request may revoke an app for. The page sends larger
+ * sets in batches, so a long list shows progress and can't time out.
+ */
+export const REVOKE_APP_BATCH = 25;
+
 /** Does a reported account count as inactive at the chosen threshold? */
 export function isInactiveAt(finding: InactiveFinding, thresholdDays: number): boolean {
   return finding.idleDays === null || finding.idleDays >= thresholdDays;
@@ -172,6 +180,8 @@ export interface ForwardingFinding {
    * takes when someone wants a copy of the mail without the owner noticing.
    */
   hidesOriginal: boolean;
+  /** Gmail's id for the filter, when this finding is a filter. */
+  filterId: string | null;
 }
 
 /**
@@ -234,6 +244,7 @@ export function forwardingFindings(
         target: target.toLowerCase(),
         detail: `Forwards all mail; ${disposition?.detail ?? "keeps the original"}`,
         hidesOriginal: disposition?.hides ?? false,
+        filterId: null,
       });
     } else {
       internal++;
@@ -251,6 +262,7 @@ export function forwardingFindings(
         target: forward.toLowerCase(),
         detail: `Filter on ${describeFilterCriteria(filter.criteria)}`,
         hidesOriginal: false,
+        filterId: filter.id ?? null,
       });
     } else {
       internal++;
@@ -446,6 +458,269 @@ export function compareApps(a: AppGrant, b: AppGrant): number {
     b.users.length - a.users.length ||
     a.name.localeCompare(b.name)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Domain-wide delegation
+// ---------------------------------------------------------------------------
+
+/**
+ * How far back the admin log is asked for delegation changes. Google keeps
+ * admin log events for about six months; asking for more returns the same.
+ */
+export const DELEGATION_WINDOW_DAYS = 180;
+
+/** One entry from the admin log: delegation granted to a client, or removed. */
+export interface DelegationEvent {
+  /** RFC3339 time of the change. */
+  time: string;
+  /** The administrator who made it. */
+  actor: string;
+  kind: "authorize" | "remove";
+  /** The API client the change is about: a service account or OAuth client id. */
+  clientId: string;
+  /** Scopes granted. Empty for a removal. */
+  scopes: string[];
+}
+
+/**
+ * What the admin log says about one client with domain-wide delegation.
+ *
+ * This is a reading of the log, not of Google's configuration: Google offers
+ * no way for an app to read the delegation list itself. A client granted
+ * before the log's window and untouched since does not appear at all.
+ */
+export interface DelegatedClient {
+  clientId: string;
+  /** Its most recent change in the window was a grant, or a removal. */
+  status: "authorized" | "removed";
+  /** Scopes from its most recent grant in the window. */
+  scopes: string[];
+  lastChange: string;
+  lastActor: string;
+  /** This is Open Admin's own service account. */
+  ownApp: boolean;
+  /**
+   * For Open Admin's own client only: scopes it was granted that it never
+   * asks for. Every unused scope is reach that a stolen key would have for
+   * nothing.
+   */
+  unusedScopes: string[];
+  /** Every change in the window, newest first. */
+  history: DelegationEvent[];
+}
+
+/**
+ * The scope list from an admin log parameter. Google may send it as one
+ * string or as a list, separated by commas, spaces or new lines; all of those
+ * mean the same thing.
+ */
+export function parseScopeList(
+  value: string | readonly string[] | null | undefined
+): string[] {
+  if (!value) return [];
+  const pieces = typeof value === "string" ? [value] : value;
+  const scopes = pieces
+    .flatMap((piece) => String(piece).split(/[\s,]+/))
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  return [...new Set(scopes)];
+}
+
+/** The same scope, however it was typed into the Admin console. */
+function scopeKey(scope: string): string {
+  return scope.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/**
+ * Turn the admin log's delegation changes into one entry per client.
+ *
+ * A client's most recent change decides whether it is authorised now, and its
+ * most recent grant decides its scopes: the Admin console replaces a client's
+ * scope list when it is edited, so a later grant supersedes an earlier one.
+ *
+ * Authorised clients come first, widest access first; among equals, the most
+ * recently changed. Open Admin's own client is listed like any other, marked,
+ * with the scopes it holds but never uses.
+ */
+export function summariseDelegation(
+  events: readonly DelegationEvent[],
+  opts: { ownClientId: string | null; usedScopes: readonly string[] }
+): DelegatedClient[] {
+  const byClient = new Map<string, DelegationEvent[]>();
+  for (const event of events) {
+    const clientId = event.clientId.trim();
+    if (!clientId) continue;
+    const list = byClient.get(clientId) ?? [];
+    list.push({ ...event, clientId });
+    byClient.set(clientId, list);
+  }
+
+  const used = new Set(opts.usedScopes.map(scopeKey));
+  const own = opts.ownClientId?.trim() || null;
+
+  const clients: DelegatedClient[] = [];
+  for (const [clientId, list] of byClient) {
+    const history = [...list].sort((a, b) => b.time.localeCompare(a.time));
+    const latest = history[0];
+    const lastGrant = history.find((e) => e.kind === "authorize");
+    const status = latest.kind === "authorize" ? "authorized" : "removed";
+    const scopes = [...(lastGrant?.scopes ?? [])].sort();
+    const ownApp = own !== null && clientId === own;
+    clients.push({
+      clientId,
+      status,
+      scopes,
+      lastChange: latest.time,
+      lastActor: latest.actor,
+      ownApp,
+      unusedScopes:
+        ownApp && status === "authorized"
+          ? scopes.filter((scope) => !used.has(scopeKey(scope)))
+          : [],
+      history,
+    });
+  }
+
+  return clients.sort(
+    (a, b) =>
+      Number(b.status === "authorized") - Number(a.status === "authorized") ||
+      LEVEL_RANK[summariseAccess(b.scopes).level] -
+        LEVEL_RANK[summariseAccess(a.scopes).level] ||
+      b.lastChange.localeCompare(a.lastChange) ||
+      a.clientId.localeCompare(b.clientId)
+  );
+}
+
+/**
+ * Does this client deserve a second look?
+ *
+ * Any other app that currently holds delegation does: it can act as every
+ * user, and the question "do we still need this?" is the whole point of the
+ * check. Open Admin's own client is expected, and is a finding only when it
+ * was granted more than it uses.
+ */
+export function delegationNeedsReview(client: DelegatedClient): boolean {
+  if (client.status !== "authorized") return false;
+  return client.ownApp ? client.unusedScopes.length > 0 : true;
+}
+
+/** What the delegation check returns. */
+export interface DelegationReport {
+  /** How many days of the admin log were read. */
+  windowDays: number;
+  clients: DelegatedClient[];
+  /** True when the log held more changes than were read. */
+  truncated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// What changed since the last scan
+// ---------------------------------------------------------------------------
+
+/** The checks, by the name the page and the history file use for them. */
+export const CHECK_IDS = [
+  "twoStep",
+  "inactive",
+  "forwarding",
+  "apps",
+  "delegation",
+  "emailAuth",
+] as const;
+export type CheckName = (typeof CHECK_IDS)[number];
+
+/**
+ * A finished scan, reduced to what the next one needs in order to say what is
+ * new: one short key per finding, and which checks actually ran. No names, no
+ * scopes, nothing a key isn't.
+ */
+export interface ScanSnapshot {
+  /** When the scan finished (ISO). */
+  completedAt: string;
+  keys: string[];
+  /**
+   * Checks that covered the tenant in that scan. A check that could not run
+   * then has no baseline, and everything it finds now would look new; only
+   * the checks listed here are compared.
+   */
+  covered: CheckName[];
+}
+
+/** More findings than this and the scan is not remembered at all. */
+export const SNAPSHOT_MAX_KEYS = 200_000;
+
+export const findingKey = {
+  twoStep: (f: TwoStepFinding) => `2sv|${f.user}`,
+  /**
+   * One key per threshold the account has crossed, so "new" means new at the
+   * threshold being looked at: an account that drifts from 80 to 95 idle days
+   * is new at 90 without having been new at 30.
+   */
+  inactive: (f: InactiveFinding, thresholdDays: number) =>
+    `idle${thresholdDays}|${f.user}`,
+  forwarding: (f: ForwardingFinding) => `fwd|${f.user}|${f.kind}|${f.target}`,
+  /** Includes how far the app reaches, so one that gains access counts as new. */
+  app: (app: AppGrant) => `app|${app.clientId}|${summariseAccess(app.scopes).level}`,
+  /** Includes the time of the change, so every grant or removal is new once. */
+  delegation: (client: DelegatedClient) =>
+    `dwd|${client.clientId}|${client.status}|${client.lastChange}`,
+  /** One per record with something wrong, so a record that gets worse is new. */
+  emailAuth: (domain: string, record: "spf" | "dkim" | "dmarc", verdict: Verdict) =>
+    `mail|${domain}|${record}|${verdict}`,
+};
+
+/** The keys for one domain's email authentication problems. */
+export function emailAuthKeys(d: DomainEmailAuth): string[] {
+  return (["spf", "dkim", "dmarc"] as const)
+    .filter((r) => ["bad", "warn", "unknown"].includes(d[r].verdict))
+    .map((r) => findingKey.emailAuth(d.domain, r, d[r].verdict));
+}
+
+/** Every key a finished scan should be remembered by. */
+export function snapshotKeys(found: {
+  twoStep: readonly TwoStepFinding[];
+  inactive: readonly InactiveFinding[];
+  forwarding: readonly ForwardingFinding[];
+  apps: readonly AppGrant[];
+  delegated: readonly DelegatedClient[];
+  domains?: readonly DomainEmailAuth[];
+}): string[] {
+  const keys = new Set<string>();
+  for (const f of found.twoStep) keys.add(findingKey.twoStep(f));
+  for (const f of found.inactive) {
+    for (const days of INACTIVE_THRESHOLDS) {
+      if (isInactiveAt(f, days)) keys.add(findingKey.inactive(f, days));
+    }
+  }
+  for (const f of found.forwarding) keys.add(findingKey.forwarding(f));
+  for (const app of found.apps) keys.add(findingKey.app(app));
+  for (const client of found.delegated) keys.add(findingKey.delegation(client));
+  for (const domain of found.domains ?? []) {
+    for (const key of emailAuthKeys(domain)) keys.add(key);
+  }
+  return [...keys].sort();
+}
+
+/**
+ * A snapshot read back from disk or from a request body, or null if it is not
+ * one. Everything in it is treated as untrusted text.
+ */
+export function parseSnapshot(raw: unknown): ScanSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.completedAt !== "string" || Number.isNaN(Date.parse(r.completedAt))) {
+    return null;
+  }
+  if (!Array.isArray(r.keys) || r.keys.length > SNAPSHOT_MAX_KEYS) return null;
+  const keys: string[] = [];
+  for (const key of r.keys) {
+    if (typeof key !== "string" || key.length === 0 || key.length > 600) return null;
+    keys.push(key);
+  }
+  const covered = Array.isArray(r.covered)
+    ? CHECK_IDS.filter((id) => (r.covered as unknown[]).includes(id))
+    : [];
+  return { completedAt: new Date(r.completedAt).toISOString(), keys, covered };
 }
 
 // ---------------------------------------------------------------------------

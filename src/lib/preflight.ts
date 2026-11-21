@@ -1,3 +1,4 @@
+import { REQUIRED_SCOPES } from "./required-scopes";
 import { JWT } from "google-auth-library";
 import { readFileSync } from "fs";
 import type { Tenant } from "./tenant-types";
@@ -34,86 +35,10 @@ export interface PreflightResult {
   results: ScopePreflightResult[];
 }
 
-/**
- * The full set of OAuth scopes Open Admin impersonates with. Adding a new
- * feature that needs a new scope? Add it here so the preflight catches it.
- */
-const REQUIRED_SCOPES: ReadonlyArray<{
-  scope: string;
-  label: string;
-  feature: string;
-}> = [
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.user",
-    label: "Directory user",
-    feature: "User lookup, suspension, primary-email change, Security Check (sign-in facts)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.user.security",
-    label: "Directory user security",
-    feature: "OAuth token revoke, force sign-out (offboarding), Security Check (connected apps)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.domain.readonly",
-    label: "Directory domains (read)",
-    feature: "Verified-domain listing (drives external-sharing classification)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.directory.group",
-    label: "Directory groups",
-    feature: "Group membership management + offboarding group removal",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.reports.audit.readonly",
-    label: "Reports (audit, read)",
-    feature: "Sign-in/admin activity reports + AI security digest",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/admin.datatransfer",
-    label: "Data transfer",
-    feature: "Drive ownership transfer during offboarding",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/drive.metadata.readonly",
-    label: "Drive metadata (read)",
-    feature: "External-sharing audit",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/drive",
-    label: "Drive (full)",
-    feature: "Revoke external sharing on files (un-share)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.settings.sharing",
-    label: "Gmail settings (sharing)",
-    feature: "Email forwarding setup",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.settings.basic",
-    label: "Gmail settings (basic)",
-    feature: "Email delegation setup + delegate lookup, Security Check (forwarding)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.readonly",
-    label: "Gmail (read)",
-    feature: "Mailbox export (backup)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.insert",
-    label: "Gmail (insert)",
-    feature: "Mailbox import (restore)",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/gmail.labels",
-    label: "Gmail (labels)",
-    feature: "Mailbox import — recreate labels",
-  },
-  {
-    scope: "https://www.googleapis.com/auth/calendar",
-    label: "Calendar",
-    feature: "Calendar delegation and transfer",
-  },
-] as const;
+/** Every scope Open Admin asks Google for, and no others. */
+export function usedScopes(): string[] {
+  return REQUIRED_SCOPES.map((s) => s.scope);
+}
 
 interface ServiceAccountCreds {
   client_email?: string;
@@ -121,20 +46,13 @@ interface ServiceAccountCreds {
   client_id?: string;
 }
 
-export async function preflightTenantScopes(
-  tenant: Tenant
-): Promise<PreflightResult> {
-  if (!tenant.adminEmail) {
-    throw new Error(
-      "Tenant has no adminEmail configured — DWD impersonation needs a super admin to impersonate"
-    );
-  }
-  if (!tenant.credentialsFile) {
-    throw new Error("Tenant has no credentialsFile configured");
-  }
-
-  // Fixed messages only: the raw error would name the path and, for a parse
-  // failure, quote the file's first bytes — and this text goes to the browser.
+/**
+ * Read and validate a tenant's key file.
+ *
+ * Fixed messages only: the raw error would name the path and, for a parse
+ * failure, quote the file's first bytes — and this text goes to the browser.
+ */
+function readServiceAccount(tenant: Tenant): ServiceAccountCreds {
   let raw: string;
   try {
     raw = readFileSync(tenant.credentialsFile, "utf-8");
@@ -159,28 +77,166 @@ export async function preflightTenantScopes(
       "Service account key file is not a service-account key (missing client_email or private_key)"
     );
   }
+  return creds;
+}
 
-  // Bound each token exchange. authorize() has no default timeout, so one
-  // stalled connection to Google's OAuth endpoint would otherwise hang the
-  // whole preflight (and the operator's "Check DWD scopes" spinner) forever.
-  const AUTHORIZE_TIMEOUT_MS = 15_000;
-  const withTimeout = <T>(p: Promise<T>): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout>;
-    return Promise.race([
-      p,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new Error(
-                `Token exchange timed out after ${AUTHORIZE_TIMEOUT_MS / 1000}s`
-              )
-            ),
-          AUTHORIZE_TIMEOUT_MS
-        );
-      }),
-    ]).finally(() => clearTimeout(timer)) as Promise<T>;
+// Bound each token exchange. authorize() has no default timeout, so one
+// stalled connection to Google's OAuth endpoint would otherwise hang the
+// whole preflight (and the operator's "Check DWD scopes" spinner) forever.
+const AUTHORIZE_TIMEOUT_MS = 15_000;
+
+/**
+ * Ask Google for a token for one scope, impersonating the tenant's admin.
+ * Resolves if the scope is authorised for this service account; rejects with
+ * Google's error otherwise. The token itself is discarded: nothing is read
+ * or changed with it.
+ */
+async function mintToken(
+  creds: ServiceAccountCreds,
+  adminEmail: string,
+  scope: string
+): Promise<void> {
+  const auth = new JWT({
+    email: creds.client_email,
+    key: creds.private_key,
+    scopes: [scope],
+    subject: adminEmail,
+  });
+  let timer: ReturnType<typeof setTimeout>;
+  await Promise.race([
+    auth.authorize(),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(`Token exchange timed out after ${AUTHORIZE_TIMEOUT_MS / 1000}s`)
+          ),
+        AUTHORIZE_TIMEOUT_MS
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Broad access Open Admin never asks for. If the tenant's delegation entry
+ * for this service account includes any of these, the key file is worth more
+ * to a thief than it needs to be.
+ */
+const UNNEEDED_BROAD_SCOPES: ReadonlyArray<{
+  scope: string;
+  label: string;
+  meaning: string;
+}> = [
+  {
+    scope: "https://mail.google.com/",
+    label: "Full Gmail access",
+    meaning: "read, send and delete any user's mail",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/gmail.modify",
+    label: "Gmail (read and change)",
+    meaning: "read and change any user's mail",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/gmail.send",
+    label: "Gmail (send)",
+    meaning: "send mail as any user",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/admin.directory.rolemanagement",
+    label: "Admin roles",
+    meaning: "make any account an administrator",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    label: "Google Cloud",
+    meaning: "manage Google Cloud resources as any user",
+  },
+  {
+    scope: "https://www.googleapis.com/auth/ediscovery",
+    label: "Vault",
+    meaning: "search and export retained mail and files",
+  },
+];
+
+export interface OwnKeyProbe {
+  scope: string;
+  label: string;
+  meaning: string;
+  /** true: granted. false: Google refused it. null: the answer wasn't clear. */
+  granted: boolean | null;
+  /** Google's error when the answer wasn't a clean yes or no. */
+  error: string | null;
+}
+
+export interface OwnKeyResult {
+  serviceAccountEmail: string | null;
+  serviceAccountClientId: string | null;
+  probes: OwnKeyProbe[];
+}
+
+/**
+ * Ask Google directly whether this tenant has authorised Open Admin's own
+ * service account for broad access it never uses.
+ *
+ * The admin log only shows delegation changes from the last six months; this
+ * is the one way to learn about an older, over-generous grant. It works by
+ * asking for a token for each scope and discarding it. Nothing is read or
+ * changed, but each request is a token grant Google records against this
+ * service account, which is why the page runs it only on an explicit click.
+ *
+ * Only an `unauthorized_client` refusal counts as "not granted". Any other
+ * failure (network, a revoked key, a wrong admin address) is reported as
+ * unknown rather than as good news.
+ */
+export async function probeUnneededScopes(tenant: Tenant): Promise<OwnKeyResult> {
+  if (!tenant.adminEmail) {
+    throw new Error(
+      "Tenant has no adminEmail configured — DWD impersonation needs a super admin to impersonate"
+    );
+  }
+  if (!tenant.credentialsFile) {
+    throw new Error("Tenant has no credentialsFile configured");
+  }
+  const creds = readServiceAccount(tenant);
+  const used = new Set(REQUIRED_SCOPES.map((s) => s.scope));
+
+  const probes = await Promise.all(
+    UNNEEDED_BROAD_SCOPES.filter((s) => !used.has(s.scope)).map(
+      async ({ scope, label, meaning }): Promise<OwnKeyProbe> => {
+        try {
+          await mintToken(creds, tenant.adminEmail, scope);
+          return { scope, label, meaning, granted: true, error: null };
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          return /unauthorized_client/i.test(message)
+            ? { scope, label, meaning, granted: false, error: null }
+            : { scope, label, meaning, granted: null, error: message.slice(0, 300) };
+        }
+      }
+    )
+  );
+
+  return {
+    serviceAccountEmail: creds.client_email ?? null,
+    serviceAccountClientId: creds.client_id ?? null,
+    probes,
   };
+}
+
+export async function preflightTenantScopes(
+  tenant: Tenant
+): Promise<PreflightResult> {
+  if (!tenant.adminEmail) {
+    throw new Error(
+      "Tenant has no adminEmail configured — DWD impersonation needs a super admin to impersonate"
+    );
+  }
+  if (!tenant.credentialsFile) {
+    throw new Error("Tenant has no credentialsFile configured");
+  }
+
+  const creds = readServiceAccount(tenant);
 
   // Run scope checks in parallel — Google's OAuth endpoint handles the
   // concurrency fine and the operator gets results in one round-trip's
@@ -188,13 +244,7 @@ export async function preflightTenantScopes(
   const results = await Promise.all(
     REQUIRED_SCOPES.map(async ({ scope, label, feature }) => {
       try {
-        const auth = new JWT({
-          email: creds.client_email,
-          key: creds.private_key,
-          scopes: [scope],
-          subject: tenant.adminEmail,
-        });
-        await withTimeout(auth.authorize());
+        await mintToken(creds, tenant.adminEmail, scope);
         return {
           scope,
           label,

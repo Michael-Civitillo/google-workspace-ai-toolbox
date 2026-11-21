@@ -405,6 +405,10 @@ export default function MailboxExport() {
                   if (v === "ndjson" || v === "mbox") setFormat(v);
                 }}
                 disabled={running}
+                items={{
+                  ndjson: "NDJSON — full-fidelity backup",
+                  mbox: "mbox — portable to other mail clients",
+                }}
               >
                 <SelectTrigger className="w-full" aria-label="Export format">
                   <SelectValue />

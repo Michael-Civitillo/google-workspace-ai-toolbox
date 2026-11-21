@@ -1,6 +1,16 @@
 import type { NextConfig } from "next";
+import { readFileSync } from "node:fs";
+
+// The version in package.json, made available to the app as it is built. It
+// is what App Settings shows and what the optional update check compares
+// against the newest release.
+const { version } = JSON.parse(readFileSync("./package.json", "utf-8")) as {
+  version: string;
+};
 
 const nextConfig: NextConfig = {
+  env: { NEXT_PUBLIC_APP_VERSION: version },
+
   // Emit .next/standalone: a self-contained server plus only the node_modules
   // actually reachable at runtime. This is what the single-file desktop build
   // (see packaging/) embeds. `next dev` and `next start` are unaffected.
@@ -65,6 +75,7 @@ const nextConfig: NextConfig = {
       "sso.json*",
       "app-config.json*",
       "delegation-sightings.json*",
+      "security-check-history.json*",
       "session-secret",
       "audit.log",
       "credentials/**",

@@ -41,6 +41,7 @@ import {
   waitUntilReady,
 } from "./server.ts";
 import { error, info, initLogFile, logFile, plain, warn } from "./log.ts";
+import { isLoopbackHost, requestLaunchTicket, signInUrl } from "./signin.ts";
 import { shouldHoldWindow, waitForKey } from "./window.ts";
 
 /** Replaced at build time by packaging/build-launcher.mjs. */
@@ -86,9 +87,29 @@ const EXIT_NOT_READY = 5;
  * plain HTTP. So: bind the address, advertise the name.
  */
 function browsableUrl(host: string, port: number): string {
-  const isLoopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
-  const shown = isLoopback ? "localhost" : host;
+  const shown = isLoopbackHost(host) ? "localhost" : host;
   return `http://${shown}:${port}`;
+}
+
+/**
+ * Open the browser, signed in when that is possible.
+ *
+ * With automatic sign-in the launcher trades the password it holds for a
+ * one-time ticket and opens the browser on the URL that redeems it. If the
+ * server won't issue one (single sign-on is enforced, the saved password is
+ * out of date, the request fails) the browser opens on the ordinary page and
+ * the person signs in as before. Returns whether a ticket was used.
+ */
+async function openSignedIn(
+  host: string,
+  port: number,
+  password: string,
+  autoSignIn: boolean
+): Promise<boolean> {
+  const url = browsableUrl(host, port);
+  const ticket = autoSignIn ? await requestLaunchTicket(host, port, password, url) : null;
+  openBrowser(signInUrl(url, ticket));
+  return ticket !== null;
 }
 
 function printVersion(): void {
@@ -112,7 +133,8 @@ interface ResolvedSettings {
 async function resolveSettings(
   args: ParsedArgs,
   stored: Partial<LauncherConfig>,
-  port: number
+  port: number,
+  autoSignIn: boolean
 ): Promise<ResolvedSettings> {
   let dirty = args.port !== null && args.port !== stored.port;
 
@@ -124,7 +146,18 @@ async function resolveSettings(
 
   let password = args.password ?? process.env.APP_PASSWORD ?? stored.password ?? "";
 
-  if (args.setPassword || !password) {
+  if (!password && autoSignIn && !args.setPassword) {
+    // Nobody is going to type this: the launcher signs the browser in itself.
+    // It still has to exist, because it is what the launcher proves itself
+    // with and what any other browser would need.
+    password = generatePassword();
+    dirty = true;
+    info(
+      "A sign-in password was generated and saved in launcher.json in the data " +
+        "folder. You only need it to sign in from another browser: run with " +
+        "--set-password to choose your own."
+    );
+  } else if (args.setPassword || !password) {
     if (args.setPassword) {
       plain("");
       plain("Choose the password you'll use to sign in to the web interface.");
@@ -211,6 +244,10 @@ async function run(userArgs: string[]): Promise<number | null> {
   if (applied.length > 0) info(`Loaded from launcher.env: ${applied.join(", ")}`);
 
   const host = args.host ?? DEFAULT_HOST;
+  // Signing the browser in automatically is for the person at this machine.
+  // Bound to anything else, the app is being served to other people, and they
+  // sign in like anyone else.
+  const autoSignIn = !args.noAutoSignIn && isLoopbackHost(host);
   if (host !== DEFAULT_HOST) {
     warn(
       `Binding ${host} instead of loopback. Anyone who can reach this machine on ` +
@@ -229,7 +266,16 @@ async function run(userArgs: string[]): Promise<number | null> {
   if (running) {
     const url = browsableUrl(running.host, running.port);
     info(`Already running at ${url} - opening it.`);
-    if (!args.noBrowser) openBrowser(url);
+    if (!args.noBrowser) {
+      // The other copy is the server; this one can still vouch for the person
+      // with the saved password, so a second double-click also lands signed in.
+      await openSignedIn(
+        running.host,
+        running.port,
+        args.password ?? process.env.APP_PASSWORD ?? stored.password ?? "",
+        autoSignIn && isLoopbackHost(running.host)
+      );
+    }
     return EXIT_OK;
   }
   removeLock(lockFile);
@@ -274,7 +320,7 @@ async function run(userArgs: string[]): Promise<number | null> {
     port = fallback;
   }
 
-  const { config, dirty } = await resolveSettings(args, stored, preferredPort);
+  const { config, dirty } = await resolveSettings(args, stored, preferredPort, autoSignIn);
   if (dirty) {
     try {
       writeConfigFile(configFile, config);
@@ -348,11 +394,17 @@ async function run(userArgs: string[]): Promise<number | null> {
 
   plain("");
   info(`Ready: ${url}`);
-  plain("Sign in with the password you set.");
+  const opening = config.openBrowser && !args.noBrowser;
+  const signedIn = opening
+    ? await openSignedIn(host, port, config.password, autoSignIn)
+    : false;
+  plain(
+    signedIn
+      ? "Your browser is opening, already signed in."
+      : "Sign in with the password you set."
+  );
   plain("Keep this window open while you work. Closing it, or Ctrl+C, stops Open Admin.");
   plain("");
-
-  if (config.openBrowser && !args.noBrowser) openBrowser(url);
 
   // Resolve with null: the server owns the process from here.
   return null;

@@ -13,6 +13,11 @@ export interface AppConfig {
   version: 1;
   /** ISO timestamp once the first-launch wizard is completed (or skipped). */
   onboardingCompletedAt: string | null;
+  /**
+   * Whether the app may ask GitHub which release is newest. Off unless the
+   * operator turns it on: nothing leaves the machine for this by default.
+   */
+  updateCheck: boolean;
 }
 
 /** Marker + version for the portable export bundle. */

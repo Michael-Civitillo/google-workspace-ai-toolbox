@@ -27,6 +27,9 @@ import {
   Settings2,
   ShieldCheck,
   UserSearch,
+  UserPlus,
+  Ticket,
+  Signature,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TenantSwitcher } from "./tenant-switcher";
@@ -62,6 +65,7 @@ const navigation: NavGroup[] = [
         icon: CalendarDays,
       },
       { name: "Groups", href: "/groups", icon: Users },
+      { name: "Email Signatures", href: "/signatures", icon: Signature },
     ],
   },
   {
@@ -79,6 +83,8 @@ const navigation: NavGroup[] = [
   {
     label: "Lifecycle",
     items: [
+      { name: "New User", href: "/new-user", icon: UserPlus },
+      { name: "Licences", href: "/licenses", icon: Ticket },
       { name: "Domain Change", href: "/domain-change", icon: Globe },
       { name: "Offboarding", href: "/offboarding", icon: UserMinus },
       { name: "Bulk Operations", href: "/bulk", icon: Layers },

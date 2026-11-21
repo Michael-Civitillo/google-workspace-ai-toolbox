@@ -286,6 +286,7 @@ export default function AuditLog() {
               <Select
                 value={outcomeFilter}
                 onValueChange={(v) => v && setOutcomeFilter(v)}
+                items={{ any: "Any outcome", success: "Success", error: "Error" }}
               >
                 <SelectTrigger className="w-full" aria-label="Outcome filter">
                   <SelectValue />
@@ -302,6 +303,10 @@ export default function AuditLog() {
               <Select
                 value={tenantScope}
                 onValueChange={(v) => v && setTenantScope(v)}
+                items={{
+                  all: "All tenants",
+                  current: tenant ? `Current (${tenant.name})` : "Current tenant",
+                }}
               >
                 <SelectTrigger className="w-full" aria-label="Tenant filter">
                   <SelectValue />

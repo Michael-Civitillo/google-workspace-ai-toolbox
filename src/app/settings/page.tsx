@@ -14,12 +14,14 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
 import { ConfigBackupPanel } from "@/components/config-backup-panel";
+import { UpdateSettingsPanel } from "@/components/update-settings-panel";
 import { SSO_PROVIDER_PRESETS, type PublicSsoConfig } from "@/lib/sso-types";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
   Archive,
   ArrowRight,
+  ArrowUpCircle,
   KeyRound,
   UserCircle2,
 } from "lucide-react";
@@ -74,7 +76,7 @@ export default function SettingsPage() {
     <>
       <PageHeader
         title="App Settings"
-        description="Sign-in methods and configuration backup for this Open Admin instance."
+        description="Sign-in methods, configuration backup and updates for this Open Admin instance."
       />
 
       <div className="max-w-3xl space-y-6">
@@ -161,6 +163,21 @@ export default function SettingsPage() {
           </CardHeader>
           <CardContent>
             <ConfigBackupPanel />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ArrowUpCircle className="h-5 w-5" />
+              Updates
+            </CardTitle>
+            <CardDescription>
+              Which version this is, and whether to be told about newer ones.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <UpdateSettingsPanel />
           </CardContent>
         </Card>
       </div>

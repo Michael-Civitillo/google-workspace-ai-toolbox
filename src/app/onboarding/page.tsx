@@ -52,6 +52,7 @@ import {
   type PreflightState,
 } from "@/components/scope-preflight-panel";
 import type { PreflightResult } from "@/lib/preflight";
+import { REQUIRED_APIS, REQUIRED_SCOPES } from "@/lib/required-scopes";
 
 type StepId =
   | "welcome"
@@ -108,28 +109,7 @@ const defaultTenantForm = (): TenantForm => ({
   geminiApiKey: "",
 });
 
-const REQUIRED_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.settings.sharing",
-  "https://www.googleapis.com/auth/gmail.settings.basic",
-  "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/gmail.insert",
-  "https://www.googleapis.com/auth/gmail.labels",
-  "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/admin.directory.user",
-  "https://www.googleapis.com/auth/admin.directory.user.security",
-  "https://www.googleapis.com/auth/admin.directory.domain.readonly",
-  "https://www.googleapis.com/auth/admin.datatransfer",
-  "https://www.googleapis.com/auth/drive.metadata.readonly",
-  "https://www.googleapis.com/auth/drive",
-];
-
-const REQUIRED_APIS = [
-  "Gmail API",
-  "Google Calendar API",
-  "Admin SDK API",
-  "Admin Data Transfer API",
-  "Google Drive API",
-];
+const SCOPE_LIST = REQUIRED_SCOPES.map((s) => s.scope);
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -1006,11 +986,11 @@ function ServiceAccountStep() {
               <ul className="mt-2 grid sm:grid-cols-2 gap-1.5">
                 {REQUIRED_APIS.map((api) => (
                   <li
-                    key={api}
+                    key={api.name}
                     className="flex items-center gap-1.5 text-xs text-muted-foreground"
                   >
                     <Check className="h-3 w-3 text-success shrink-0" />
-                    {api}
+                    {api.name}
                   </li>
                 ))}
               </ul>
@@ -1036,10 +1016,10 @@ function ServiceAccountStep() {
               , add the service account&apos;s <strong>client ID</strong> (from the JSON key) and paste in this comma-separated scope list:
               <div className="relative mt-3">
                 <pre className="text-xs font-mono bg-muted rounded-lg p-3 pr-12 overflow-x-auto whitespace-pre">
-                  {REQUIRED_SCOPES.join(",\n")}
+                  {SCOPE_LIST.join(",\n")}
                 </pre>
                 <CopyButton
-                  value={REQUIRED_SCOPES.join(",")}
+                  value={SCOPE_LIST.join(",")}
                   className="absolute top-2 right-2"
                   label="Copy scopes"
                 />

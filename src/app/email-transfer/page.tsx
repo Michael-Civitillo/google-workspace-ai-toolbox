@@ -189,7 +189,16 @@ export default function EmailTransfer() {
 
             <div className="space-y-2">
               <Label>After Forwarding</Label>
-              <Select value={action} onValueChange={(v) => v && setAction(v)}>
+              <Select
+                value={action}
+                onValueChange={(v) => v && setAction(v)}
+                items={{
+                  keep: "Keep in inbox (recommended)",
+                  archive: "Archive original",
+                  trash: "Move to trash",
+                  markRead: "Mark as read",
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>

@@ -485,6 +485,7 @@ export default function Groups() {
                         <Select
                           value={newRole}
                           onValueChange={(v) => v && setNewRole(v)}
+                          items={{ MEMBER: "Member", MANAGER: "Manager", OWNER: "Owner" }}
                         >
                           <SelectTrigger
                             className="w-32 shrink-0"

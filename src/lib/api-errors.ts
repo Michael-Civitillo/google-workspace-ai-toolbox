@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { ValidationError } from "./validate";
 import { TenantNotFoundError } from "./tenants-server";
-import { googleHttpStatus, isAbortError } from "./admin-sdk";
+import {
+  googleHttpStatus,
+  isAbortError,
+  LicenseChangedError,
+  NoSuchAccountError,
+  SecurityFixStaleError,
+  UserAlreadyExistsError,
+} from "./admin-sdk";
 
 /**
  * Map a thrown error to the HTTP status an API route should answer with.
@@ -19,6 +26,11 @@ import { googleHttpStatus, isAbortError } from "./admin-sdk";
 export function errorStatusFor(e: unknown): number {
   if (e instanceof TenantNotFoundError) return 404;
   if (e instanceof ValidationError) return 400;
+  // What the operator confirmed has changed underneath them: scan again.
+  if (e instanceof SecurityFixStaleError) return 409;
+  if (e instanceof UserAlreadyExistsError) return 409;
+  if (e instanceof LicenseChangedError) return 409;
+  if (e instanceof NoSuchAccountError) return 404;
   if (isAbortError(e)) return 499;
   const upstream = googleHttpStatus(e);
   if (upstream !== null) {

@@ -11,7 +11,7 @@ The app is in good shape: a Next.js 16 / React 19 App Router UI over a single co
 **The feature template.** New features consistently follow this path, and everything recommended below rides on it:
 
 1. Add the SDK call to `src/lib/admin-sdk.ts`, reusing `buildAuth` / `getAdminClient` / `withGoogleRetry`.
-2. Register any new OAuth scope in `REQUIRED_SCOPES` (`src/lib/preflight.ts`) so the Setup preflight catches missing domain-wide-delegation grants.
+2. Register any new OAuth scope in `REQUIRED_SCOPES` (`src/lib/required-scopes.ts`) so the scope check, the Setup page and the Get Started wizard all ask for it.
 3. Add a route under `src/app/api/...` following the standard shape: `readCappedJson` → `tenantFromRequest` → `require*` validators → SDK call → `audit()` → `errorResponse`.
 4. Add a client page using `tfetch` / `useCurrentTenant` + `ConfirmActionDialog` (typed confirmation for destructive paths), and a sidebar entry.
 5. Optionally expose it to the dashboard command bar by adding an entry to `ADMIN_ACTIONS` plus a Zod schema in `ACTION_PARAM_SCHEMAS` (`src/lib/ai.ts`).

@@ -3,6 +3,7 @@
 import { SessionIdentity } from "./session-identity";
 import { ThemeToggle } from "./theme-toggle";
 import { LogoutButton } from "./logout-button";
+import { UpdateNotice } from "./update-notice";
 
 /**
  * Bottom strip of the sidebar: who is signed in, plus the two controls that
@@ -11,12 +12,15 @@ import { LogoutButton } from "./logout-button";
  */
 export function SidebarFooter() {
   return (
-    <div className="border-t border-sidebar-border p-3">
-      <div className="flex items-center gap-1">
-        <SessionIdentity />
-        <ThemeToggle />
-        <LogoutButton />
+    <>
+      <UpdateNotice />
+      <div className="border-t border-sidebar-border p-3">
+        <div className="flex items-center gap-1">
+          <SessionIdentity />
+          <ThemeToggle />
+          <LogoutButton />
+        </div>
       </div>
-    </div>
+    </>
   );
 }

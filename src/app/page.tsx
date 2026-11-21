@@ -27,6 +27,9 @@ import {
   ScrollText,
   ShieldCheck,
   UserSearch,
+  UserPlus,
+  Ticket,
+  Signature,
 } from "lucide-react";
 
 interface GwsStatus {
@@ -81,6 +84,12 @@ const taskGroups: TaskGroup[] = [
         href: "/groups",
         icon: Users,
       },
+      {
+        title: "Email Signatures",
+        description: "One signature template for everyone, filled in from each person's directory profile.",
+        href: "/signatures",
+        icon: Signature,
+      },
     ],
   },
   {
@@ -109,6 +118,18 @@ const taskGroups: TaskGroup[] = [
   {
     label: "Lifecycle",
     tasks: [
+      {
+        title: "New User",
+        description: "Create an account with a temporary password and groups, or reset a password.",
+        href: "/new-user",
+        icon: UserPlus,
+      },
+      {
+        title: "Licences",
+        description: "Who holds each licence, which sit on suspended or idle accounts, assign and remove.",
+        href: "/licenses",
+        icon: Ticket,
+      },
       {
         title: "Domain Change",
         description: "Switch a user's primary email to another domain in your tenant.",
@@ -146,7 +167,7 @@ const taskGroups: TaskGroup[] = [
       },
       {
         title: "Security Check",
-        description: "One scan for missing 2-Step Verification, idle accounts, outside forwarding and risky apps.",
+        description: "One scan for missing 2-Step Verification, idle accounts, outside forwarding, risky apps and delegation.",
         href: "/security-check",
         icon: ShieldCheck,
       },

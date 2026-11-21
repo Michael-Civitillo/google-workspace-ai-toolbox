@@ -24,20 +24,28 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 📧 **Email Delegation** — Give someone access to another user's mailbox. No password sharing, no drama. If Google refuses because the owner (or the delegate) is suspended, the dialog says so and offers to re-enable the account and retry, behind a typed confirmation.
 - 🔎 **Delegate Lookup** — The reverse question: which mailboxes can *this person* read, and since when? Gmail only lists delegates per mailbox, so the lookup walks every active mailbox in the tenant (paged, cancellable; suspended accounts are counted but skipped, since Google won't read their settings) and shows every match with a one-click remove. Grants made through Open Admin show their exact date and operator from the audit log; everything else shows how long Open Admin has known about it, because Google doesn't record when a delegate was added.
 - 📅 **Calendar Delegation** — Share a calendar with configurable permissions (free/busy, read, edit, full control).
+- 👥 **Groups** — Browse and search groups, see who's in each one and change it (member, manager or owner), and look up every group a user belongs to.
+- ✍️ **Email Signatures** — Write one template with fields like `{{name}}`, `{{title}}` and `{{phone}}`, and everyone gets it filled in from their own directory profile. A line someone has nothing for is left out, so nobody ends up with a blank "Tel:". Try it on one person first (what they'd get, next to what they have), then apply it to a list or to everyone with a mailbox. The results keep each signature that was replaced, in case one needs putting back.
 - 🔄 **Calendar Transfer** — Hand off calendar ownership to another user. Great for offboarding.
 - 📬 **Email Transfer** — Set up auto-forwarding from one mailbox to another. External-domain transfers require explicit confirmation.
+- 🗂️ **Drive Transfer** — Pick folders in a user's Drive and hand ownership of each folder, and everything inside it, to another user in the same tenant. Behind a typed confirmation.
+- 🙋 **New User** — Create an account for someone joining: their name, an address on one of your domains, an optional organisational unit, and the groups they should be in. Open Admin picks a temporary password and shows it once; the account has to choose its own at first sign-in. On the same page, reset the password of someone who is locked out, with an optional "sign them out everywhere" for an account that may be in the wrong hands. Passwords are never written to the audit log.
+- 🎟️ **Licences** — How many accounts hold each licence type, and which licences you are probably paying for and not using: the ones on suspended accounts (a suspended account still uses its licence) and on accounts nobody has signed in to for 180 days. Also lists active accounts with no licence at all, assigns and removes licences behind a typed confirmation, and exports everything as CSV. Google's API says who holds a licence, not how many you bought, and the page says so instead of guessing what is spare.
 - 🌐 **Domain Change** — Switch a user's primary email to a different domain in your tenant. Server-side preflight + read-after-write verification.
-- 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
+- 👋 **Offboarding** — One screen, one click. Vacation responder, mail forwarding, calendar + Drive ownership transfer, removal from every group, OAuth token revocation, sign-out, and account suspension — in the right order, with full diff preview before anything fires.
+- 🧮 **Bulk Operations** — Paste or upload a CSV and run one operation across many users: add or remove a mailbox delegate, set up forwarding, add or remove group members, share calendars, suspend accounts or re-enable them. Every row is validated before anything fires, repeated rows are skipped, each row reports its own result, and the results export as a CSV. The operations that take something away ask for their own word ("SUSPEND 12", not a generic "RUN 12").
 - 💾 **Mailbox Export** — Back up a user's entire Gmail mailbox to a portable file. Choose **NDJSON** for a full-fidelity backup (raw MIME with labels and dates preserved, restorable via Mailbox Import) or **mbox** for a standard mailbox file you can open in Thunderbird, Apple Mail, or convert to PST. Walks the mailbox page by page, streams straight to disk, cancellable mid-run (you keep what's gathered).
 - 📥 **Mailbox Import** — Restore a mailbox export into another user. Recreates the source's labels by name, then inserts every message via IMAP-style append (no re-delivery, no spam reclassification) with original dates intact — gated behind a typed confirmation since it writes into a live mailbox.
-- 🩺 **Security Check** — One read-only pass over the whole tenant for the four things that most often lead to trouble: accounts without 2-Step Verification (administrators first), active accounts nobody signs in to (30 days to a year, your pick), mailboxes forwarding mail outside your domains — by the forwarding setting or by a filter, with the ones that delete the original called out — and outside apps holding access to mail, Drive or admin settings, with who granted each. Paged and cancellable, CSV export, and it won't call a check clean if there were accounts it couldn't read.
-- 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export, and one-click "revoke external sharing" per file or in bulk — strips only external permissions, leaves internal collaborators alone.
+- 🩺 **Security Check** — One read-only pass over the whole tenant for the things that most often lead to trouble: accounts without 2-Step Verification (administrators first), active accounts nobody signs in to (30 days to a year, your pick), mailboxes forwarding mail outside your domains — by the forwarding setting or by a filter, with the ones that delete the original called out — outside apps holding access to mail, Drive or admin settings, with who granted each, and **domain-wide delegation**: every app granted the right to act as any user, who granted it and with which permissions, including any permissions Open Admin's own service account holds but never uses. Google only lets an app read delegation from the admin log, so that part covers grants and changes from the last six months, and the page says so. It also checks that each of your domains publishes the three DNS records that stop other people sending mail in your name (**SPF, DKIM and DMARC**), and says in a sentence what is wrong with any that don't. Forwarding and app findings have a **Fix** button (turn the forward off, delete the filter, revoke the app for everyone who granted it), each behind a typed confirmation. The page remembers the last scan and marks what is **new since then**, and it can test Open Admin's own key for access it was given and doesn't need. Paged and cancellable, CSV export, and it won't call a check clean if there were accounts it couldn't read.
+- 📈 **Activity Reports** — Sign-in and Admin Console activity straight from Google's Reports API, by user and period, with CSV export.
+- 🔍 **External Sharing Audit** — Per-user or tenant-wide Drive scan that surfaces every file shared outside your verified domains, including link-shared / "anyone with link" content. Cancellable, progress-tracked, CSV export, and one-click "revoke external sharing" per file or in bulk — strips only external permissions, leaves internal collaborators alone. A second scan covers **shared drives**, which belong to no user and so are invisible to the per-user one: who outside the organisation is a member of each drive, and which files inside are shared further (report only). Domain aliases count as inside the organisation.
 - 🏢 **Multi-Tenant Support** — Configure multiple Google Workspace environments (Production, Sandbox, etc.) and switch between them instantly from the sidebar. Per-request tenant isolation — nothing carries over between tenants.
 
 ### AI-powered (Gemini)
 
 - ✨ **AI Command** (right on the dashboard) — Type what you need in plain English. *"Give sarah access to john's mailbox"* → it parses the intent, validates the params, shows you what it'll do, and waits for your OK. No menu hunting, no extra clicks.
-- 🛡️ **User Audit** — Enter a user's email and get a full AI-generated report: who has access to their mailbox, calendar sharing rules, forwarding config, and security flags.
+- 🛡️ **User Audit** — Enter a user's email and get a full AI-generated report: who has access to their mailbox, calendar sharing rules, forwarding config, group memberships, recent sign-ins, and security flags.
+- 🧾 **Security Digest** — On the Activity Reports page: a Gemini summary of the last few days of sign-in and admin activity, so you read a paragraph instead of a log.
 
 ### Safety & ops
 
@@ -45,9 +53,10 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 - 🔑 **Single sign-on (OIDC)** — Sign in with Google, Microsoft Entra ID, Okta, or any OpenID Connect provider instead of (or alongside) the shared password. A pop-up wizard registers the app, checks the issuer, runs a real test sign-in, and only then enables it. Allowlist by domain or email; sessions and audit entries record who signed in.
 - 🧭 **First-launch onboarding** — A fresh install takes you straight to the guided setup on first login: CLI install, service account, first tenant, single sign-on. Skip it or re-run it any time from **Get Started** in the sidebar.
 - 💼 **Portable configuration** — Export everything — single sign-on settings, tenants, and the service-account key files themselves — to one JSON bundle from **App Settings**, and restore it on another server in one click. Keys are written back to disk automatically (relocated if the original path doesn't exist there), with a preview first and a typed confirmation only when overwriting an already-configured server.
+- 🔔 **Update notice (opt-in)** — Off by default. Tick one box in **App Settings** and Open Admin asks GitHub about twice a day which release is the newest, then shows a one-line note in the menu when yours is older. It downloads and installs nothing, and the request says nothing about your organisation. Until you tick the box it contacts nobody.
 - 🛡️ **CSRF protection** — Same-origin Origin/Referer check on every mutating API route, validated against the canonical request host.
-- ⚠️ **Confirmation dialogs, enforced server-side** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension, Drive transfer, mailbox import, bulk un-share) shows a before→after diff and requires you to type the target email or identifier. The API re-checks that typed value, so the guard holds for anything calling the routes directly, not just the browser.
-- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location). Rotates at 8 MB keeping three older files, so a long-running install stays bounded at ~32 MB.
+- ⚠️ **Confirmation dialogs, enforced server-side** — Every destructive action (domain change, calendar transfer, external email transfer, offboarding, account suspension, account creation, password reset, licence changes, signature replacement, Drive transfer, mailbox import, bulk un-share) shows a before→after diff and requires you to type the target email or identifier. The API re-checks that typed value, so the guard holds for anything calling the routes directly, not just the browser.
+- 📜 **Audit log** — Append-only JSON-lines log of every mutation — tenant edits included — recording which operator ran it (their single sign-on address, or `password-session`), with secrets redacted and rejected payloads bounded (`AUDIT_LOG_PATH` env var to control location). Rotates at 8 MB keeping three older files, so a long-running install stays bounded at ~32 MB. The **Audit Log** page reads it in the app: filter by action, outcome, tenant and date, and export what you see as CSV.
 - 🧪 **Atomic config writes** — `tenants.json`, `sso.json` and `app-config.json` share one store implementation: tmp-file + fsync + rename with an in-process mutex, so a crash mid-write can't corrupt your config.
 
 ### Polish
@@ -66,20 +75,40 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 <details>
 <summary>📸 More screenshots</summary>
 
-### User Audit
-![User Audit](docs/screenshots/audit.png)
+Every page, in sidebar order. They show a sample tenant (`example.com`), not real data.
+
+### Get Started
+![Get Started](docs/screenshots/get-started.png)
 
 ### Email Delegation
 ![Email Delegation](docs/screenshots/email-delegation.png)
 
+### Delegate Lookup
+![Delegate Lookup](docs/screenshots/delegation-lookup.png)
+
 ### Calendar Delegation
 ![Calendar Delegation](docs/screenshots/calendar-delegation.png)
+
+### Groups
+![Groups](docs/screenshots/groups.png)
+
+### Email Signatures
+![Email Signatures](docs/screenshots/signatures.png)
+
+### Email Transfer
+![Email Transfer](docs/screenshots/email-transfer.png)
 
 ### Calendar Transfer
 ![Calendar Transfer](docs/screenshots/calendar-transfer.png)
 
-### Email Transfer
-![Email Transfer](docs/screenshots/email-transfer.png)
+### Drive Transfer
+![Drive Transfer](docs/screenshots/drive-transfer.png)
+
+### New User
+![New User](docs/screenshots/new-user.png)
+
+### Licences
+![Licences](docs/screenshots/licenses.png)
 
 ### Domain Change
 ![Domain Change](docs/screenshots/domain-change.png)
@@ -87,20 +116,44 @@ This project takes `gws` and wraps it in a clean web UI with AI superpowers. Ins
 ### Offboarding
 ![Offboarding](docs/screenshots/offboarding.png)
 
+### Bulk Operations
+![Bulk Operations](docs/screenshots/bulk.png)
+
+### Mailbox Export
+![Mailbox Export](docs/screenshots/mailbox-export.png)
+
+### Mailbox Import
+![Mailbox Import](docs/screenshots/mailbox-import.png)
+
 ### Security Check
 ![Security Check](docs/screenshots/security-check.png)
 
 ### External Sharing Audit
-![Sharing Audit](docs/screenshots/sharing-audit.png)
+![External Sharing Audit](docs/screenshots/sharing-audit.png)
 
-### Tenants
-![Tenants](docs/screenshots/tenants.png)
+### User Audit
+![User Audit](docs/screenshots/audit.png)
+
+### Activity Reports
+![Activity Reports](docs/screenshots/activity-reports.png)
+
+### Audit Log
+![Audit Log](docs/screenshots/audit-log.png)
 
 ### Setup
 ![Setup](docs/screenshots/setup.png)
 
+### Tenants
+![Tenants](docs/screenshots/tenants.png)
+
 ### Single Sign-On
 ![Single Sign-On](docs/screenshots/sso.png)
+
+### App Settings
+![App Settings](docs/screenshots/settings.png)
+
+### Sign-in
+![Sign-in](docs/screenshots/login.png)
 
 </details>
 
@@ -125,8 +178,7 @@ Grab the file for your OS from the [latest release](https://github.com/Michael-C
 
 1. Download [`OpenAdmin-win-x64.exe`](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest/download/OpenAdmin-win-x64.exe). If your browser holds it back as "not commonly downloaded", choose **Keep**.
 2. Double-click it. Nothing is installed and you don't need administrator rights. If Windows shows "Windows protected your PC", click **More info → Run anyway** — the file isn't code-signed yet, so Windows doesn't recognise it.
-3. A console window opens and asks you to choose a password: 12 characters or more, typed twice.
-4. Your browser opens the sign-in page. Sign in with that password.
+3. A console window opens and, a few seconds later, so does your browser, already signed in. There is no password to choose.
 
 Keep the console window open while you work — closing it stops the app. Next time, double-click the same file; your settings are still there.
 
@@ -147,7 +199,7 @@ chmod +x ~/Downloads/open-admin-linux-x64
 ~/Downloads/open-admin-linux-x64
 ```
 
-Then, on every OS: choose a password when asked, and your browser opens at `http://localhost:3000`. Sign in and you're in. 🎉
+Then, on every OS: your browser opens at `http://localhost:3000`, already signed in. 🎉
 
 Everything is inside that one file — the runtime, the app, the lot. No Node.js, no `npm install`, no `gws` CLI. It serves **this machine only**: the server listens on loopback, so nothing is exposed to your network and no firewall prompts. You still need a **service account with domain-wide delegation** before you can run operations — the app walks you through it on first launch ([Auth setup](#-auth-setup-the-important-part)).
 
@@ -163,7 +215,8 @@ Everything is inside that one file — the runtime, the app, the lot. No Node.js
 
 **If something's off**
 
-- **Forgot the password?** Delete `launcher.json` from the data folder and start again; you'll be asked to choose a new one. Tenants, keys and the audit log aren't touched. (On Windows, paste `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data` into the File Explorer address bar to get there. The console window also prints the folder when it starts.)
+- **Need the sign-in password?** Normally you don't: starting the app signs you in, and starting it again signs you back in if the session has run out. A password does exist, for signing in from a different browser. Choose your own by running the file with `--set-password`, or read the generated one from `launcher.json` in the data folder. (On Windows, paste `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data` into the File Explorer address bar to get there. The console window also prints the folder when it starts.)
+- **Would rather type a password every time?** Run it with `--no-auto-sign-in`: the browser opens on the sign-in page instead.
 - **Port 3000 already in use?** The app moves to the next free port for that run and opens your browser there. Single sign-on, if you set it up, is tied to the usual port: sign in with the password that time, or close whatever has the port.
 - **It says it could not start?** On Windows the window stays open so you can read why; the same text is saved in `logs\launcher.log` in the data folder.
 
@@ -178,8 +231,9 @@ open-admin [options]
   --host <addr>        bind address (default 127.0.0.1 — this machine only)
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
-  --set-password       set a new admin password for the web UI
-  --password <pw>      set the admin password (saved; visible in the process list)
+  --set-password       choose the sign-in password yourself
+  --password <pw>      set the sign-in password (saved; visible in the process list)
+  --no-auto-sign-in    open the sign-in page instead of signing in automatically
   --no-browser         don't open a browser window on start
   --reset-app-cache    re-extract the bundled application files
   --version, -v        print version information
@@ -280,21 +334,28 @@ If you'd rather use **Command Prompt** (`cmd.exe`), swap `$env:NAME = "value"` f
 
 The app runs `gws` commands and `googleapis` SDK calls on the server side. For real admin work, you'll want a **service account with domain-wide delegation** so you can act on behalf of any user in your org:
 
-1. Create a service account in your GCP project
+1. Create a service account in your GCP project, and in that project's **APIs & Services → Library** enable: Gmail API, Google Calendar API, Admin SDK API, Admin Data Transfer API, Google Drive API and Enterprise License Manager API (that last one only for the Licences page)
 2. Turn on domain-wide delegation in the Admin Console
 3. Add these OAuth scopes:
    - `https://www.googleapis.com/auth/gmail.settings.sharing`
-   - `https://www.googleapis.com/auth/gmail.settings.basic` (also Security Check — forwarding and filters)
+   - `https://www.googleapis.com/auth/gmail.settings.basic` (also Security Check — forwarding and filters; Email Signatures)
    - `https://www.googleapis.com/auth/gmail.readonly` (Mailbox Export)
    - `https://www.googleapis.com/auth/gmail.insert` (Mailbox Import)
    - `https://www.googleapis.com/auth/gmail.labels` (Mailbox Import — recreate labels)
    - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/admin.directory.user` (Domain Change, Offboarding, Security Check)
+   - `https://www.googleapis.com/auth/admin.directory.user` (New User, Domain Change, Offboarding, Security Check)
    - `https://www.googleapis.com/auth/admin.directory.user.security` (Offboarding — OAuth token revoke, sign-out; Security Check — connected apps)
    - `https://www.googleapis.com/auth/admin.directory.domain.readonly` (Domain Change, Sharing Audit)
+   - `https://www.googleapis.com/auth/admin.directory.group` (Groups, New User — joining groups, Offboarding — removal from groups)
+   - `https://www.googleapis.com/auth/apps.licensing` (Licences)
+   - `https://www.googleapis.com/auth/admin.reports.audit.readonly` (Activity Reports, Security Digest, recent sign-ins in User Audit, Security Check — domain-wide delegation)
    - `https://www.googleapis.com/auth/admin.datatransfer` (Offboarding — Drive ownership transfer)
    - `https://www.googleapis.com/auth/drive.metadata.readonly` (Sharing Audit)
    - `https://www.googleapis.com/auth/drive` (Sharing Audit — revoke external sharing)
+
+   Not sure you got them all? Once the tenant is added, **Tenants → Test scopes** asks Google about each one and tells you which are missing. The **Setup** page and the **Get Started** wizard show this same list, ready to paste.
+
+   **Upgrading from 0.2?** `apps.licensing` is the one new scope, and only the Licences page needs it. Everything else keeps working without it, and the Licences page tells you the exact step if it is missing.
 4. Set an admin email for impersonation (Domain Change and Admin SDK calls need this):
    ```bash
    export GOOGLE_WORKSPACE_ADMIN_EMAIL=admin@yourdomain.com
@@ -331,9 +392,11 @@ Open Admin is designed to be safe to run against a real tenant, but a few env va
 | `APP_SSO_DISABLED` | optional | Set to `true` to switch single sign-on off and restore password login without editing `sso.json`. |
 | `APP_SSO_ALLOW_PRIVATE_ISSUER` | optional | Set to `true` to allow an OIDC issuer on a private, loopback or link-local host (a local development provider). Refused by default: the server performs the discovery fetch, so an unrestricted issuer check would tell any signed-in user which ports answer on the server's own network. |
 | `APP_SSO_TRUST_UNVERIFIED_EMAIL` | optional | Set to `true` to accept a sign-in whose ID token has no `email_verified: true` claim. Refused by default, except for Entra ID where the UPN is administrator-controlled. Only set this when the provider's directory is the source of truth for addresses. |
+| `OPEN_ADMIN_DNS_SERVERS` | optional | DNS servers the Security Check asks for SPF, DKIM and DMARC records, comma-separated (e.g. `8.8.8.8,1.1.1.1`). Defaults to the machine's own. Set it where internal DNS answers differently from the public internet. |
+| `OPEN_ADMIN_UPDATE_URL` | optional | Where the opt-in update check asks for the newest release, in place of GitHub (an internal mirror). Must answer `{"tag_name": "v1.2.3", "html_url": "..."}`. Has no effect while the check is off. |
 | `NODE_OPTIONS` | optional | Memory caps for the Node process. The Docker image ships `--max-old-space-size=768 --max-semi-space-size=8`; pass the same when you run from source on a small host. Without a cap Node sizes its heap from the machine's total memory and holds on to it long after a request finishes. |
 
-State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600), `app-config.json` (onboarding state) and `session-secret` (the generated cookie-signing key, mode 0600) — all gitignored, all written atomically with 0600 permissions, and everything but `session-secret` is covered by the configuration export below.
+State configured in the UI lives next to `tenants.json`: `sso.json` (single sign-on, mode 0600), `app-config.json` (onboarding state, and whether the update check is on) and `session-secret` (the generated cookie-signing key, mode 0600) — all gitignored, all written atomically with 0600 permissions, and everything but `session-secret` is covered by the configuration export below.
 
 Run behind HTTPS in production. The app sets HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy on every response.
 

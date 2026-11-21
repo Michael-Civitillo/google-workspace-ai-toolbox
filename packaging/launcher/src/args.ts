@@ -16,6 +16,7 @@ export interface ParsedArgs {
   root: string | null;
   password: string | null;
   setPassword: boolean;
+  noAutoSignIn: boolean;
   noBrowser: boolean;
   resetAppCache: boolean;
   help: boolean;
@@ -30,6 +31,7 @@ export interface ParseResult {
 const VALUE_FLAGS = new Set(["port", "host", "data-dir", "root", "password"]);
 const BOOLEAN_FLAGS = new Set([
   "set-password",
+  "no-auto-sign-in",
   "no-browser",
   "reset-app-cache",
   "help",
@@ -44,6 +46,7 @@ function emptyArgs(): ParsedArgs {
     root: null,
     password: null,
     setPassword: false,
+    noAutoSignIn: false,
     noBrowser: false,
     resetAppCache: false,
     help: false,
@@ -80,6 +83,7 @@ export function parseArgs(argv: string[]): ParseResult {
       }
       const on = inlineValue !== "false";
       if (name === "set-password") args.setPassword = on;
+      else if (name === "no-auto-sign-in") args.noAutoSignIn = on;
       else if (name === "no-browser") args.noBrowser = on;
       else if (name === "reset-app-cache") args.resetAppCache = on;
       else if (name === "help") args.help = on;
@@ -133,8 +137,9 @@ Usage: ${exeName} [options]
   --host <addr>        bind address (default 127.0.0.1 — this machine only)
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
-  --set-password       set a new admin password for the web UI
-  --password <pw>      set the admin password (saved; visible in the process list)
+  --set-password       choose the sign-in password yourself
+  --password <pw>      set the sign-in password (saved; visible in the process list)
+  --no-auto-sign-in    open the sign-in page instead of signing in automatically
   --no-browser         don't open a browser window on start
   --reset-app-cache    re-extract the bundled application files
   --version, -v        print version information
