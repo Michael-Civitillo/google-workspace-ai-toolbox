@@ -59,7 +59,7 @@ first run                        every run after
 ─────────                        ───────────────
 extract payload.zip to           skip extraction (completion marker)
 %LOCALAPPDATA%\...\app\<ver>     start the server in-process
-ask for an admin password        open the browser
+generate a sign-in password      open the browser, signed in
 ```
 
 The launcher starts Next.js **inside its own process** — there is no child
@@ -71,9 +71,33 @@ State lives in `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data`, separate from
 the versioned `app\` directory, so an upgrade replaces the application and
 keeps tenants, sign-on config, the audit log and imported keys.
 
-The admin password reaches the app as `APP_PASSWORD` in the environment (which
-`launcher.env` can set), from the no-echo prompt on first run or
-`--set-password`, or from the copy in `launcher.json`. `--password` works too —
+**Signing in is automatic.** The launcher holds the sign-in password, so making
+the person type it into the browser window the launcher just opened protects
+nothing; it is only something to forget. Once the server is up, the launcher
+trades the password for a one-time ticket (`POST /api/auth/launch-ticket`) and
+opens the browser on the URL that redeems it (`/api/auth/launch?ticket=…`). A
+second double-click while it is running does the same against the running
+copy, which is also how someone gets back in after a session expires.
+
+- The ticket is 32 random bytes, works once, and dies after a minute, so the
+  URL left in the browser's history is worthless.
+- Getting a ticket is the login route with a different reward: same password
+  check, same failure bucket and delay, same refusal when single sign-on is
+  enforced. It is not a second place to guess the password.
+- Both routes answer 404 unless this is the packaged build, so a server run
+  from source, in Docker or behind a proxy doesn't have them at all.
+- It only happens when bound to loopback. With `--host`, people sign in the
+  ordinary way. `--no-auto-sign-in` turns it off on this machine too.
+- If no ticket can be had, the browser opens on the sign-in page as before.
+
+So the first run no longer asks for a password: one is generated and saved in
+`launcher.json`. It is what the launcher proves itself with, and what another
+browser would need.
+
+The password reaches the app as `APP_PASSWORD` in the environment (which
+`launcher.env` can set), from `--set-password` (a no-echo prompt), or from the
+copy in `launcher.json`. With `--no-auto-sign-in` the first run prompts for
+one, as it used to. `--password` works too —
 it is what the smoke test uses — but on a shared machine prefer any of the
 others: argv is readable by every other user through `ps` or Task Manager, and
 shells keep it in history. The launcher says so on stderr when you pass it, and
@@ -144,6 +168,7 @@ against a real single-executable build. Don't "fix" `slice(2)` to `slice(1)`.
 | `server.ts` | Environment contract, in-process start, readiness, shutdown |
 | `payload.ts` | Reading the archive out of the executable |
 | `browser.ts` | Opening the default browser |
+| `signin.ts` | Trading the password for a one-time ticket, so the browser opens signed in |
 | `window.ts` | Keeping a double-clicked Windows console open when a start fails |
 | `log.ts` | Console plus a rotating file in the data folder |
 

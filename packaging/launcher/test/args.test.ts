@@ -19,6 +19,7 @@ describe("parseArgs", () => {
       root: null,
       password: null,
       setPassword: false,
+      noAutoSignIn: false,
       noBrowser: false,
       resetAppCache: false,
       help: false,
@@ -94,3 +95,20 @@ describe("parseArgs", () => {
     }
   });
 });
+
+describe("--no-auto-sign-in", () => {
+  it("is off unless asked for", () => {
+    assert.equal(parseArgs([]).args?.noAutoSignIn, false);
+  });
+
+  it("can be switched on, with or without a value", () => {
+    assert.equal(parseArgs(["--no-auto-sign-in"]).args?.noAutoSignIn, true);
+    assert.equal(parseArgs(["--no-auto-sign-in=true"]).args?.noAutoSignIn, true);
+    assert.equal(parseArgs(["--no-auto-sign-in=false"]).args?.noAutoSignIn, false);
+  });
+
+  it("is documented in the help text", () => {
+    assert.match(usage("open-admin"), /--no-auto-sign-in/);
+  });
+});
+

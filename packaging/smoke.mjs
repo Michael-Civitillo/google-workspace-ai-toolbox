@@ -216,6 +216,59 @@ async function main() {
     const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
     check("login sets a session cookie", cookie.startsWith("gws_toolbox_session="));
 
+    console.log("\nSigning in with a one-time ticket (what the launcher does)");
+    const ticketRes = await postJson(
+      "/api/auth/launch-ticket",
+      { password: PASSWORD },
+      { origin: BASE }
+    );
+    check("the saved password buys a ticket", ticketRes.status === 200, `status ${ticketRes.status}`);
+    const ticket = ticketRes.status === 200 ? (await ticketRes.json()).ticket : "";
+    const redeemPath = `/api/auth/launch?ticket=${encodeURIComponent(ticket)}`;
+    const redeemed = await get(redeemPath);
+    const ticketCookie = (redeemed.headers.get("set-cookie") ?? "").split(";")[0];
+    check(
+      "the ticket is redeemed for a session",
+      redeemed.status === 200 && ticketCookie.startsWith("gws_toolbox_session="),
+      `status ${redeemed.status}`
+    );
+    check(
+      "that session is accepted",
+      (await get("/api/tenants", { headers: { cookie: ticketCookie } })).status === 200
+    );
+    const reused = await get(redeemPath);
+    check(
+      "a ticket cannot be used twice",
+      reused.status === 302 &&
+        reused.headers.get("location") === "/login" &&
+        !reused.headers.get("set-cookie"),
+      `status ${reused.status}`
+    );
+    check(
+      "a made-up ticket is sent to the sign-in page",
+      (await get("/api/auth/launch?ticket=not-a-real-ticket")).status === 302
+    );
+    check(
+      "a ticket request from another site is blocked",
+      (
+        await postJson(
+          "/api/auth/launch-ticket",
+          { password: PASSWORD },
+          { origin: "http://evil.example" }
+        )
+      ).status === 403
+    );
+    check(
+      "a wrong password buys nothing",
+      (
+        await postJson(
+          "/api/auth/launch-ticket",
+          { password: "not-the-password-123" },
+          { origin: BASE }
+        )
+      ).status === 401
+    );
+
     console.log("\nAuthenticated surface");
     const authed = { cookie };
     check("GET / renders the dashboard", (await get("/", { headers: authed })).status === 200);
@@ -325,6 +378,37 @@ async function main() {
     }
     await stop(fallbackHandle.child, 5000);
     fallbackHandle = null;
+
+    // A first run the way a double-click starts it: no password given. It must
+    // come up without asking for one, and must not print the one it generates.
+    console.log("\nA first run with no password given");
+    const freshData = path.join(root, "data-first-run");
+    const firstRun = launch(["--root", root, "--data-dir", freshData]);
+    const firstRunUrl = await waitForReadyUrl(firstRun, 60_000);
+    check("starts without being given, or asking for, a password", firstRunUrl !== null);
+    let generated = "";
+    try {
+      generated = JSON.parse(
+        fs.readFileSync(path.join(freshData, "launcher.json"), "utf-8")
+      ).password;
+    } catch {
+      // Reported by the next check.
+    }
+    check("generates and saves a sign-in password", typeof generated === "string" && generated.length >= 20);
+    check(
+      "does not print the generated password",
+      generated.length > 0 && !firstRun.output().includes(generated)
+    );
+    if (firstRunUrl) {
+      const withGenerated = await fetch(`${firstRunUrl}/api/auth/launch-ticket`, {
+        method: "POST",
+        redirect: "manual",
+        headers: { "content-type": "application/json", origin: firstRunUrl },
+        body: JSON.stringify({ password: generated }),
+      });
+      check("the generated password is the one the server accepts", withGenerated.status === 200);
+    }
+    await stop(firstRun.child, 5000);
 
     console.log("\nSecond instance");
     thirdHandle = start(root);

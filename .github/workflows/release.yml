@@ -223,8 +223,7 @@ jobs:
           1. Download **OpenAdmin-win-x64.exe** from **Assets** at the bottom of this page.
           2. Double-click it. There is nothing to install, and you don't need administrator rights.
           3. If Windows says **"Windows protected your PC"**, click **More info**, then **Run anyway**. The file isn't code-signed yet, so Windows doesn't recognise it.
-          4. A black window opens and asks you to choose a password (12 characters or more). Type it, press Enter, and type it once more to confirm.
-          5. Your browser opens. Sign in with that password.
+          4. A black window opens and, a few seconds later, so does your browser, already signed in. There is no password to choose.
 
           Leave the black window open while you work, and close it when you're finished. Next time, double-click the same file: your settings are kept.
 

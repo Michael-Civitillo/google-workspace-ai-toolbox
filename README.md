@@ -165,8 +165,7 @@ Grab the file for your OS from the [latest release](https://github.com/Michael-C
 
 1. Download [`OpenAdmin-win-x64.exe`](https://github.com/Michael-Civitillo/google-workspace-ai-toolbox/releases/latest/download/OpenAdmin-win-x64.exe). If your browser holds it back as "not commonly downloaded", choose **Keep**.
 2. Double-click it. Nothing is installed and you don't need administrator rights. If Windows shows "Windows protected your PC", click **More info → Run anyway** — the file isn't code-signed yet, so Windows doesn't recognise it.
-3. A console window opens and asks you to choose a password: 12 characters or more, typed twice.
-4. Your browser opens the sign-in page. Sign in with that password.
+3. A console window opens and, a few seconds later, so does your browser, already signed in. There is no password to choose.
 
 Keep the console window open while you work — closing it stops the app. Next time, double-click the same file; your settings are still there.
 
@@ -187,7 +186,7 @@ chmod +x ~/Downloads/open-admin-linux-x64
 ~/Downloads/open-admin-linux-x64
 ```
 
-Then, on every OS: choose a password when asked, and your browser opens at `http://localhost:3000`. Sign in and you're in. 🎉
+Then, on every OS: your browser opens at `http://localhost:3000`, already signed in. 🎉
 
 Everything is inside that one file — the runtime, the app, the lot. No Node.js, no `npm install`, no `gws` CLI. It serves **this machine only**: the server listens on loopback, so nothing is exposed to your network and no firewall prompts. You still need a **service account with domain-wide delegation** before you can run operations — the app walks you through it on first launch ([Auth setup](#-auth-setup-the-important-part)).
 
@@ -203,7 +202,8 @@ Everything is inside that one file — the runtime, the app, the lot. No Node.js
 
 **If something's off**
 
-- **Forgot the password?** Delete `launcher.json` from the data folder and start again; you'll be asked to choose a new one. Tenants, keys and the audit log aren't touched. (On Windows, paste `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data` into the File Explorer address bar to get there. The console window also prints the folder when it starts.)
+- **Need the sign-in password?** Normally you don't: starting the app signs you in, and starting it again signs you back in if the session has run out. A password does exist, for signing in from a different browser. Choose your own by running the file with `--set-password`, or read the generated one from `launcher.json` in the data folder. (On Windows, paste `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\data` into the File Explorer address bar to get there. The console window also prints the folder when it starts.)
+- **Would rather type a password every time?** Run it with `--no-auto-sign-in`: the browser opens on the sign-in page instead.
 - **Port 3000 already in use?** The app moves to the next free port for that run and opens your browser there. Single sign-on, if you set it up, is tied to the usual port: sign in with the password that time, or close whatever has the port.
 - **It says it could not start?** On Windows the window stays open so you can read why; the same text is saved in `logs\launcher.log` in the data folder.
 
@@ -218,8 +218,9 @@ open-admin [options]
   --host <addr>        bind address (default 127.0.0.1 — this machine only)
   --data-dir <path>    where tenants, sign-on config, audit log and keys live
   --root <path>        override the whole application folder (app cache + data)
-  --set-password       set a new admin password for the web UI
-  --password <pw>      set the admin password (saved; visible in the process list)
+  --set-password       choose the sign-in password yourself
+  --password <pw>      set the sign-in password (saved; visible in the process list)
+  --no-auto-sign-in    open the sign-in page instead of signing in automatically
   --no-browser         don't open a browser window on start
   --reset-app-cache    re-extract the bundled application files
   --version, -v        print version information

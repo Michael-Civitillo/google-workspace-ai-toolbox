@@ -12,6 +12,10 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/sso/status",
   "/api/auth/oidc/start",
   "/api/auth/oidc/callback",
+  // Desktop build only (both answer 404 elsewhere): the launcher trades the
+  // password for a one-time ticket and the browser redeems it for a session.
+  "/api/auth/launch-ticket",
+  "/api/auth/launch",
 ]);
 
 /**
