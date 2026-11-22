@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { identityFromRequest } from "@/lib/session";
 
 /** Who the current session belongs to — drives the "signed in as" footer. */
 export async function GET(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const identity = await identityFromRequest(req);
   if (!identity) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

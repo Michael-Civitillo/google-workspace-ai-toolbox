@@ -33,7 +33,7 @@ import {
   UserPlus,
   XCircle,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant, tenantPinProblem } from "@/lib/tenant-client";
 import { isValidEmail } from "@/lib/validate-email";
 
 interface DomainInfo {
@@ -305,6 +305,14 @@ export default function NewUser() {
   }
 
   async function create() {
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setCreateError(pinProblem);
+      return;
+    }
+
     const pinnedTenantId = tenantId;
     const groups = parsedGroups.groups;
     setCreating(true);
@@ -493,6 +501,9 @@ export default function NewUser() {
                 <Button
                   size="sm"
                   variant="outline"
+                  // Clearing ends the run: the groups not yet added would
+                  // silently never be.
+                  disabled={groupsBusy}
                   onClick={() => {
                     runRef.current++;
                     setCreated(null);
@@ -501,6 +512,12 @@ export default function NewUser() {
                 >
                   I&apos;ve copied it, clear this
                 </Button>
+                {groupsBusy && (
+                  <p className="text-xs text-muted-foreground">
+                    Still adding the account to its groups. This can be cleared,
+                    and another account created, once that has finished.
+                  </p>
+                )}
               </div>
             )}
 
@@ -629,7 +646,9 @@ export default function NewUser() {
             <Button
               className="w-full"
               size="lg"
-              disabled={!!formProblem || loadingDomains || domains.length === 0}
+              // A new account replaces the result above, which would stop the
+              // last one's group adds part-way without a word.
+              disabled={!!formProblem || loadingDomains || domains.length === 0 || groupsBusy}
               onClick={() => {
                 setCreateError(null);
                 setCreateOpen(true);

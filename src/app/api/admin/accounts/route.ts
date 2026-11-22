@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { listDirectoryAccounts } from "@/lib/admin-sdk";
 import { ValidationError } from "@/lib/validate";
@@ -14,6 +15,8 @@ import { errorResponse } from "@/lib/api-errors";
  * uses it to fill in "everyone with a mailbox".
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const pageToken = request.nextUrl.searchParams.get("pageToken") || undefined;

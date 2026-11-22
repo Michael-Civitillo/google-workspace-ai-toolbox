@@ -201,12 +201,38 @@ export function checkDkim(records: readonly string[], selector: string): RecordC
   };
 }
 
-/** Parent domains to try for an inherited DMARC policy, nearest first. */
-function parents(domain: string): string[] {
+/**
+ * Two-label public suffixes common enough to matter here: under these, the
+ * registered ("organizational") domain is three labels long. Not the whole
+ * Public Suffix List, which would mean shipping it; an unlisted one is
+ * treated as an ordinary two-label domain, which is what this did before.
+ */
+const TWO_LABEL_SUFFIXES = new Set(
+  (
+    "co.uk org.uk gov.uk ac.uk ltd.uk plc.uk me.uk net.uk sch.uk nhs.uk police.uk " +
+    "com.au net.au org.au edu.au gov.au asn.au id.au co.nz org.nz net.nz govt.nz ac.nz school.nz " +
+    "co.jp ne.jp or.jp ac.jp go.jp com.br net.br org.br gov.br co.in net.in org.in gov.in ac.in " +
+    "co.za org.za gov.za com.mx gob.mx com.cn net.cn org.cn gov.cn com.hk com.sg gov.sg " +
+    "co.kr or.kr com.tw com.tr co.il com.ar com.my co.id com.ph com.vn com.pk com.ng co.ke"
+  ).split(" ")
+);
+
+/**
+ * Where a subdomain's DMARC policy comes from when it has none of its own:
+ * its organizational domain (RFC 7489, section 6.6.3), and only that. Not
+ * every parent in between, and never a public suffix such as gov.uk, whose
+ * own record says nothing about the domains registered under it.
+ */
+function organizationalDomain(domain: string): string {
   const labels = domain.split(".");
-  const out: string[] = [];
-  for (let i = 1; i <= labels.length - 2; i++) out.push(labels.slice(i).join("."));
-  return out;
+  const lastTwo = labels.slice(-2).join(".");
+  return labels.slice(TWO_LABEL_SUFFIXES.has(lastTwo) ? -3 : -2).join(".");
+}
+
+/** The domain to try for an inherited DMARC policy, if there is one. */
+function parents(domain: string): string[] {
+  const org = organizationalDomain(domain);
+  return org !== domain && domain.endsWith(`.${org}`) ? [org] : [];
 }
 
 const lookupFailed = (what: string, e: unknown): RecordCheck => ({

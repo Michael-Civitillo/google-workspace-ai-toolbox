@@ -71,3 +71,30 @@ export async function parseHandshake(
   }
   return handshake;
 }
+
+/**
+ * Mark a handshake as used. True the first time its `state` is seen, false
+ * after that. The cookie is cleared after every callback, but a copy of it
+ * stayed valid for its full ten minutes, so the same handshake could be
+ * replayed against the callback again and again. Kept on globalThis and
+ * pruned as entries expire; bounded so a flood can't exhaust memory.
+ */
+const USED_KEY = "__openAdminUsedHandshakes";
+const USED_MAX = 50_000;
+
+export function consumeHandshake(state: string, now: number = Date.now()): boolean {
+  const g = globalThis as unknown as Record<string, Map<string, number> | undefined>;
+  const used = (g[USED_KEY] ??= new Map<string, number>());
+  for (const [key, expiresAt] of used) {
+    if (expiresAt > now) break; // insertion order is expiry order
+    used.delete(key);
+  }
+  if (used.has(state)) return false;
+  used.set(state, now + HANDSHAKE_TTL_SECONDS * 1000);
+  while (used.size > USED_MAX) {
+    const oldest = used.keys().next().value;
+    if (oldest === undefined) break;
+    used.delete(oldest);
+  }
+  return true;
+}

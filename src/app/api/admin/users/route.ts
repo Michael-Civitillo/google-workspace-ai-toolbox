@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { listUsers } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { ValidationError } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Page through tenant users.
@@ -12,6 +14,8 @@ import { ValidationError } from "@/lib/validate";
  * mailbox to scan, but generic enough to feed any future tenant-wide flow.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const pageToken = request.nextUrl.searchParams.get("pageToken") || undefined;
@@ -30,7 +34,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: result });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Failed to list users";
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

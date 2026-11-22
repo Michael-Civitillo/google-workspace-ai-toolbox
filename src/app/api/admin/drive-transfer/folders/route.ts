@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { listDriveFolders } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 const DRIVE_ID_RE = /^[A-Za-z0-9_-]{8,256}$/;
 
@@ -15,6 +17,8 @@ const DRIVE_ID_RE = /^[A-Za-z0-9_-]{8,256}$/;
  * we can transfer. Read-only.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
@@ -40,7 +44,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: result });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Folder listing failed";
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

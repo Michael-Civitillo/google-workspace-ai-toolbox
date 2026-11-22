@@ -161,7 +161,31 @@ export interface RawFilter {
     negatedQuery?: string | null;
     hasAttachment?: boolean | null;
   } | null;
-  action?: { forward?: string | null } | null;
+  action?: {
+    forward?: string | null;
+    addLabelIds?: string[] | null;
+    removeLabelIds?: string[] | null;
+  } | null;
+}
+
+/**
+ * What a forwarding filter does with the original besides forwarding it.
+ * Deleting or archiving it means the mailbox owner may never see the mail
+ * that went out, which is what makes forwarding hard to notice.
+ */
+function filterDisposition(action: RawFilter["action"]): { detail: string; hides: boolean } | null {
+  const add = new Set((action?.addLabelIds ?? []).map((l) => String(l).toUpperCase()));
+  const remove = new Set((action?.removeLabelIds ?? []).map((l) => String(l).toUpperCase()));
+  if (add.has("TRASH")) return { detail: "deletes the original", hides: true };
+  if (add.has("SPAM")) return { detail: "sends the original to spam", hides: true };
+  if (remove.has("INBOX")) {
+    return {
+      detail: remove.has("UNREAD") ? "archives the original and marks it read" : "archives the original",
+      hides: true,
+    };
+  }
+  if (remove.has("UNREAD")) return { detail: "marks the original read", hides: false };
+  return null;
 }
 
 export interface ForwardingFinding {
@@ -255,13 +279,16 @@ export function forwardingFindings(
     const forward = filter.action?.forward?.trim();
     if (!forward) continue;
     if (isExternalAddress(forward, verifiedDomains)) {
+      const disposition = filterDisposition(filter.action);
       external.push({
         user: owner.primaryEmail,
         name: owner.fullName,
         kind: "filter",
         target: forward.toLowerCase(),
-        detail: `Filter on ${describeFilterCriteria(filter.criteria)}`,
-        hidesOriginal: false,
+        detail: `Filter on ${describeFilterCriteria(filter.criteria)}${
+          disposition ? `; ${disposition.detail}` : ""
+        }`,
+        hidesOriginal: disposition?.hides ?? false,
         filterId: filter.id ?? null,
       });
     } else {
@@ -331,8 +358,16 @@ const LOW_EXACT: Record<string, string> = {
   [`${AUTH}gmail.labels`]: "Gmail labels",
 };
 
+/** Feed-era scope addresses that reach all of one's documents or mail. */
+const LEGACY_HIGH_PREFIX: Array<[string, string]> = [
+  ["https://docs.google.com/feeds", "Drive"],
+  ["https://mail.google.com/mail/feed/atom", "Gmail"],
+];
+
 /** Broad access to one product, short of mail and the whole of Drive. */
 const MEDIUM_PREFIX: Array<[string, string]> = [
+  ["https://spreadsheets.google.com/feeds", "Docs, Sheets, Slides"],
+  ["https://www.google.com/calendar/feeds", "Calendar"],
   [`${AUTH}gmail.send`, "Send mail"],
   [`${AUTH}calendar`, "Calendar"],
   [`${AUTH}contacts`, "Contacts"],
@@ -369,6 +404,11 @@ export function classifyScope(scope: string): ScopeInfo {
   if (s.startsWith(`${AUTH}admin.`)) return { level: "high", area: "Admin console" };
   if (s.startsWith("https://apps-apis.google.com/")) {
     return { level: "high", area: "Admin console" };
+  }
+  // Older-style addresses for the same reach, which long-lived grants can
+  // still carry: every document, or the inbox.
+  for (const [prefix, area] of LEGACY_HIGH_PREFIX) {
+    if (s === prefix || s.startsWith(`${prefix}/`)) return { level: "high", area };
   }
 
   const low = LOW_EXACT[s];

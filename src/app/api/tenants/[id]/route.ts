@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   updateTenant,
   deleteTenant,
@@ -23,6 +24,8 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -41,9 +44,12 @@ export async function PUT(
     // null/""/false slips past the check yet is still written below, corrupting
     // the stored tenant (e.g. TENANT_COLOR_CLASSES[null] is undefined and the
     // UI crashes rendering it).
-    if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+    if (
+      name !== undefined &&
+      (typeof name !== "string" || !name.trim() || name.trim().length > 100)
+    ) {
       return NextResponse.json(
-        { error: "name must be a non-empty string" },
+        { error: "name must be a non-empty string of at most 100 characters" },
         { status: 400 }
       );
     }
@@ -135,6 +141,8 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   let tenantId: string | null = null;
   let tenant = null;

@@ -3,7 +3,7 @@ import type { Tenant, PublicTenant } from "./tenant-types";
 import { dataPath } from "./data-dir";
 import { ValidationError } from "./validate";
 import {
-  readJsonObjectFile,
+  readJsonObjectFileCached,
   writeJsonFileAtomic,
   withFileLock,
 } from "./json-store";
@@ -22,6 +22,8 @@ export function toPublicTenant(tenant: Tenant): PublicTenant {
 interface TenantStore {
   activeTenantId: string | null;
   tenants: Tenant[];
+  /** Entries in the file that aren't usable tenants, kept for repair. */
+  unusable?: unknown[];
 }
 
 const STORE_PATH = dataPath("tenants.json");
@@ -36,23 +38,56 @@ try {
   // Not created yet.
 }
 
+/** An entry every route can use: anything else is set aside, not trusted. */
+function isUsableTenant(t: unknown): t is Tenant {
+  if (!t || typeof t !== "object" || Array.isArray(t)) return false;
+  const r = t as Record<string, unknown>;
+  return (
+    typeof r.id === "string" &&
+    r.id !== "" &&
+    typeof r.name === "string" &&
+    typeof r.adminEmail === "string" &&
+    typeof r.credentialsFile === "string"
+  );
+}
+
+let warnedUnusableTenants = false;
+
 function readStore(): TenantStore {
   // Corruption-safe read: missing/empty/corrupt files come back as null (the
   // unusable ones quarantined first), transient read errors throw so a
   // read-modify-write under the lock aborts instead of persisting an empty
   // store over the real config. See json-store.ts.
-  const parsed = readJsonObjectFile(STORE_PATH);
+  const parsed = readJsonObjectFileCached(STORE_PATH);
   if (parsed === null) {
-    return { activeTenantId: null, tenants: [] };
+    return { activeTenantId: null, tenants: [], unusable: [] };
+  }
+  const all: unknown[] = Array.isArray(parsed.tenants) ? parsed.tenants : [];
+  // One malformed entry (a hand edit, a half-restored file) used to break
+  // every tenant route. It is left out of what the app uses, kept in the
+  // file for whoever repairs it, and said once in the server's output.
+  const tenants = all.filter(isUsableTenant);
+  const unusable = all.filter((t) => !isUsableTenant(t));
+  if (unusable.length > 0 && !warnedUnusableTenants) {
+    warnedUnusableTenants = true;
+    console.warn(
+      `[tenants] ${STORE_PATH} has ${unusable.length} entr${unusable.length === 1 ? "y" : "ies"} without an id, name, admin email and key file; ignoring ${unusable.length === 1 ? "it" : "them"} until repaired.`
+    );
   }
   return {
-    activeTenantId: (parsed.activeTenantId as string | null) ?? null,
-    tenants: Array.isArray(parsed.tenants) ? (parsed.tenants as Tenant[]) : [],
+    activeTenantId:
+      typeof parsed.activeTenantId === "string" ? parsed.activeTenantId : null,
+    tenants,
+    unusable,
   };
 }
 
 async function writeStoreAtomic(store: TenantStore): Promise<void> {
-  await writeJsonFileAtomic(STORE_PATH, store);
+  await writeJsonFileAtomic(STORE_PATH, {
+    activeTenantId: store.activeTenantId,
+    // Unusable entries go back as they were, for repair by hand.
+    tenants: [...store.tenants, ...(store.unusable ?? [])],
+  });
 }
 
 function withLock<T>(fn: () => T | Promise<T>): Promise<T> {

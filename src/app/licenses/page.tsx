@@ -33,7 +33,7 @@ import {
   UserPlus,
   X,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant, tenantPinProblem } from "@/lib/tenant-client";
 import { isValidEmail } from "@/lib/validate-email";
 import {
   LICENSE_IDLE_DAYS,
@@ -146,6 +146,15 @@ export default function Licenses() {
   );
 
   async function check() {
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setFailure(pinProblem);
+      setPhase("failed");
+      return;
+    }
+
     const pinnedTenantId = tenantId;
     const ac = new AbortController();
     abortRef.current?.abort();
@@ -164,9 +173,25 @@ export default function Licenses() {
     let productsRead = 0;
 
     try {
-      for (const product of LICENSE_PRODUCTS) {
+      // All products at once: each is its own short list, and one after
+      // another made every check wait on seven round trips in a row.
+      // A product's licences count only once all its pages are in: one that
+      // fails part-way is reported as not shown, with none of its rows, so
+      // the page never mixes "not shown" with half a list.
+      const setupProblem: { value: SetupProblem | null } = { value: null };
+      let readSoFar = 0;
+      const readProduct = async (
+        product: (typeof LICENSE_PRODUCTS)[number]
+      ): Promise<
+        | { kind: "read"; rows: LicenseAssignment[] }
+        | { kind: "failed"; error: string }
+        | { kind: "unavailable" }
+        | null
+      > => {
+        const rows: LicenseAssignment[] = [];
         let pageToken: string | null = null;
         do {
+          if (setupProblem.value || !live()) return null;
           const query = new URLSearchParams({ product: product.id });
           if (pageToken) query.set("pageToken", pageToken);
           const res = await tfetch(
@@ -175,27 +200,44 @@ export default function Licenses() {
             pinnedTenantId
           );
           const result = await res.json();
-          if (!live()) return;
+          if (!live()) return null;
           if (!result.success) {
             if (result.code === "scope_missing" || result.code === "api_disabled") {
               // Nothing else will work until this is fixed, so stop here.
-              setSetup({ code: result.code, scope: result.scope, detail: result.detail ?? null });
-              setPhase("failed");
-              return;
+              setupProblem.value = {
+                code: result.code,
+                scope: result.scope,
+                detail: result.detail ?? null,
+              };
+              return null;
             }
-            failedProducts.push({
-              name: product.name,
-              error: result.error || `The server answered ${res.status}`,
-            });
-            break;
+            return { kind: "failed", error: result.error || `The server answered ${res.status}` };
           }
-          if (result.data.unavailable) break;
-          if (!pageToken) productsRead++;
-          assignments.push(...(result.data.assignments as LicenseAssignment[]));
-          setProgress(`Reading licences... ${assignments.length.toLocaleString()} so far`);
+          if (result.data.unavailable) return { kind: "unavailable" };
+          const page = result.data.assignments as LicenseAssignment[];
+          rows.push(...page);
+          readSoFar += page.length;
+          setProgress(`Reading licences... ${readSoFar.toLocaleString()} so far`);
           pageToken = result.data.nextPageToken;
         } while (pageToken);
+        return { kind: "read", rows };
+      };
+      const outcomes = await Promise.all(LICENSE_PRODUCTS.map(readProduct));
+      if (!live()) return;
+      if (setupProblem.value) {
+        setSetup(setupProblem.value);
+        setPhase("failed");
+        return;
       }
+      LICENSE_PRODUCTS.forEach((product, i) => {
+        const outcome = outcomes[i];
+        if (outcome?.kind === "read") {
+          productsRead++;
+          assignments.push(...outcome.rows);
+        } else if (outcome?.kind === "failed") {
+          failedProducts.push({ name: product.name, error: outcome.error });
+        }
+      });
 
       if (productsRead === 0) {
         setFailure(
@@ -282,9 +324,20 @@ export default function Licenses() {
         setChangeError(result.error || "Google refused the change.");
         return;
       }
-      // Keep what's on screen true without reading everything again.
+      // Keep what's on screen true without reading everything again. For an
+      // assignment, from Google's answer: an alias typed into the form names
+      // the account by its primary address there, which is how the rest of
+      // the page knows it.
+      const applied: LicenseAssignment =
+        change.kind === "assign" && result.data && typeof result.data.user === "string"
+          ? {
+              ...target,
+              ...(result.data as LicenseAssignment),
+              user: String(result.data.user).toLowerCase(),
+            }
+          : target;
       const same = (a: LicenseAssignment) =>
-        a.user === target.user && a.productId === target.productId && a.skuId === target.skuId;
+        a.user === applied.user && a.productId === applied.productId && a.skuId === applied.skuId;
       setScan((prev) =>
         prev
           ? {
@@ -292,7 +345,7 @@ export default function Licenses() {
               assignments:
                 change.kind === "remove"
                   ? prev.assignments.filter((a) => !same(a))
-                  : [...prev.assignments.filter((a) => !same(a)), target],
+                  : [...prev.assignments.filter((a) => !same(a)), applied],
             }
           : prev
       );
@@ -300,8 +353,10 @@ export default function Licenses() {
         type: "success",
         text:
           change.kind === "remove"
-            ? `Removed ${target.skuName} from ${target.user}.`
-            : `Assigned ${target.skuName} to ${target.user}.`,
+            ? `Removed ${applied.skuName} from ${applied.user}.`
+            : `Assigned ${applied.skuName} to ${applied.user}${
+                applied.user !== target.user ? ` (${target.user})` : ""
+              }.`,
       });
       setChange(null);
       if (change.kind === "assign") setAssignUser("");

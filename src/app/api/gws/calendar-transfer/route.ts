@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   buildCalendarClient,
@@ -13,6 +14,8 @@ import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const user = requireEmail(request.nextUrl.searchParams.get("user"), "user");
@@ -67,6 +70,8 @@ const GOOGLE_CALENDAR_ID_RE =
   /^[A-Za-z0-9._%+'#-]{1,200}@[A-Za-z0-9.-]{0,60}calendar\.google\.com$/;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

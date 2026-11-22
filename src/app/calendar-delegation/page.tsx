@@ -49,6 +49,21 @@ const roleBadgeColors: Record<string, string> = {
   owner: "border-primary/20 bg-primary/10 text-primary",
 };
 
+/** A grant as it stood when its confirmation opened. */
+interface PendingAdd {
+  calendar: string;
+  delegate: string;
+  role: string;
+  /** Outside the tenant's verified domains (or the domains are unknown). */
+  external: boolean;
+}
+
+/** A removal as it stood when its confirmation opened. */
+interface PendingRemove {
+  calendar: string;
+  rule: AclRule;
+}
+
 export default function CalendarDelegation() {
   const { tenant, id: tenantId } = useCurrentTenant();
   const [calendarId, setCalendarId] = useState("");
@@ -62,8 +77,16 @@ export default function CalendarDelegation() {
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const [confirmAddOpen, setConfirmAddOpen] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState<AclRule | null>(null);
+  // What each dialog acts on, pinned when it opens: a lookup that finishes
+  // while a dialog is open must not change what its Confirm does.
+  const [pendingAdd, setPendingAdd] = useState<PendingAdd | null>(null);
+  const [pendingRemove, setPendingRemove] = useState<PendingRemove | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  // Tenant's verified domains (aliases included), for flagging an outside
+  // grantee. null = not loaded / lookup failed → treated as outside, the same
+  // fail-safe the server's gate uses.
+  const [verifiedDomains, setVerifiedDomains] = useState<string[] | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -72,19 +95,62 @@ export default function CalendarDelegation() {
   // Live tenant id for staleness checks inside async closures.
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
+  // Only the latest list request may fill the panel: a slow lookup of one
+  // calendar must not land after a newer one, or after a tenant switch.
+  const listSeq = useRef(0);
+
+  // Clear everything tenant-scoped when the tenant changes — rules fetched
+  // for tenant A must never drive removals against tenant B, and a dialog
+  // opened under A must not confirm under B.
+  useEffect(() => {
+    let cancelled = false;
+    listSeq.current++;
+    setLoading(false);
+    setAclRules([]);
+    setListedCalendar("");
+    setPendingAdd(null);
+    setPendingRemove(null);
+    setAddError(null);
+    setRemoveError(null);
+    setVerifiedDomains(null);
+    tfetch("/api/admin/domains", {}, tenantId)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        if (d?.success && Array.isArray(d.data)) {
+          setVerifiedDomains(
+            d.data
+              .filter((x: { verified?: boolean }) => x.verified)
+              .map((x: { domainName: string }) => x.domainName.toLowerCase())
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  const isExternal = (address: string) => {
+    const at = address.lastIndexOf("@");
+    const domain = at === -1 ? "" : address.slice(at + 1).trim().toLowerCase();
+    return !!domain && (verifiedDomains === null || !verifiedDomains.includes(domain));
+  };
 
   const listAcl = async (calendarOverride?: string) => {
-    // calendarOverride lets refresh-after-removal re-list the calendar the
-    // panel is showing (listedCalendar) — the live input may have been
-    // retyped since.
+    // calendarOverride lets refresh-after-change re-list the calendar the
+    // change ran against — the live input may have been retyped since.
     const calendar = (calendarOverride ?? calendarId).trim();
     if (!calendar) return;
+    const seq = ++listSeq.current;
     setLoading(true);
     setMessage(null);
     // Pin the tenant this list belongs to, and discard the response if the
     // tenant changed while it was in flight — otherwise a stale tenant-A list
     // repopulates the UI under tenant B and defeats the listedCalendar guard.
     const pinnedTenantId = tenantId;
+    const isLatest = () =>
+      listSeq.current === seq && tenantIdRef.current === pinnedTenantId;
 
     try {
       const res = await tfetch(
@@ -93,7 +159,7 @@ export default function CalendarDelegation() {
         pinnedTenantId
       );
       const result = await res.json();
-      if (tenantIdRef.current !== pinnedTenantId) return;
+      if (!isLatest()) return;
 
       if (result.success && result.data?.items) {
         setAclRules(result.data.items);
@@ -114,23 +180,28 @@ export default function CalendarDelegation() {
         setMessage({ type: "error", text: result.error || "Failed to list ACL rules" });
       }
     } catch {
+      if (!isLatest()) return;
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
-      setLoading(false);
+      if (listSeq.current === seq) setLoading(false);
     }
   };
 
-  // Clear a stale rules list when the tenant changes — rules fetched for tenant
-  // A must never drive removals against tenant B.
-  useEffect(() => {
-    setAclRules([]);
-    setListedCalendar("");
-  }, [tenantId]);
+  const openAdd = () => {
+    const calendar = calendarId.trim();
+    const delegate = delegateEmail.trim();
+    if (!calendar || !delegate) return;
+    setMessage(null);
+    setAddError(null);
+    setPendingAdd({ calendar, delegate, role, external: isExternal(delegate) });
+  };
 
-  const addAcl = async () => {
-    if (!calendarId || !delegateEmail || !role) return;
+  const addAcl = async (p: PendingAdd) => {
     setAdding(true);
     setMessage(null);
+    setAddError(null);
+    const pinnedTenantId = tenantId;
+    const isOwner = p.role === "owner";
 
     try {
       const res = await tfetch(
@@ -139,50 +210,53 @@ export default function CalendarDelegation() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            calendarId,
-            delegateEmail,
-            role,
-            // The dialog already made the operator type the delegate email for
-            // owner grants; relay that confirmation so the server's
-            // external-owner gate accepts intentional external grants.
-            confirmExternal:
-              role === "owner" ? delegateEmail.trim() : undefined,
+            calendarId: p.calendar,
+            delegateEmail: p.delegate,
+            role: p.role,
+            // An owner grant needs the delegate's address typed in the dialog
+            // (the server checks it), and the dialog only confirms once it
+            // matches — so this is what the operator typed.
+            confirm: isOwner ? p.delegate : undefined,
+            // Only when this page judged the address external, from the same
+            // typed phrase: the server's own check of outside owners then
+            // sees an intentional grant rather than one the page assumed.
+            confirmExternal: isOwner && p.external ? p.delegate : undefined,
           }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success) {
-        const grantedTo = delegateEmail;
         setDelegateEmail("");
-        setConfirmAddOpen(false);
+        setPendingAdd(null);
         // Refresh first, then set the message: listAcl clears messages in its
         // synchronous prologue, so setting it earlier batches a set+clear into
         // one render and the success feedback is never painted.
-        await listAcl();
+        await listAcl(p.calendar);
+        if (tenantIdRef.current !== pinnedTenantId) return;
         setMessage({
           type: "success",
-          text: `Granted ${role} access to ${grantedTo}`,
+          text: `Granted ${p.role} access to ${p.delegate}`,
         });
       } else {
-        // Close the dialog so the page-level error banner isn't hidden
-        // behind the modal overlay.
-        setConfirmAddOpen(false);
-        setMessage({ type: "error", text: result.error || "Failed to add access" });
+        // Stay in the dialog: that is where the operator is looking.
+        setAddError(result.error || "Failed to add access");
       }
     } catch {
-      setConfirmAddOpen(false);
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      if (tenantIdRef.current !== pinnedTenantId) return;
+      setAddError("Failed to connect to the API");
     } finally {
       setAdding(false);
     }
   };
 
-  const removeAcl = async (ruleId: string) => {
-    if (!listedCalendar) return;
-    setRemoving(ruleId);
+  const removeAcl = async (p: PendingRemove) => {
+    setRemoving(p.rule.id);
     setMessage(null);
+    setRemoveError(null);
+    const pinnedTenantId = tenantId;
 
     try {
       const res = await tfetch(
@@ -190,34 +264,41 @@ export default function CalendarDelegation() {
         {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          // Target the calendar the list was fetched for, not the live input.
-          body: JSON.stringify({ calendarId: listedCalendar, ruleId }),
+          // The calendar and rule the dialog was opened for, never the live
+          // input or a list that loaded since. Removing an owner needs the
+          // owner's address, which the dialog had the operator type.
+          body: JSON.stringify({
+            calendarId: p.calendar,
+            ruleId: p.rule.id,
+            confirm: p.rule.role === "owner" ? p.rule.scope?.value : undefined,
+          }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success) {
-        setConfirmRemove(null);
-        // Refresh the calendar the removal actually ran against — the live
-        // input may point somewhere else by now. Refresh before messaging —
-        // listAcl's prologue clears messages, which would erase this success
-        // text in the same batched render.
-        await listAcl(listedCalendar);
+        setPendingRemove(null);
+        // Refresh the calendar the removal actually ran against. Refresh
+        // before messaging — listAcl's prologue clears messages, which would
+        // erase this success text in the same batched render.
+        await listAcl(p.calendar);
+        if (tenantIdRef.current !== pinnedTenantId) return;
         setMessage({ type: "success", text: "Access removed successfully" });
       } else {
-        // Close the dialog so the page-level error banner isn't hidden
-        // behind the modal overlay.
-        setConfirmRemove(null);
-        setMessage({ type: "error", text: result.error || "Failed to remove access" });
+        setRemoveError(result.error || "Failed to remove access");
       }
     } catch {
-      setConfirmRemove(null);
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      if (tenantIdRef.current !== pinnedTenantId) return;
+      setRemoveError("Failed to connect to the API");
     } finally {
       setRemoving(null);
     }
   };
+
+  const delegateLooksExternal = !!delegateEmail.trim() && isExternal(delegateEmail.trim());
+  const addIsOwner = pendingAdd?.role === "owner";
 
   return (
     <>
@@ -275,6 +356,15 @@ export default function CalendarDelegation() {
                 value={delegateEmail}
                 onChange={(e) => setDelegateEmail(e.target.value)}
               />
+              {delegateLooksExternal && (
+                <p className="text-xs text-warning-fg">
+                  This address is outside your organisation
+                  {verifiedDomains === null
+                    ? " (or the tenant's domains couldn't be checked)"
+                    : ""}
+                  .
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -308,11 +398,8 @@ export default function CalendarDelegation() {
 
             <Button
               className="w-full"
-              onClick={() => {
-                setMessage(null);
-                setConfirmAddOpen(true);
-              }}
-              disabled={!calendarId || !delegateEmail || adding}
+              onClick={openAdd}
+              disabled={!calendarId.trim() || !delegateEmail.trim() || adding}
             >
               {adding ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -330,7 +417,7 @@ export default function CalendarDelegation() {
             <CardTitle>Current Access Rules</CardTitle>
             <CardDescription>
               {aclRules.length > 0
-                ? `${aclRules.length} rule${aclRules.length > 1 ? "s" : ""} found`
+                ? `${aclRules.length} rule${aclRules.length > 1 ? "s" : ""} found for ${listedCalendar}`
                 : "Search for a calendar to see access rules"}
             </CardDescription>
           </CardHeader>
@@ -370,8 +457,10 @@ export default function CalendarDelegation() {
                         variant="ghost"
                         size="sm"
                         onClick={() => {
+                          if (!listedCalendar) return;
                           setMessage(null);
-                          setConfirmRemove(rule);
+                          setRemoveError(null);
+                          setPendingRemove({ calendar: listedCalendar, rule });
                         }}
                         disabled={removing === rule.id}
                       >
@@ -391,65 +480,98 @@ export default function CalendarDelegation() {
       </div>
 
       <ConfirmActionDialog
-        open={confirmAddOpen}
-        onOpenChange={(o) => !adding && setConfirmAddOpen(o)}
+        open={!!pendingAdd}
+        onOpenChange={(o) => {
+          if (adding || o) return;
+          setPendingAdd(null);
+          setAddError(null);
+        }}
         title="Grant calendar access"
-        summary={`Give ${delegateEmail || "—"} ${role} access to ${calendarId || "—"}'s calendar.`}
+        summary={`Give ${pendingAdd?.delegate ?? "—"} ${pendingAdd?.role ?? ""} access to ${pendingAdd?.calendar ?? "—"}'s calendar.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
-        severity={role === "owner" ? "high" : "medium"}
-        confirmPhrase={role === "owner" ? delegateEmail : undefined}
-        confirmLabel={role === "owner" ? "Grant ownership" : "Grant access"}
+        severity={addIsOwner ? "high" : "medium"}
+        confirmPhrase={addIsOwner ? pendingAdd?.delegate : undefined}
+        confirmLabel={addError ? "Try again" : addIsOwner ? "Grant ownership" : "Grant access"}
         busy={adding}
         changes={[
-          { label: "Calendar", after: calendarId },
-          { label: "Grantee", after: delegateEmail },
+          { label: "Calendar", after: pendingAdd?.calendar ?? "" },
+          {
+            label: pendingAdd?.external ? "Grantee (outside your organisation)" : "Grantee",
+            after: pendingAdd?.delegate ?? "",
+            emphasis: !!pendingAdd?.external,
+          },
           {
             label: "Role",
-            after: `${role} — ${roleDescriptions[role] ?? ""}`,
-            emphasis: role === "owner" || role === "writer",
+            after: `${pendingAdd?.role ?? ""} — ${roleDescriptions[pendingAdd?.role ?? ""] ?? ""}`,
+            emphasis: pendingAdd?.role === "owner" || pendingAdd?.role === "writer",
           },
         ]}
         warnings={
-          role === "owner" ? (
+          pendingAdd?.external || addIsOwner ? (
             <>
-              <strong>Owner</strong> can re-share, transfer, and delete the
-              calendar. Only grant this if {delegateEmail} should have full
-              control.
+              {pendingAdd?.external && (
+                <p className={addIsOwner ? "mb-2" : undefined}>
+                  <strong>{pendingAdd.delegate}</strong> is outside your
+                  organisation
+                  {verifiedDomains === null
+                    ? " (or the tenant's domains couldn't be checked)"
+                    : ""}
+                  : the calendar&apos;s events will be shared with an account
+                  your organisation doesn&apos;t control.
+                </p>
+              )}
+              {addIsOwner && (
+                <p>
+                  <strong>Owner</strong> can re-share, transfer, and delete the
+                  calendar. Only grant this if {pendingAdd?.delegate} should
+                  have full control.
+                </p>
+              )}
             </>
           ) : null
         }
-        onConfirm={addAcl}
+        error={addError}
+        onConfirm={() => {
+          if (pendingAdd) void addAcl(pendingAdd);
+        }}
       />
 
       <ConfirmActionDialog
-        open={!!confirmRemove}
-        onOpenChange={(o) => !removing && !o && setConfirmRemove(null)}
+        open={!!pendingRemove}
+        onOpenChange={(o) => {
+          if (removing || o) return;
+          setPendingRemove(null);
+          setRemoveError(null);
+        }}
         title="Remove calendar access"
-        summary={`Revoke ${confirmRemove?.scope?.value ?? ""}'s ${confirmRemove?.role ?? ""} access to ${listedCalendar}.`}
+        summary={`Revoke ${pendingRemove?.rule.scope?.value ?? ""}'s ${pendingRemove?.rule.role ?? ""} access to ${pendingRemove?.calendar ?? ""}.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
-        severity={confirmRemove?.role === "owner" ? "high" : "medium"}
-        confirmPhrase={confirmRemove?.role === "owner" ? confirmRemove?.scope?.value : undefined}
-        confirmLabel="Remove access"
+        severity={pendingRemove?.rule.role === "owner" ? "high" : "medium"}
+        confirmPhrase={
+          pendingRemove?.rule.role === "owner" ? pendingRemove.rule.scope?.value : undefined
+        }
+        confirmLabel={removeError ? "Try again" : "Remove access"}
         busy={!!removing}
         changes={[
-          { label: "Calendar", after: listedCalendar },
+          { label: "Calendar", after: pendingRemove?.calendar ?? "" },
           {
             label: "Removing",
-            before: `${confirmRemove?.scope?.value ?? ""} (${confirmRemove?.role ?? ""})`,
+            before: `${pendingRemove?.rule.scope?.value ?? ""} (${pendingRemove?.rule.role ?? ""})`,
             after: "no longer has access",
             emphasis: true,
           },
         ]}
         warnings={
-          confirmRemove?.role === "owner" ? (
+          pendingRemove?.rule.role === "owner" ? (
             <>
               Removing an owner from a secondary calendar with no other owners
               can leave the calendar orphaned. Make sure another owner exists.
             </>
           ) : null
         }
+        error={removeError}
         onConfirm={() => {
-          if (confirmRemove?.id) void removeAcl(confirmRemove.id);
+          if (pendingRemove) void removeAcl(pendingRemove);
         }}
       />
     </>

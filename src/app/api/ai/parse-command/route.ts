@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { generateObject } from "ai";
 import { z } from "zod";
 import {
@@ -12,6 +13,7 @@ import {
 import { tenantFromRequest } from "@/lib/gws";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { chargeAiBudget } from "@/lib/ai-budget";
+import { errorStatusFor } from "@/lib/api-errors";
 
 const ParsedCommandSchema = z.object({
   action: z.string().describe("The action ID from the available actions list"),
@@ -32,6 +34,8 @@ const MAX_BODY_BYTES = 16 * 1024; // commands are short — cap to keep AI bills
 const MAX_COMMAND_CHARS = 4_000;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Same budget as the two report routes — one Gemini bill, one allowance.
   const overBudget = await chargeAiBudget(request);
   if (overBudget) return overBudget;
@@ -94,7 +98,7 @@ Important rules:
 - If the command mentions "add to group", "join group", "add to mailing list", "add to distribution list", use group_member_add
 - If the command mentions "remove from group", "leave group", "take off the list", use group_member_remove
 - If the command mentions "who is in the group", "group members", "list members", use group_members_list
-- Default group member role to "MEMBER" if not specified
+- Leave the group member role out unless the command names one: with no role, someone already in the group keeps the role they have, while an explicit role would change it
 - For calendar roles: "view" or "read" = reader, "edit" or "write" = writer, "full control" or "own" = owner, "free/busy" = freeBusyReader
 - Default calendar role to "reader" if not specified
 - Default email forwarding action to "keep" if not specified
@@ -155,7 +159,7 @@ User command: ${JSON.stringify(command)}`,
       error instanceof Error ? error.message : "Failed to parse command";
     return NextResponse.json(
       { success: false, error: message },
-      { status: 500 }
+      { status: errorStatusFor(error) }
     );
   }
 }

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 /**
  * One-time sign-in tickets for the packaged desktop build.
@@ -81,4 +81,31 @@ export function redeemLaunchTicket(
 /** For tests: forget every outstanding ticket. */
 export function clearLaunchTickets(): void {
   store().clear();
+}
+
+/**
+ * Proof that this server is the one the desktop launcher started.
+ *
+ * The launcher writes a random instance token into its lock file and hands the
+ * same token to the server it starts. A later launch that finds the lock asks
+ * the port for HMAC(token, challenge) with a challenge of its own and sends
+ * the saved password only if the answer is right. Without this, any program
+ * that happened to be listening on the port named in a stale lock file (a
+ * crash leaves one behind; process ids are reused) was taken for Open Admin
+ * and handed the password.
+ *
+ * The answer reveals nothing about the token, and a challenge is just 32
+ * random bytes, so the endpoint needs no sign-in. Null when this server was
+ * not started by the launcher, or the challenge is malformed.
+ */
+export const INSTANCE_PROOF_LABEL = "open-admin-instance-proof:";
+
+export function instanceProof(
+  challenge: string,
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const token = env.OPEN_ADMIN_INSTANCE_TOKEN;
+  if (!launchTicketsSupported(env) || !token || token.length < 32) return null;
+  if (!/^[0-9a-f]{64}$/.test(challenge)) return null;
+  return createHmac("sha256", token).update(INSTANCE_PROOF_LABEL + challenge).digest("hex");
 }

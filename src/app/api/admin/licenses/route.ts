@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   assignLicense,
@@ -54,6 +55,8 @@ function failure(e: unknown): NextResponse {
 }
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const product = request.nextUrl.searchParams.get("product");
@@ -76,6 +79,8 @@ export async function GET(request: NextRequest) {
 }
 
 async function change(request: NextRequest, kind: "assign" | "remove") {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const action = kind === "assign" ? "licenses.assign" : "licenses.remove";
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);

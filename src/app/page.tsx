@@ -5,6 +5,7 @@ import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { AICommandPanel } from "@/components/ai-command-panel";
 import { cn } from "@/lib/utils";
+import { useTenantList } from "@/lib/tenant-client";
 import {
   Mail,
   CalendarDays,
@@ -38,10 +39,6 @@ interface GwsStatus {
   authenticated: boolean;
   /** True in the packaged desktop build, where the gws CLI is optional. */
   packaged?: boolean;
-}
-
-interface TenantsListPayload {
-  tenants?: { id: string }[];
 }
 
 interface Task {
@@ -260,28 +257,18 @@ function CliStatusPill({
 export default function Dashboard() {
   const [status, setStatus] = useState<GwsStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tenantCount, setTenantCount] = useState<number | null>(null);
+  // The page-wide tenant list (the sidebar's), not a request of our own.
+  // Until it has loaded the count is unknown, which must NOT trigger the
+  // first-run banner — telling an established operator to start onboarding
+  // because one fetch failed is worse than showing no banner.
+  const tenantList = useTenantList();
+  const tenantCount = tenantList.status === "loaded" ? tenantList.tenants.length : null;
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/gws/status")
-        .then((res) => res.json())
-        .catch(() => ({ installed: false, authenticated: false } as GwsStatus)),
-      fetch("/api/tenants")
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json() as Promise<TenantsListPayload>;
-        })
-        .then((d) => (Array.isArray(d?.tenants) ? d.tenants.length : null))
-        // null = "couldn't determine", which must NOT trigger the first-run
-        // banner — telling an established operator to start onboarding
-        // because one fetch failed is worse than showing no banner.
-        .catch(() => null),
-    ])
-      .then(([s, count]) => {
-        setStatus(s);
-        setTenantCount(count);
-      })
+    fetch("/api/gws/status")
+      .then((res) => res.json())
+      .catch(() => ({ installed: false, authenticated: false } as GwsStatus))
+      .then((s) => setStatus(s))
       .finally(() => setLoading(false));
   }, []);
 

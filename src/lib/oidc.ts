@@ -1,16 +1,18 @@
 import * as client from "openid-client";
 import { isValidEmail } from "./validate-email";
 import {
+  hostResolvesPrivate,
   isPrivateIssuerHost,
   privateIssuerAllowed,
   PRIVATE_ISSUER_REFUSED,
 } from "./sso-server";
 import {
   isLoopbackHost,
+  issuerFamily,
   SSO_SCOPES,
   type IssuerCheckResult,
+  type IssuerFamily,
   type SsoConfig,
-  type SsoProvider,
 } from "./sso-types";
 
 /**
@@ -41,13 +43,18 @@ export type OidcErrorCode =
  * admin-only test popup, because it can echo provider error descriptions.
  */
 export class OidcFlowError extends Error {
+  public readonly detail?: string;
   constructor(
     public readonly code: OidcErrorCode,
     message: string,
-    public readonly detail?: string
+    detail?: string
   ) {
     super(message);
     this.name = "OidcFlowError";
+    // Details can carry text the caller chose (an error_description on the
+    // callback URL) and end up in the audit log and the server log.
+    this.detail =
+      detail === undefined ? undefined : detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
   }
 }
 
@@ -78,7 +85,38 @@ function insecureAllowed(issuer: URL): boolean {
 function unreachable(e: unknown): boolean {
   if (e instanceof TypeError) return true;
   const name = e instanceof Error ? e.name : "";
-  return name === "AbortError" || name === "TimeoutError";
+  if (name === "AbortError" || name === "TimeoutError") return true;
+  // openid-client turns its own timeout into a ClientError with a code.
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === "OAUTH_TIMEOUT" || code === "OAUTH_ABORT";
+}
+
+/**
+ * Refuse a URL the server would fetch if it points into the server's own
+ * network: by its text (private literals, single-label and internal names)
+ * and by what the name resolves to now. Applied to the issuer before
+ * discovery and to every endpoint the discovery document then names, which
+ * the server also fetches (the token exchange carries the client secret).
+ *
+ * A name can still change what it resolves to between this check and the
+ * fetch; this closes the plain cases, it is not a full egress firewall.
+ */
+async function assertPublicDestination(raw: string, what: string): Promise<void> {
+  if (privateIssuerAllowed()) return;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new OidcFlowError("discovery_failed", `The provider's ${what} is not a valid URL`);
+  }
+  if (isPrivateIssuerHost(url.hostname) || (await hostResolvesPrivate(url.hostname))) {
+    throw new OidcFlowError(
+      "discovery_failed",
+      what === "issuer"
+        ? `The ${PRIVATE_ISSUER_REFUSED}`
+        : `The provider's ${what} points at a private or internal address, which the server won't contact. Set APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server for a local development provider.`
+    );
+  }
 }
 
 /**
@@ -90,9 +128,7 @@ function unreachable(e: unknown): boolean {
 async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
   // Belt and braces: validateIssuer already refuses these, but a hand-edited
   // sso.json would otherwise have the server dial its own network.
-  if (!privateIssuerAllowed() && isPrivateIssuerHost(issuer.hostname)) {
-    throw new OidcFlowError("discovery_failed", `The ${PRIVATE_ISSUER_REFUSED}`);
-  }
+  await assertPublicDestination(issuer.href, "issuer");
   let probe: client.Configuration;
   try {
     probe = await client.discovery(issuer, "discovery", undefined, client.None(), {
@@ -128,6 +164,21 @@ async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
       "discovery_failed",
       "The provider does not advertise the authorization code flow (response_type=code)"
     );
+  }
+  // Entra's multi-tenant endpoints publish a template issuer that no sign-in
+  // can match once the client is built from saved metadata, so every sign-in
+  // would fail with a generic error after a green issuer check.
+  if (typeof server.issuer === "string" && server.issuer.includes("{tenantid}")) {
+    throw new OidcFlowError(
+      "discovery_failed",
+      "This is Entra ID's shared multi-tenant endpoint. Use your own tenant's issuer instead: https://login.microsoftonline.com/<your tenant ID>/v2.0"
+    );
+  }
+  // The server fetches these itself.
+  await assertPublicDestination(server.token_endpoint as string, "token endpoint");
+  await assertPublicDestination(server.jwks_uri as string, "signing keys address (jwks_uri)");
+  if (typeof server.userinfo_endpoint === "string") {
+    await assertPublicDestination(server.userinfo_endpoint, "userinfo endpoint");
   }
   return server;
 }
@@ -294,8 +345,8 @@ export async function beginOidcAuthorization(
   // provider silently reusing whatever session the browser already has.
   if (mode === "test") params.prompt = "select_account";
   // Google honours `hd` as a hint to preselect the Workspace domain; the
-  // allowlist is still enforced server-side on the returned claims.
-  if (cfg.provider === "google" && cfg.allowedDomains.length === 1) {
+  // allowlist (and the hd claim) are still enforced server-side.
+  if (issuerFamily(cfg.issuer) === "google" && cfg.allowedDomains.length === 1) {
     params.hd = cfg.allowedDomains[0];
   }
 
@@ -313,10 +364,17 @@ export interface OidcIdentity {
   /** null when the provider didn't say (or the address came from a fallback claim). */
   emailVerified: boolean | null;
   name: string | null;
+  /**
+   * Google's `hd` claim: the Google Workspace (or Cloud Identity) domain the
+   * account belongs to. Absent for a personal Google account, including one
+   * created on a company address.
+   */
+  hostedDomain: string | null;
 }
 
 function describeOAuthError(error: string, description?: string): string {
-  return description ? `${error}: ${description}` : error;
+  const clip = (t: string, n: number) => (t.length > n ? `${t.slice(0, n)}…` : t);
+  return description ? `${clip(error, 60)}: ${clip(description, 240)}` : clip(error, 60);
 }
 
 function mapExchangeError(e: unknown): OidcFlowError {
@@ -390,24 +448,39 @@ function unverifiedEmailAllowed(): boolean {
 }
 
 /**
- * Pull the identity out of validated ID token claims. `email` is preferred;
- * Entra ID commonly omits it unless the optional claim is configured, so
- * `preferred_username` and `upn` are accepted when they hold an address.
+ * Pull the identity out of validated ID token claims.
  *
- * `provider` decides how strict the verification check is: Entra ID's UPN is
- * administrator-controlled and the directory is the source of truth, so an
- * absent `email_verified` is accepted there. For Google, Okta and a generic
- * provider the claim has to say `true`.
+ * Which claim counts, and how much it must be vouched for, depends on the
+ * issuer (never on the provider picked in the wizard):
+ *
+ *   - Entra ID: the user principal name (`preferred_username`, `upn`) first.
+ *     The directory's administrators control it, so it needs no separate
+ *     verified flag. The `email` claim comes from a mail attribute that can be
+ *     set to any address, so it is only used when Entra marks it verified
+ *     (`email_verified` or `xms_edov`).
+ *   - Everyone else: `email`, which must come with `email_verified: true`;
+ *     `preferred_username` and `upn` only as a fallback and only when the
+ *     operator set APP_SSO_TRUST_UNVERIFIED_EMAIL=true.
  */
 export function extractIdentity(
   claims: client.IDToken,
-  provider?: SsoProvider
+  family: IssuerFamily = "other"
 ): OidcIdentity {
-  const candidates: Array<[OidcIdentity["emailSource"], unknown]> = [
-    ["email", claims.email],
-    ["preferred_username", claims.preferred_username],
-    ["upn", claims.upn],
-  ];
+  const entra = family === "entra";
+  const emailVouched =
+    parseVerified(claims.email_verified) === true ||
+    (entra && parseVerified((claims as Record<string, unknown>).xms_edov) === true);
+  const candidates: Array<[OidcIdentity["emailSource"], unknown]> = entra
+    ? [
+        ["preferred_username", claims.preferred_username],
+        ["upn", claims.upn],
+        ["email", emailVouched ? claims.email : undefined],
+      ]
+    : [
+        ["email", claims.email],
+        ["preferred_username", claims.preferred_username],
+        ["upn", claims.upn],
+      ];
   let email: string | null = null;
   let emailSource: OidcIdentity["emailSource"] = "email";
   for (const [source, value] of candidates) {
@@ -420,23 +493,27 @@ export function extractIdentity(
   if (!email) {
     throw new OidcFlowError(
       "no_email",
-      "The identity provider did not include a usable email address in the ID token",
+      entra && typeof claims.email === "string"
+        ? "Entra ID sent an email claim it doesn't mark as verified, and no user principal name. Make sure ID tokens include preferred_username."
+        : "The identity provider did not include a usable email address in the ID token",
       `claims present: ${Object.keys(claims).join(", ")}`
     );
   }
 
   const emailVerified =
     emailSource === "email" ? parseVerified(claims.email_verified) : null;
-  if (emailVerified === false) {
+  if (emailVerified === false && !entra) {
     throw new OidcFlowError(
       "email_unverified",
       "The identity provider reports this email address as unverified",
       email
     );
   }
-  // An absent claim used to pass, as did an address taken from
-  // preferred_username or upn, which skips the check entirely.
-  if (emailVerified !== true && provider !== "entra" && !unverifiedEmailAllowed()) {
+  // Outside Entra an address must be vouched for by the provider: an absent
+  // claim, or an address taken from preferred_username or upn, is refused
+  // unless the operator says otherwise.
+  const vouched = entra ? true : emailSource === "email" && emailVerified === true;
+  if (!vouched && !unverifiedEmailAllowed()) {
     throw new OidcFlowError(
       "email_unverified",
       emailSource === "email"
@@ -446,12 +523,14 @@ export function extractIdentity(
     );
   }
 
+  const hd = (claims as Record<string, unknown>).hd;
   return {
     sub: String(claims.sub),
     email,
     emailSource,
     emailVerified,
     name: pickName(claims),
+    hostedDomain: typeof hd === "string" && hd.trim() ? hd.trim().toLowerCase() : null,
   };
 }
 
@@ -506,7 +585,7 @@ export async function completeOidcAuthorization(
     );
   }
   return {
-    identity: extractIdentity(claims, cfg.provider),
+    identity: extractIdentity(claims, issuerFamily(cfg.issuer)),
     claimNames: Object.keys(claims),
   };
 }
@@ -521,19 +600,38 @@ export interface SsoAccessDecision {
   reason: string;
 }
 
+/**
+ * Who may sign in.
+ *
+ * An address on the explicit list always may. A domain match is enough for
+ * most providers, but not for Google: anyone can create a personal Google
+ * account on a company address (a group's address, an alias, a shared
+ * mailbox), and Google will vouch for that email. Such an account carries no
+ * `hd` claim; an account in a Google Workspace or Cloud Identity organisation
+ * does. Since a domain can belong to only one such organisation, "has an hd
+ * claim and an allowed email domain" means "is in the organisation that owns
+ * the domain". Google's own guidance is to check hd for exactly this.
+ */
 export function evaluateSsoAccess(
-  cfg: Pick<SsoConfig, "allowedDomains" | "allowedEmails" | "allowAnyIdpUser">,
-  email: string
+  cfg: Pick<SsoConfig, "issuer" | "allowedDomains" | "allowedEmails" | "allowAnyIdpUser">,
+  identity: Pick<OidcIdentity, "email" | "hostedDomain">
 ): SsoAccessDecision {
-  const normalized = email.toLowerCase();
+  const normalized = identity.email.toLowerCase();
   const domain = normalized.slice(normalized.indexOf("@") + 1);
+  const google = issuerFamily(cfg.issuer) === "google";
   if (cfg.allowedEmails.includes(normalized)) {
     return { allowed: true, reason: `${normalized} is on the allowed email list` };
   }
   if (cfg.allowedDomains.includes(domain)) {
+    if (google && !identity.hostedDomain) {
+      return {
+        allowed: false,
+        reason: `${normalized} is a personal Google account, not one in your Google Workspace. Only accounts in the organisation that owns ${domain} may sign in by domain; add the address to the allowed email list to let this one in.`,
+      };
+    }
     return { allowed: true, reason: `the domain ${domain} is allowed` };
   }
-  if (cfg.allowAnyIdpUser) {
+  if (cfg.allowAnyIdpUser && !google) {
     return {
       allowed: true,
       reason: "any account the identity provider authenticates is allowed",

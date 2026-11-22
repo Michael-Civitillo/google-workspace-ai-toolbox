@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { preflightTenantScopesCached } from "@/lib/preflight";
 import { audit } from "@/lib/audit";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * GET /api/admin/preflight-scopes
@@ -16,9 +18,24 @@ import { actorFromRequest } from "@/lib/session";
  * We only ask Google's OAuth server for tokens.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   let tenant = null;
   try {
+    // A GET that asks Google for tokens and writes an audit line: it must say
+    // which tenant it means rather than fall back to the active one, so a
+    // request that wasn't made by this app's own pages (which always name
+    // the tenant) does nothing.
+    if (
+      !request.headers.get("x-tenant-id") &&
+      !request.nextUrl.searchParams.get("tenantId")
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Say which tenant to check: pass tenantId." },
+        { status: 400 }
+      );
+    }
     // Resolve inside the try: a stale/deleted tenantId makes resolveTenant
     // throw, and we want that as this route's JSON error, not an unhandled 500.
     tenant = tenantFromRequest(request);
@@ -71,7 +88,7 @@ export async function GET(request: NextRequest) {
     });
     return NextResponse.json(
       { success: false, error: message },
-      { status: 500 }
+      { status: errorStatusFor(e) }
     );
   }
 }

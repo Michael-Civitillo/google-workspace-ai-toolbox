@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getAppConfig } from "@/lib/app-config";
 import { getTenantStoreSnapshot } from "@/lib/tenants-server";
 import {
@@ -14,7 +15,9 @@ import {
  * live. Also carries the tenant count so the first-launch check is a single
  * fetch.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const config = getAppConfig();
     const { tenants } = getTenantStoreSnapshot();

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -20,7 +20,8 @@ import {
   PlayCircle,
   X,
 } from "lucide-react";
-import { tfetch } from "@/lib/tenant-client";
+import { tfetch, tenantPinProblem } from "@/lib/tenant-client";
+import { googleLink } from "@/lib/google-links";
 
 /**
  * Shared drives, for the External Sharing Audit.
@@ -56,6 +57,12 @@ interface DriveSummary {
   error: string | null;
 }
 
+interface UnreadFile {
+  id: string;
+  name: string;
+  error: string;
+}
+
 interface DriveResult extends DriveSummary {
   /** null while waiting or scanning. */
   files: ExternalFile[] | null;
@@ -64,7 +71,31 @@ interface DriveResult extends DriveSummary {
   scannedAs: string | null;
   /** Why the files could not be scanned, when they could not. */
   filesError: string | null;
+  /** Files whose sharing could not be read: not checked, so not clean. */
+  unreadable: UnreadFile[];
+  unreadableCount: number;
+  /** The scan was cancelled before this drive was finished, or reached. */
+  notFinished: boolean;
   state: "waiting" | "scanning" | "done";
+}
+
+/** Drives with nothing outside shown before the rest are folded away. */
+const CLEAN_ROWS_SHOWN = 50;
+
+function isCleanDrive(d: DriveResult): boolean {
+  return (
+    d.state === "done" &&
+    d.externalMembers.length === 0 &&
+    (d.files?.length ?? 0) === 0 &&
+    !d.error &&
+    !d.filesError &&
+    d.unreadableCount === 0 &&
+    !d.notFinished
+  );
+}
+
+function notFullyRead(d: DriveResult): boolean {
+  return Boolean(d.error || d.filesError) || d.unreadableCount > 0 || d.notFinished;
 }
 
 function permissionLabel(p: ExternalPermission): string {
@@ -87,11 +118,28 @@ function csvCell(c: string): string {
   return v.replace(/"/g, '""');
 }
 
-function toCsv(drives: DriveResult[]): string {
+function toCsv(drives: DriveResult[], incomplete: string[] = []): string {
   const rows: string[][] = [
     ["shared_drive", "kind", "file", "file_id", "link", "shared_with", "type", "role"],
   ];
+  // First, so a file passed on later can't be read as a full picture.
+  for (const note of incomplete) rows.push(["INCOMPLETE", "", note, "", "", "", "", ""]);
   for (const d of drives) {
+    if (d.error || d.filesError || d.notFinished) {
+      rows.push([
+        d.name,
+        "drive not fully read",
+        "",
+        d.id,
+        "",
+        d.error || d.filesError || "The scan stopped before this drive was finished",
+        "",
+        "",
+      ]);
+    }
+    for (const u of d.unreadable) {
+      rows.push([d.name, "file not read", u.name, u.id, "", u.error, "", ""]);
+    }
     for (const m of d.externalMembers) {
       rows.push([d.name, "drive member", "", d.id, "", permissionLabel(m), m.type, m.role]);
     }
@@ -102,7 +150,7 @@ function toCsv(drives: DriveResult[]): string {
           "file",
           f.name,
           f.id,
-          f.webViewLink ?? "",
+          googleLink(f.webViewLink) ?? "",
           permissionLabel(p),
           p.type,
           p.role,
@@ -158,6 +206,14 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
   }, []);
 
   const run = async () => {
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setError(pinProblem);
+      return;
+    }
+
     cancelRef.current = false;
     abortRef.current?.abort();
     const ac = new AbortController();
@@ -207,6 +263,9 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
               scannedFiles: 0,
               scannedAs: null,
               filesError: null,
+              unreadable: [],
+              unreadableCount: 0,
+              notFinished: false,
               state: "waiting",
             })
           ),
@@ -216,7 +275,11 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
 
       // 2. Each drive's files, one drive at a time.
       for (const d of all) {
-        if (cancelRef.current) break;
+        if (cancelRef.current) {
+          // Never reached: say so, rather than leave it looking pending.
+          patch(d.id, { state: "done", notFinished: true });
+          continue;
+        }
         if (d.scanCandidates.length === 0) {
           patch(d.id, {
             state: "done",
@@ -229,6 +292,8 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
         }
         patch(d.id, { state: "scanning" });
         const found: ExternalFile[] = [];
+        const unreadable: UnreadFile[] = [];
+        let unreadableCount = 0;
         let scanned = 0;
         let as: string[] = d.scanCandidates;
         let token: string | null = null;
@@ -252,19 +317,33 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
             scannedFiles: number;
             files: ExternalFile[];
             nextPageToken: string | null;
+            unreadable?: UnreadFile[];
+            unreadableCount?: number;
           };
           found.push(...page.files);
+          for (const u of page.unreadable ?? []) if (unreadable.length < 50) unreadable.push(u);
+          unreadableCount += page.unreadableCount ?? 0;
           scanned += page.scannedFiles;
           // Drive's page tokens belong to whoever was issued them.
           as = [page.user];
           token = page.nextPageToken;
-          patch(d.id, { files: [...found], scannedFiles: scanned, scannedAs: page.user });
+          patch(d.id, {
+            files: [...found],
+            scannedFiles: scanned,
+            scannedAs: page.user,
+            unreadable: [...unreadable],
+            unreadableCount,
+          });
         } while (token && !cancelRef.current);
         patch(d.id, {
           state: "done",
           files: found,
           scannedFiles: scanned,
           filesError: failure,
+          unreadable,
+          unreadableCount,
+          // Cancelled with pages still to read: what it shows is only part.
+          notFinished: failure === null && token !== null,
         });
       }
 
@@ -296,7 +375,13 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
   const filesScanned = drives.reduce((n, d) => n + d.scannedFiles, 0);
   const externalMembers = drives.reduce((n, d) => n + d.externalMembers.length, 0);
   const externalFiles = drives.reduce((n, d) => n + (d.files?.length ?? 0), 0);
-  const unread = drives.filter((d) => d.error || d.filesError).length;
+  const unread = drives.filter(notFullyRead).length;
+  const cleanCount = drives.filter(isCleanDrive).length;
+  const [showClean, setShowClean] = useState(false);
+  const toggleOpen = useCallback(
+    (id: string) => setOpen((cur) => (cur === id ? null : id)),
+    []
+  );
   const flagged = drives.filter(
     (d) => d.externalMembers.length > 0 || (d.files?.length ?? 0) > 0
   );
@@ -347,11 +432,23 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
             )}
             <Button
               variant="outline"
-              disabled={scanning || externalMembers + externalFiles === 0}
+              disabled={scanning || externalMembers + externalFiles + unread === 0}
               onClick={() =>
                 downloadCsv(
                   `shared-drives-external-sharing-${new Date().toISOString().slice(0, 10)}.csv`,
-                  toCsv(drives)
+                  toCsv(
+                    drives,
+                    [
+                      stopped === "cancelled"
+                        ? "The scan was cancelled, so it covers only part of the tenant's shared drives."
+                        : stopped === "failed"
+                          ? "The scan stopped early, so it covers only part of the tenant's shared drives."
+                          : "",
+                      unread > 0
+                        ? `${plural(unread, "drive")} could not be fully read (listed below).`
+                        : "",
+                    ].filter(Boolean)
+                  )
                 )
               }
             >
@@ -391,135 +488,189 @@ export function SharedDrivesAudit({ tenantId }: { tenantId: string | null }) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            {drives.map((d) => {
-              const isOpen = open === d.id;
-              const fileCount = d.files?.length ?? 0;
-              const clean =
-                d.state === "done" &&
-                d.externalMembers.length === 0 &&
-                fileCount === 0 &&
-                !d.error &&
-                !d.filesError;
-              return (
-                <div key={d.id} className="rounded-lg border bg-muted/30">
-                  <button
-                    type="button"
-                    aria-expanded={isOpen}
-                    onClick={() => setOpen(isOpen ? null : d.id)}
-                    className="flex w-full items-start justify-between gap-3 p-3 text-left"
-                  >
-                    <div className="min-w-0 space-y-1.5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-medium break-all">{d.name}</p>
-                        {d.externalMembers.length > 0 && (
-                          <Badge variant="destructive">
-                            {plural(d.externalMembers.length, "outside member")}
-                          </Badge>
-                        )}
-                        {fileCount > 0 && (
-                          <Badge variant="warning">
-                            {plural(fileCount, "file")} shared outside
-                          </Badge>
-                        )}
-                        {clean && <Badge variant="success">nothing outside</Badge>}
-                        {(d.error || d.filesError) && (
-                          <Badge variant="outline">
-                            <AlertTriangle />
-                            not fully read
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        {d.state === "waiting"
-                          ? "Waiting…"
-                          : d.state === "scanning"
-                            ? `Scanning… ${plural(d.scannedFiles, "file")} so far`
-                            : `${plural(d.memberCount, "member")} · ${plural(d.scannedFiles, "file")} checked${
-                                d.scannedAs ? ` as ${d.scannedAs}` : ""
-                              }`}
-                      </p>
-                    </div>
-                    <span className="flex shrink-0 items-center text-muted-foreground">
-                      {d.state === "scanning" ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : isOpen ? (
-                        <ChevronDown className="h-4 w-4" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4" />
-                      )}
-                    </span>
-                  </button>
-                  {isOpen && (
-                    <div className="space-y-3 border-t px-3 py-3 text-xs">
-                      {d.error && (
-                        <p className="text-warning-fg break-words">
-                          The drive&apos;s members could not be read: {d.error}
-                        </p>
-                      )}
-                      {d.filesError && (
-                        <p className="text-warning-fg break-words">
-                          Its files were not checked. {d.filesError}
-                        </p>
-                      )}
-                      <div>
-                        <p className="font-medium">Members outside your organisation</p>
-                        {d.externalMembers.length === 0 ? (
-                          <p className="text-muted-foreground">None</p>
-                        ) : (
-                          <ul className="text-muted-foreground">
-                            {d.externalMembers.map((m, i) => (
-                              <li key={`${m.type}|${m.target}|${i}`} className="break-all">
-                                {permissionLabel(m)}{" "}
-                                <span className="text-foreground">({m.role})</span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                      <div>
-                        <p className="font-medium">Files shared outside, beyond the members</p>
-                        {fileCount === 0 ? (
-                          <p className="text-muted-foreground">
-                            {d.state === "done" && !d.filesError ? "None" : "Not known"}
-                          </p>
-                        ) : (
-                          <ul className="space-y-1.5">
-                            {(d.files ?? []).map((f) => (
-                              <li key={f.id}>
-                                {f.webViewLink ? (
-                                  <a
-                                    href={f.webViewLink}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="font-medium underline underline-offset-2 break-all"
-                                  >
-                                    {f.name}
-                                  </a>
-                                ) : (
-                                  <span className="font-medium break-all">{f.name}</span>
-                                )}
-                                <span className="block text-muted-foreground break-all">
-                                  {f.external
-                                    .map((p) => `${permissionLabel(p)} (${p.role})`)
-                                    .join(" · ")}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {drives.map((d) =>
+              !showClean && cleanCount > CLEAN_ROWS_SHOWN && isCleanDrive(d) ? null : (
+                <DriveRow key={d.id} d={d} isOpen={open === d.id} onToggle={toggleOpen} />
+              )
+            )}
+            {cleanCount > CLEAN_ROWS_SHOWN && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => setShowClean((v) => !v)}
+              >
+                {showClean
+                  ? "Hide the drives with nothing outside"
+                  : `Show the ${cleanCount.toLocaleString()} drives with nothing outside`}
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}
 
       {done && !scanning && drives.length === 0 && !error && (
-        <p className="text-sm text-muted-foreground">This tenant has no shared drives.</p>
+        <p className="text-sm text-muted-foreground">
+          {stopped === "cancelled"
+            ? "Cancelled before any shared drive was listed."
+            : "This tenant has no shared drives."}
+        </p>
       )}
     </>
   );
 }
+
+/**
+ * One drive's row. Memoised: a scan updates one drive at a time, and with
+ * thousands of drives re-drawing every row on every page blocked the page.
+ */
+const DriveRow = memo(function DriveRow({
+  d,
+  isOpen,
+  onToggle,
+}: {
+  d: DriveResult;
+  isOpen: boolean;
+  onToggle: (id: string) => void;
+}) {
+  const fileCount = d.files?.length ?? 0;
+  const clean = isCleanDrive(d);
+  return (
+    <div className="rounded-lg border bg-muted/30">
+      <button
+        type="button"
+        aria-expanded={isOpen}
+        onClick={() => onToggle(d.id)}
+        className="flex w-full items-start justify-between gap-3 p-3 text-left"
+      >
+        <div className="min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-medium break-all">{d.name}</p>
+            {d.externalMembers.length > 0 && (
+              <Badge variant="destructive">
+                {plural(d.externalMembers.length, "outside member")}
+              </Badge>
+            )}
+            {fileCount > 0 && (
+              <Badge variant="warning">{plural(fileCount, "file")} shared outside</Badge>
+            )}
+            {clean && <Badge variant="success">nothing outside</Badge>}
+            {notFullyRead(d) && (
+              <Badge variant="outline">
+                <AlertTriangle />
+                {d.notFinished && !d.error && !d.filesError && d.unreadableCount === 0
+                  ? "not finished"
+                  : "not fully read"}
+              </Badge>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {d.state === "waiting"
+              ? "Waiting…"
+              : d.state === "scanning"
+                ? `Scanning… ${plural(d.scannedFiles, "file")} so far`
+                : d.notFinished && d.scannedFiles === 0
+                  ? "Not scanned: the scan was cancelled first"
+                  : `${plural(d.memberCount, "member")} · ${plural(d.scannedFiles, "file")} checked${
+                      d.scannedAs ? ` as ${d.scannedAs}` : ""
+                    }${d.unreadableCount > 0 ? ` · ${plural(d.unreadableCount, "file")} not read` : ""}`}
+          </p>
+        </div>
+        <span className="flex shrink-0 items-center text-muted-foreground">
+          {d.state === "scanning" ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : isOpen ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+        </span>
+      </button>
+      {isOpen && (
+        <div className="space-y-3 border-t px-3 py-3 text-xs">
+          {d.error && (
+            <p className="text-warning-fg break-words">
+              The drive&apos;s members could not be read: {d.error}
+            </p>
+          )}
+          {d.filesError && (
+            <p className="text-warning-fg break-words">
+              Its files were not checked. {d.filesError}
+            </p>
+          )}
+          {d.notFinished && (
+            <p className="text-warning-fg break-words">
+              The scan was cancelled before this drive was finished, so what is
+              shown covers only part of it.
+            </p>
+          )}
+          {d.unreadableCount > 0 && (
+            <div>
+              <p className="font-medium text-warning-fg">
+                {plural(d.unreadableCount, "file")} whose sharing could not be read
+              </p>
+              <ul className="text-muted-foreground">
+                {d.unreadable.map((u) => (
+                  <li key={u.id} className="break-all">
+                    {u.name} ({u.error})
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div>
+            <p className="font-medium">Members outside your organisation</p>
+            {d.externalMembers.length === 0 ? (
+              <p className="text-muted-foreground">None</p>
+            ) : (
+              <ul className="text-muted-foreground">
+                {d.externalMembers.map((m, i) => (
+                  <li key={`${m.type}|${m.target}|${i}`} className="break-all">
+                    {permissionLabel(m)} <span className="text-foreground">({m.role})</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div>
+            <p className="font-medium">Files shared outside, beyond the members</p>
+            {fileCount === 0 ? (
+              <p className="text-muted-foreground">
+                {d.state === "done" && !d.filesError && !d.notFinished && d.unreadableCount === 0
+                  ? "None"
+                  : d.state === "done" && !d.filesError
+                    ? "None among the files that were read"
+                    : "Not known"}
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {(d.files ?? []).map((f) => {
+                  const link = googleLink(f.webViewLink);
+                  return (
+                    <li key={f.id}>
+                      {link ? (
+                        <a
+                          href={link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium underline underline-offset-2 break-all"
+                        >
+                          {f.name}
+                        </a>
+                      ) : (
+                        <span className="font-medium break-all">{f.name}</span>
+                      )}
+                      <span className="block text-muted-foreground break-all">
+                        {f.external.map((p) => `${permissionLabel(p)} (${p.role})`).join(" · ")}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
@@ -27,10 +27,33 @@ interface BundlePreview {
   exportedAt: string | null;
   includesSecrets: boolean;
   tenantCount: number;
+  /** The first few tenants, as "name (admin)": what the server will act on. */
+  tenantNames: string[];
   credentialFileCount: number;
   ssoIssuer: string | null;
   ssoEnabled: boolean;
+  /** Who the bundle's single sign-on lets in, in a sentence; null without SSO. */
+  ssoAccess: string | null;
+  /** The bundle asks for the password form to be turned off. */
+  ssoOnly: boolean;
   raw: unknown;
+}
+
+const strings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x !== "") : [];
+
+/** Who a bundle's single sign-on block lets in, said plainly. */
+function describeSsoAccess(sso: Record<string, unknown>): string {
+  if (sso.allowAnyIdpUser === true) return "anyone the identity provider signs in";
+  const domains = strings(sso.allowedDomains);
+  const emails = strings(sso.allowedEmails);
+  const list = (items: string[]) =>
+    items.slice(0, 5).join(", ") + (items.length > 5 ? ` and ${items.length - 5} more` : "");
+  const parts = [
+    domains.length > 0 ? `addresses at ${list(domains)}` : "",
+    emails.length > 0 ? list(emails) : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join("; and ") : "nobody (no domains or addresses are allowed)";
 }
 
 interface ImportOutcome {
@@ -41,10 +64,33 @@ interface ImportOutcome {
   warnings: string[];
 }
 
+interface ServerStatus {
+  tenants: number;
+  ssoIssuer: string | null;
+}
+
+/** What this server has configured now, or null when it couldn't be read. */
+async function readServerStatus(): Promise<ServerStatus | null> {
+  try {
+    const r = await fetch("/api/config", { cache: "no-store" });
+    const data = r.ok ? await r.json() : null;
+    if (typeof data?.tenantCount !== "number") return null;
+    return {
+      tenants: data.tenantCount,
+      ssoIssuer: typeof data?.sso?.issuer === "string" ? data.sso.issuer : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function ConfigBackupPanel() {
   const [includeSecrets, setIncludeSecrets] = useState(true);
   const [currentTenants, setCurrentTenants] = useState<number | null>(null);
   const [currentSsoIssuer, setCurrentSsoIssuer] = useState<string | null>(null);
+  // Whether the last read of this server's configuration succeeded. Until it
+  // has, the server counts as configured: a failed read is not "empty".
+  const [statusKnown, setStatusKnown] = useState(false);
   const [preview, setPreview] = useState<BundlePreview | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -58,25 +104,34 @@ export function ConfigBackupPanel() {
 
   // With nothing configured yet (the restore-onto-new-server case) the import
   // is one click; only overwriting real config demands the typed phrase.
-  // While current state is still loading (null), err on the guarded side.
-  const freshServer = currentTenants === 0 && !currentSsoIssuer;
+  // While current state is unknown — loading, or the read failed — err on the
+  // guarded side.
+  const freshServer = statusKnown && currentTenants === 0 && !currentSsoIssuer;
+
+  const applyStatus = useCallback((status: ServerStatus | null) => {
+    if (status) {
+      setCurrentTenants(status.tenants);
+      setCurrentSsoIssuer(status.ssoIssuer);
+    }
+    setStatusKnown(status !== null);
+  }, []);
+
+  /** Read what this server has now. Returns false when it couldn't. */
+  const loadStatus = useCallback(async (): Promise<boolean> => {
+    const status = await readServerStatus();
+    applyStatus(status);
+    return status !== null;
+  }, [applyStatus]);
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/config")
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        setCurrentTenants(
-          typeof data?.tenantCount === "number" ? data.tenantCount : 0
-        );
-        setCurrentSsoIssuer(data?.sso?.issuer ?? null);
-      })
-      .catch(() => {});
+    readServerStatus().then((status) => {
+      if (!cancelled) applyStatus(status);
+    });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyStatus]);
 
   function onFilePicked(file: File | null) {
     setPreview(null);
@@ -98,23 +153,31 @@ export function ConfigBackupPanel() {
           );
           return;
         }
-        const tenants = Array.isArray(parsed?.tenants?.tenants)
-          ? parsed.tenants.tenants.length
-          : 0;
+        const tenantList: unknown[] = Array.isArray(parsed?.tenants?.tenants)
+          ? parsed.tenants.tenants
+          : [];
+        const sso =
+          parsed?.app?.sso && typeof parsed.app.sso === "object"
+            ? (parsed.app.sso as Record<string, unknown>)
+            : null;
         setPreview({
           exportedAt:
             typeof parsed.exportedAt === "string" ? parsed.exportedAt : null,
           includesSecrets: parsed.includesSecrets === true,
-          tenantCount: tenants,
+          tenantCount: tenantList.length,
+          tenantNames: tenantList.slice(0, 5).map((t) => {
+            const r = (t ?? {}) as Record<string, unknown>;
+            const name = typeof r.name === "string" ? r.name.slice(0, 100) : "(no name)";
+            return typeof r.adminEmail === "string" ? `${name} (${r.adminEmail.slice(0, 320)})` : name;
+          }),
           credentialFileCount:
             parsed.credentialFiles && typeof parsed.credentialFiles === "object"
               ? Object.keys(parsed.credentialFiles).length
               : 0,
-          ssoIssuer:
-            typeof parsed?.app?.sso?.issuer === "string"
-              ? parsed.app.sso.issuer
-              : null,
-          ssoEnabled: parsed?.app?.sso?.enabled === true,
+          ssoIssuer: typeof sso?.issuer === "string" ? sso.issuer : null,
+          ssoEnabled: sso?.enabled === true,
+          ssoAccess: sso ? describeSsoAccess(sso) : null,
+          ssoOnly: sso?.enabled === true && sso?.passwordLoginEnabled === false,
           raw: parsed,
         });
       } catch {
@@ -125,24 +188,37 @@ export function ConfigBackupPanel() {
     reader.readAsText(file);
   }
 
+  async function openImportDialog() {
+    setImportError(null);
+    // Decide whether to ask for the typed phrase from what the server has
+    // now, not from what it had when the page opened.
+    await loadStatus();
+    setConfirmOpen(true);
+  }
+
   async function runImport() {
     if (!preview) return;
     setImporting(true);
     setImportError(null);
     try {
-      // The server demands the same phrase the dialog collected whenever it
-      // already holds configuration; on a fresh server it is ignored.
+      // The phrase goes only when the dialog collected it. On a server that
+      // looked empty the request goes without, so if it has been configured
+      // meanwhile the server refuses instead of being overwritten unasked.
       const res = await fetch("/api/config/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(preview.raw as Record<string, unknown>),
-          confirm: "REPLACE",
+          ...(freshServer ? {} : { confirm: "REPLACE" }),
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setImportError(data?.error ?? "Import failed");
+        if (freshServer) {
+          // Configured after all: show the guarded dialog, phrase and all.
+          await loadStatus();
+        }
+        setImportError(data?.error ?? `Import failed (the server answered ${res.status})`);
         return;
       }
       setOutcome({
@@ -154,14 +230,19 @@ export function ConfigBackupPanel() {
       });
       setPreview(null);
       if (fileRef.current) fileRef.current.value = "";
-      setCurrentTenants(data?.imported?.tenants ?? 0);
+      setConfirmOpen(false);
+      void loadStatus();
       // The sidebar tenant switcher shows live tenant state — tell it to refetch.
       notifyTenantsChanged();
     } catch {
-      setImportError("Network error — nothing was imported");
+      // The request may have reached the server: say so rather than guess.
+      setImportError(
+        "The server did not answer, so it is not known whether the configuration was replaced. Reload the page to see what this server has now before trying again."
+      );
+      void loadStatus();
+      notifyTenantsChanged();
     } finally {
       setImporting(false);
-      setConfirmOpen(false);
     }
   }
 
@@ -264,7 +345,9 @@ export function ConfigBackupPanel() {
             Download sanitised bundle
           </a>
         )}
-        {exportError && <p className="text-xs text-danger">{exportError}</p>}
+        {exportError && !exportConfirmOpen && (
+          <p className="text-xs text-danger">{exportError}</p>
+        )}
       </div>
 
       {/* Import */}
@@ -314,6 +397,14 @@ export function ConfigBackupPanel() {
                 Tenants: {preview.tenantCount}
                 {currentTenants !== null &&
                   ` (this server currently has ${currentTenants})`}
+                {preview.tenantNames.length > 0 && (
+                  <>
+                    {": "}
+                    {preview.tenantNames.join(", ")}
+                    {preview.tenantCount > preview.tenantNames.length &&
+                      ` and ${preview.tenantCount - preview.tenantNames.length} more`}
+                  </>
+                )}
               </li>
               <li>
                 SSO:{" "}
@@ -321,6 +412,14 @@ export function ConfigBackupPanel() {
                   ? `${preview.ssoEnabled ? "enabled" : "configured but disabled"} — ${preview.ssoIssuer}`
                   : "not configured"}
               </li>
+              {preview.ssoIssuer && preview.ssoEnabled && (
+                <li>
+                  Who can sign in with it: {preview.ssoAccess}.
+                  {preview.ssoOnly
+                    ? " The bundle turns the password form off; this server keeps it on until a test sign-in passes here."
+                    : " The password form stays available too."}
+                </li>
+              )}
               <li>
                 Service-account key files:{" "}
                 {preview.credentialFileCount > 0
@@ -332,7 +431,7 @@ export function ConfigBackupPanel() {
             <Button
               size="sm"
               variant="destructive"
-              onClick={() => setConfirmOpen(true)}
+              onClick={() => void openImportDialog()}
               disabled={importing}
             >
               {importing ? (
@@ -345,7 +444,7 @@ export function ConfigBackupPanel() {
           </div>
         )}
 
-        {importError && (
+        {importError && !confirmOpen && (
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4 text-danger" />
             <AlertDescription>
@@ -413,7 +512,10 @@ export function ConfigBackupPanel() {
           {
             label: "SSO settings",
             before: currentSsoIssuer ?? "not configured",
-            after: preview?.ssoIssuer ?? "not configured",
+            after: preview?.ssoIssuer
+              ? `${preview.ssoIssuer}${preview.ssoEnabled ? `, letting in ${preview.ssoAccess}` : ", turned off"}`
+              : "not configured",
+            emphasis: Boolean(preview?.ssoEnabled),
           },
           {
             label: "Service-account key files",
@@ -428,9 +530,12 @@ export function ConfigBackupPanel() {
             <p>
               This cannot be undone from the UI. Consider exporting the current
               configuration first as a fallback.
+              {!statusKnown &&
+                " This server's current configuration could not be read, so it is treated as configured."}
             </p>
           )
         }
+        error={importError}
         // A fresh server has nothing to lose — restoring there is one click.
         // Overwriting a configured server keeps the typed guard.
         severity={freshServer ? "medium" : "high"}
@@ -443,6 +548,7 @@ export function ConfigBackupPanel() {
       <ConfirmActionDialog
         open={exportConfirmOpen}
         onOpenChange={(o) => !exporting && setExportConfirmOpen(o)}
+        error={exportError}
         title="Export configuration with secrets"
         summary="One file will hold every service-account private key, the OIDC client secret and every Gemini key this server has."
         tenant={null}

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   buildInitialTransferCursor,
   sanitizeTransferCursor,
@@ -9,6 +10,7 @@ import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // The largest legitimate body is a continuation cursor: a queue capped at
 // 20,000 ids (~90 chars each) ≈ 2 MB. 4 MB leaves headroom while still
@@ -32,6 +34,8 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
  * for the untouched remainder, so a re-run resumes instead of restarting.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -167,7 +171,7 @@ export async function POST(request: NextRequest) {
       error: message,
       actor,
     });
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

@@ -6,12 +6,7 @@ import {
   sessionCookieOptions,
   SESSION_COOKIE_NAME,
 } from "@/lib/auth";
-import {
-  rateLimit,
-  peekRateLimit,
-  clearRateLimit,
-  clientKey,
-} from "@/lib/rate-limit";
+import { reserveAttempt, clearRateLimit, clientKey } from "@/lib/rate-limit";
 import { passwordLoginEnabled, readSsoConfig } from "@/lib/sso-server";
 import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
@@ -75,17 +70,20 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Consult the limiter BEFORE comparing, and fail closed: once the bucket
-  // holds MAX_FAILED_ATTEMPTS wrong guesses, every attempt in the window is
-  // refused, including a correct one. The alternative — always letting a
-  // correct password through — meant the limiter only chose between a 401
-  // and a 429 for wrong guesses and never slowed a brute force at all.
+  // Take the attempt from the allowance BEFORE comparing, and fail closed:
+  // once the bucket holds MAX_FAILED_ATTEMPTS attempts, every attempt in the
+  // window is refused, including a correct one. A correct password clears the
+  // count below, so only wrong guesses stay counted.
+  //
+  // Recording first is what makes the limit hold: checking first and counting
+  // only after a wrong answer let a burst of simultaneous guesses all pass the
+  // check before any of them was counted.
   //
   // Without a trusted proxy every client shares one bucket, so a flood of
   // wrong guesses can hold the door shut for the real operator for a window.
   // That is the intended trade: a short outage is recoverable, a guessed
   // password is not.
-  const gate = peekRateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
+  const gate = reserveAttempt(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
   if (!gate.allowed) {
     return NextResponse.json(
       { error: `Too many failed attempts. Try again in ${gate.retryAfter}s.` },
@@ -94,7 +92,6 @@ export async function POST(req: NextRequest) {
   }
 
   if (!(await passwordMatches(body.password))) {
-    rateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
     await new Promise((r) => setTimeout(r, FAILED_ATTEMPT_DELAY_MS));
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }

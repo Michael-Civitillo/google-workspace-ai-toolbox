@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getUser, isNotFoundError } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
-import { requireEmail, ValidationError } from "@/lib/validate";
+import { requireEmail } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const email = requireEmail(
@@ -26,7 +30,7 @@ export async function GET(request: NextRequest) {
     }
     const message =
       error instanceof Error ? error.message : "Failed to look up user";
-    const status = error instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(error);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   buildGmailClient,
   withGoogleRetry,
   getUser,
+  isAbortError,
   GMAIL_DELEGATION_SCOPES,
 } from "@/lib/admin-sdk";
 import { recordDelegationSightings } from "@/lib/delegation-sightings";
@@ -64,9 +66,13 @@ async function diagnoseSuspension(
 }
 
 async function suspensionResponse(
+  failure: unknown,
   tenant: ReturnType<typeof tenantFromRequest>,
   parties: Array<{ role: "owner" | "delegate"; email: string | null }>
 ): Promise<NextResponse | null> {
+  // A refused request (a malformed address, an unknown tenant) or a cancelled
+  // one never reached a mailbox: looking the parties up can't explain it.
+  if (failure instanceof ValidationError || isAbortError(failure)) return null;
   const diag = await diagnoseSuspension(tenant, parties);
   if (!diag) return null;
   return NextResponse.json(
@@ -81,6 +87,8 @@ async function suspensionResponse(
 }
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   let tenant = null;
   let user: string | null = null;
   try {
@@ -105,13 +113,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: res.data });
   } catch (e) {
     return (
-      (await suspensionResponse(tenant, [{ role: "owner", email: user }])) ??
+      (await suspensionResponse(e, tenant, [{ role: "owner", email: user }])) ??
       errorResponse(e)
     );
   }
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
@@ -148,7 +158,7 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json({ success: true });
   } catch (e) {
-    const suspended = await suspensionResponse(tenant, [
+    const suspended = await suspensionResponse(e, tenant, [
       { role: "owner", email: user },
       { role: "delegate", email: delegate },
     ]);
@@ -166,6 +176,8 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
@@ -198,7 +210,7 @@ export async function DELETE(request: NextRequest) {
   } catch (e) {
     // Removing a delegate only impersonates the owner; a suspended delegate
     // can still be removed, so only the owner is diagnosed.
-    const suspended = await suspensionResponse(tenant, [
+    const suspended = await suspensionResponse(e, tenant, [
       { role: "owner", email: user },
     ]);
     audit({

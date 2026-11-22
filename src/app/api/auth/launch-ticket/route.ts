@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authConfigured, passwordMatches } from "@/lib/auth";
-import { issueLaunchTicket, launchTicketsSupported } from "@/lib/launch-tickets";
-import { rateLimit, peekRateLimit, clearRateLimit, clientKey } from "@/lib/rate-limit";
+import { instanceProof, issueLaunchTicket, launchTicketsSupported } from "@/lib/launch-tickets";
+import { reserveAttempt, clearRateLimit, clientKey } from "@/lib/rate-limit";
 import { passwordLoginEnabled, readSsoConfig } from "@/lib/sso-server";
 import { readCappedBody, BODY_TOO_LARGE } from "@/lib/request-body";
 
@@ -25,6 +25,21 @@ const MAX_BODY_BYTES = 4 * 1024;
 const MAX_FAILED_ATTEMPTS = 5;
 const FAIL_WINDOW_MS = 15 * 60 * 1000;
 const FAILED_ATTEMPT_DELAY_MS = 400;
+
+/**
+ * GET /api/auth/launch-ticket?challenge=<64 hex>  ->  { proof }
+ *
+ * Lets the launcher check that the server on a port really is the one it
+ * started, before it sends the password there. See instanceProof().
+ */
+export async function GET(req: NextRequest) {
+  const challenge = req.nextUrl.searchParams.get("challenge") ?? "";
+  const proof = instanceProof(challenge);
+  if (!proof) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({ proof }, { headers: { "cache-control": "no-store" } });
+}
 
 export async function POST(req: NextRequest) {
   if (!launchTicketsSupported()) {
@@ -67,7 +82,11 @@ export async function POST(req: NextRequest) {
   // Same bucket as /api/auth/login: this must not be a second, unthrottled
   // place to guess the password.
   const key = `login:${clientKey(req)}`;
-  const gate = peekRateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
+  // Take the attempt from the allowance BEFORE comparing. Checking first and
+  // recording only after a wrong answer let a burst of simultaneous guesses
+  // all pass the check before any of them was counted. A correct password
+  // clears the count below.
+  const gate = reserveAttempt(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
   if (!gate.allowed) {
     return NextResponse.json(
       { error: `Too many failed attempts. Try again in ${gate.retryAfter}s.` },
@@ -75,7 +94,6 @@ export async function POST(req: NextRequest) {
     );
   }
   if (!(await passwordMatches(body.password))) {
-    rateLimit(key, MAX_FAILED_ATTEMPTS, FAIL_WINDOW_MS);
     await new Promise((r) => setTimeout(r, FAILED_ATTEMPT_DELAY_MS));
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }

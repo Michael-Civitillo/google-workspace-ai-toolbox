@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getAppConfig, setUpdateCheck } from "@/lib/app-config";
 import {
   clearUpdateCheck,
@@ -10,6 +11,7 @@ import {
 import { audit } from "@/lib/audit";
 import { actorFromRequest } from "@/lib/session";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * The optional update check.
@@ -37,18 +39,22 @@ function status(enabled: boolean, result: UpdateCheckResult | null) {
 
 const noStore = { headers: { "cache-control": "no-store" } };
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const { updateCheck } = getAppConfig();
     const result = updateCheck ? await latestRelease() : null;
     return NextResponse.json({ success: true, data: status(updateCheck, result) }, noStore);
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    return NextResponse.json({ success: false, error: message }, { status: errorStatusFor(e) });
   }
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -81,6 +87,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, data: status(enabled, result) }, noStore);
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    return NextResponse.json({ success: false, error: message }, { status: errorStatusFor(e) });
   }
 }

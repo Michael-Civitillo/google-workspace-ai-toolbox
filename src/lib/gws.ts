@@ -58,7 +58,13 @@ function assertSafeArg(arg: string): void {
 
 // The CLI inherits the environment it needs (PATH, HOME, proxy settings, its
 // own GOOGLE_WORKSPACE_* variables) but never this app's secrets.
-const SECRET_ENV_PREFIXES = ["APP_", "GOOGLE_GENERATIVE_AI_", "CLOUDFLARE_"];
+const SECRET_ENV_PREFIXES = [
+  "APP_",
+  "GOOGLE_GENERATIVE_AI_",
+  "CLOUDFLARE_",
+  // The desktop launcher's instance token (see launch-tickets.ts).
+  "OPEN_ADMIN_INSTANCE_TOKEN",
+];
 
 function childEnv(
   overrides: Record<string, string | undefined> = {}

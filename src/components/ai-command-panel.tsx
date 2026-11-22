@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -47,8 +47,59 @@ const READ_ONLY_ACTIONS = new Set([
   "group_members_list",
 ]);
 
+const CALENDAR_ROLE_WORDS: Record<string, string> = {
+  freeBusyReader: "see when they are free or busy",
+  reader: "see every event's details",
+  writer: "change events",
+  owner: "manage the calendar and its sharing",
+};
+
+/**
+ * What the action will do, written from the validated parameters. The dialog
+ * says this, not the model's own sentence: the model's wording is a reading
+ * of the request, and could say something the parameters don't.
+ */
+function describeAction(p: ParsedAction): string {
+  const v = p.params;
+  switch (p.action) {
+    case "email_delegation_add":
+      return `${v.delegate} will be able to read, send and delete mail in ${v.user}'s mailbox.`;
+    case "calendar_delegation_add":
+      return `${v.delegateEmail} will be able to ${CALENDAR_ROLE_WORDS[v.role] ?? `use "${v.role}" access on`} ${v.calendarId}'s calendar.`;
+    case "group_member_add":
+      return v.role
+        ? `${v.member} will be in ${v.group} as ${v.role.toLowerCase()}. If they are already in it, their role becomes ${v.role.toLowerCase()}.`
+        : `${v.member} will be added to ${v.group}. Someone already in it keeps their role.`;
+    case "email_delegation_list":
+      return `List who has access to ${v.user}'s mailbox.`;
+    case "calendar_delegation_list":
+      return `List who has access to ${v.calendarId}'s calendar.`;
+    case "group_members_list":
+      return `List the members of ${v.group}.`;
+    default:
+      return `Run "${p.actionDetails?.name ?? p.action}" with the details below.`;
+  }
+}
+
+/**
+ * The phrase this action needs typed, whatever the model's confidence: the
+ * same rule as its own page. A confident model must not make an owner grant
+ * one click.
+ */
+function requiredPhrase(p: ParsedAction): string | null {
+  if (p.action === "group_member_add" && p.params.role === "OWNER") return p.params.member;
+  return null;
+}
+
 export function AICommandPanel() {
   const { tenant, id: tenantId } = useCurrentTenant();
+  // Answers that land after a tenant switch, or after a newer request, are
+  // dropped: they belong to a page that is no longer there.
+  const tenantIdRef = useRef(tenantId);
+  const requestSeq = useRef(0);
+  useEffect(() => {
+    tenantIdRef.current = tenantId;
+  }, [tenantId]);
   const [command, setCommand] = useState("");
   const [parsed, setParsed] = useState<ParsedAction | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -67,25 +118,35 @@ export function AICommandPanel() {
   // would silently fire against a different tenant (the read-only path runs
   // with no dialog and shows no tenant at all). Invalidate it on switch.
   useEffect(() => {
+    requestSeq.current++;
     setParsed(null);
     setConfirmOpen(false);
     setReadResult(null);
+    setParsing(false);
   }, [tenantId]);
 
   const parseCommand = async () => {
     if (!command.trim()) return;
+    const seq = ++requestSeq.current;
+    const pinned = tenantId;
+    const current = () => seq === requestSeq.current && tenantIdRef.current === pinned;
     setParsing(true);
     setParsed(null);
     setMessage(null);
     setReadResult(null);
 
     try {
-      const res = await tfetch("/api/ai/parse-command", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command }),
-      });
+      const res = await tfetch(
+        "/api/ai/parse-command",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command }),
+        },
+        pinned
+      );
       const result = await res.json();
+      if (!current()) return;
 
       if (result.success) {
         setParsed(result.data);
@@ -93,9 +154,9 @@ export function AICommandPanel() {
         setMessage({ type: "error", text: result.error || "Failed to parse" });
       }
     } catch {
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      if (current()) setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
-      setParsing(false);
+      if (current()) setParsing(false);
     }
   };
 
@@ -114,11 +175,14 @@ export function AICommandPanel() {
   const executeAction = async () => {
     if (!parsed?.actionDetails || !parsed.validParams) return;
     if (isDestructive) return;
+    const ran = parsed;
+    const pinned = tenantId;
+    const pinnedName = tenant?.name ?? null;
     setExecuting(true);
     setMessage(null);
 
     try {
-      const { endpoint, method } = parsed.actionDetails;
+      const { endpoint, method } = ran.actionDetails!;
       const fetchOptions: RequestInit = {
         method,
         headers: { "Content-Type": "application/json" },
@@ -126,24 +190,37 @@ export function AICommandPanel() {
 
       let url = endpoint;
       if (method === "GET") {
-        const params = new URLSearchParams(parsed.params);
+        const params = new URLSearchParams(ran.params);
         url = `${endpoint}?${params.toString()}`;
       } else {
-        fetchOptions.body = JSON.stringify(parsed.params);
+        const phrase = requiredPhrase(ran);
+        // The route checks the typed phrase itself; the dialog collected it.
+        fetchOptions.body = JSON.stringify({ ...ran.params, ...(phrase ? { confirm: phrase } : {}) });
       }
 
-      const res = await tfetch(url, fetchOptions, tenantId);
+      const res = await tfetch(url, fetchOptions, pinned);
       const result = await res.json();
+      // Ran against the tenant it was confirmed for; if the operator has
+      // switched since, say which one rather than show it under the new one.
+      const where =
+        tenantIdRef.current !== pinned && pinnedName ? ` (in ${pinnedName})` : "";
 
       if (result.success) {
-        const isRead = READ_ONLY_ACTIONS.has(parsed.action);
+        const isRead = READ_ONLY_ACTIONS.has(ran.action);
         if (isRead) {
           // Surface the actual answer (delegates / ACL list) instead of just a
           // "Done!" toast with the data thrown away.
-          setReadResult(result.data ?? null);
-          setMessage({ type: "success", text: parsed.explanation });
+          if (tenantIdRef.current === pinned) setReadResult(result.data ?? null);
+          setMessage({ type: "success", text: `${describeAction(ran)}${where} Done.` });
         } else {
-          setMessage({ type: "success", text: `Done! ${parsed.explanation}` });
+          // What the server says happened, not what the model expected.
+          const serverSaid =
+            typeof result.data?.message === "string" ? ` ${result.data.message}` : "";
+          const already = result.data?.alreadyMember === true ? " They were already in it." : "";
+          setMessage({
+            type: "success",
+            text: `Done${where}: ${describeAction(ran)}${already}${serverSaid}`,
+          });
           setReadResult(null);
         }
         setParsed(null);
@@ -265,7 +342,10 @@ export function AICommandPanel() {
                   {parsed.actionDetails?.name || parsed.action}
                 </Badge>
               </div>
-              <p className="text-sm">{parsed.explanation}</p>
+              <p className="text-sm">{describeAction(parsed)}</p>
+              <p className="text-xs text-muted-foreground">
+                The model&apos;s reading: {parsed.explanation}
+              </p>
 
               <Separator />
 
@@ -356,10 +436,12 @@ export function AICommandPanel() {
           open={confirmOpen}
           onOpenChange={(o) => !executing && setConfirmOpen(o)}
           title={`Run: ${parsed.actionDetails.name}`}
-          summary={parsed.explanation}
+          summary={describeAction(parsed)}
           tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
-          severity={parsed.confidence < 0.7 ? "high" : "medium"}
-          confirmPhrase={parsed.confidence < 0.7 ? "RUN" : undefined}
+          // The action decides what it needs typed; low confidence can only
+          // add a phrase, never take one away.
+          severity={requiredPhrase(parsed) || parsed.confidence < 0.7 ? "high" : "medium"}
+          confirmPhrase={requiredPhrase(parsed) ?? (parsed.confidence < 0.7 ? "RUN" : undefined)}
           confirmLabel="Run action"
           busy={executing}
           changes={[

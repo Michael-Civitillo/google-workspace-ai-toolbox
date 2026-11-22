@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   setActiveTenant,
   getTenantById,
@@ -11,6 +12,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   // Hoisted above the try so the error path can name the tenant too. Activating
   // repoints every operation that falls back to the active tenant at another

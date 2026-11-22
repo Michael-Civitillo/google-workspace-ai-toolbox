@@ -47,6 +47,7 @@ interface Match {
 
 interface PairHistory {
   owner: string;
+  delegate: string;
   grantedAt: string | null;
   grantedBy: string | null;
   firstSeenAt: string | null;
@@ -62,7 +63,28 @@ interface Progress {
   skippedSuspended: number;
 }
 
-const HISTORY_BATCH = 100;
+/**
+ * How the last scan ended. "failed" is a page that errored part-way: the
+ * mailboxes after it were never checked, so the result is as incomplete as a
+ * cancelled one and must say so after the error banner is gone.
+ */
+type ScanState = "idle" | "scanning" | "complete" | "cancelled" | "failed";
+
+/**
+ * Grant history is read once, after the scan: it walks the whole local audit
+ * log, so asking per page of mailboxes repeated that walk for every page.
+ */
+type HistoryState = "idle" | "waiting" | "loading" | "done" | "failed";
+
+// The history route takes up to 5,000 pairs per request.
+const HISTORY_CHUNK = 2000;
+
+/**
+ * One mailbox can hold two grants for the same person (their primary address
+ * and an alias), so a match is the pair, not the mailbox.
+ */
+const matchKey = (m: { owner: string; delegateAddress: string }) =>
+  `${m.owner}|${m.delegateAddress}`;
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -95,22 +117,26 @@ function isJustNow(iso: string, now = Date.now()): boolean {
   return !Number.isNaN(ms) && ms < 6 * 60 * 60 * 1000;
 }
 
+const plural = (n: number, one: string, many: string) =>
+  `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
 export default function DelegationLookup() {
   const { tenant, id: tenantId } = useCurrentTenant();
   const [delegate, setDelegate] = useState("");
 
-  const [scanning, setScanning] = useState(false);
-  const [done, setDone] = useState(false);
-  const [cancelled, setCancelled] = useState(false);
+  const [scanState, setScanState] = useState<ScanState>("idle");
+  const [failReason, setFailReason] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [delegateInfo, setDelegateInfo] = useState<DelegateInfo | null>(null);
   const [matches, setMatches] = useState<Match[]>([]);
   const [history, setHistory] = useState<Record<string, PairHistory>>({});
-  const [historyFailed, setHistoryFailed] = useState(false);
+  const [historyState, setHistoryState] = useState<HistoryState>("idle");
+  const [historyIncomplete, setHistoryIncomplete] = useState(false);
   const [unscanned, setUnscanned] = useState<Unscanned[]>([]);
   const [showUnscanned, setShowUnscanned] = useState(false);
   const [message, setMessage] = useState<Feedback | null>(null);
 
+  // matchKey of the grant being removed.
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<Match | null>(
     null
@@ -123,160 +149,213 @@ export default function DelegationLookup() {
   } | null>(null);
   const [reactivateUser, setReactivateUser] = useState<string | null>(null);
 
+  const scanning = scanState === "scanning";
+
+  // Cancel stops the walk between pages; the abort controllers stop the
+  // request in flight.
   const cancelRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const historyAbortRef = useRef<AbortController | null>(null);
+  // Bumped by every new scan, a tenant switch and unmount. A scan, and the
+  // history lookup that follows it, only write to the page while they are
+  // still the latest run — so nothing from tenant A lands under tenant B.
+  const runSeq = useRef(0);
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
 
   // A list fetched for tenant A must never drive removals against tenant B:
-  // abort any in-flight scan and clear results when the tenant changes.
+  // stop any scan and clear results, dialogs included, when the tenant
+  // changes. An open remove dialog would otherwise sit over the new tenant
+  // with a target from the old one.
   useEffect(() => {
+    runSeq.current++;
     cancelRef.current = true;
     abortRef.current?.abort();
-    setScanning(false);
-    setDone(false);
-    setCancelled(false);
+    historyAbortRef.current?.abort();
+    setScanState("idle");
+    setFailReason(null);
     setProgress(null);
     setDelegateInfo(null);
     setMatches([]);
     setHistory({});
-    setHistoryFailed(false);
+    setHistoryState("idle");
+    setHistoryIncomplete(false);
     setUnscanned([]);
+    setShowUnscanned(false);
     setMessage(null);
+    setRemoving(null);
+    setConfirmRemoveTarget(null);
+    setRemoveError(null);
+    setReactivateUser(null);
   }, [tenantId]);
 
   useEffect(() => {
+    // The counter object, not its value: unmount must bump the live count.
+    const seq = runSeq;
     return () => {
+      seq.current++;
       cancelRef.current = true;
       abortRef.current?.abort();
+      historyAbortRef.current?.abort();
     };
   }, []);
 
+  /** Grant dates for everything the scan found, in one walk of the log. */
   const loadHistory = async (
-    delegateEmail: string,
-    owners: string[],
-    signal: AbortSignal,
-    pinnedTenantId: string | null
+    found: Match[],
+    pinnedTenantId: string | null,
+    runId: number
   ) => {
-    for (let i = 0; i < owners.length; i += HISTORY_BATCH) {
-      const batch = owners.slice(i, i + HISTORY_BATCH);
-      try {
+    const ac = new AbortController();
+    historyAbortRef.current = ac;
+    setHistoryState("loading");
+    const pairs = found.map((m) => ({
+      owner: m.owner,
+      delegate: m.delegateAddress,
+    }));
+    try {
+      let incomplete = false;
+      const rows: PairHistory[] = [];
+      for (let i = 0; i < pairs.length; i += HISTORY_CHUNK) {
         const res = await tfetch(
-          `/api/admin/delegation-lookup/history?delegate=${encodeURIComponent(
-            delegateEmail
-          )}&owners=${encodeURIComponent(batch.join(","))}`,
-          { signal },
+          "/api/admin/delegation-lookup/history",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pairs: pairs.slice(i, i + HISTORY_CHUNK) }),
+            signal: ac.signal,
+          },
           pinnedTenantId
         );
         const result = await res.json();
-        if (tenantIdRef.current !== pinnedTenantId) return;
-        if (result.success) {
-          const rows = result.data.history as PairHistory[];
-          setHistory((prev) => {
-            const next = { ...prev };
-            for (const r of rows) next[r.owner] = r;
-            return next;
-          });
-        } else {
-          setHistoryFailed(true);
+        if (runSeq.current !== runId) return;
+        if (!result.success) {
+          setHistoryState("failed");
+          return;
         }
-      } catch {
-        if (!signal.aborted) setHistoryFailed(true);
+        rows.push(...(result.data.history as PairHistory[]));
+        if (result.data.auditComplete === false) incomplete = true;
       }
+      const next: Record<string, PairHistory> = {};
+      for (const r of rows) {
+        next[matchKey({ owner: r.owner, delegateAddress: r.delegate })] = r;
+      }
+      setHistory(next);
+      setHistoryIncomplete(incomplete);
+      setHistoryState("done");
+    } catch {
+      if (runSeq.current !== runId) return;
+      setHistoryState("failed");
     }
   };
 
   const runLookup = async () => {
     const target = delegate.trim();
-    if (!target) return;
+    if (!target || scanning) return;
 
+    const runId = ++runSeq.current;
+    const live = () => runSeq.current === runId;
     cancelRef.current = false;
     abortRef.current?.abort();
+    historyAbortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
     const pinnedTenantId = tenantId;
 
-    setScanning(true);
-    setDone(false);
-    setCancelled(false);
+    setScanState("scanning");
+    setFailReason(null);
     setMessage(null);
     setProgress({ scannedUsers: 0, skippedSuspended: 0 });
     setDelegateInfo(null);
     setMatches([]);
     setHistory({});
-    setHistoryFailed(false);
+    setHistoryState("waiting");
+    setHistoryIncomplete(false);
     setUnscanned([]);
     setShowUnscanned(false);
 
-    let delegateEmail = target;
+    // Every address a grant to this person can name, from the first page.
+    // Sent back on each continuation so the server looks the delegate up
+    // once per scan, not once per page.
+    let addresses: string[] | null = null;
     let pageToken: string | null = null;
-    const seenOwners = new Set<string>();
+    const found: Match[] = [];
+    let outcome: Exclude<ScanState, "idle" | "scanning"> = "complete";
 
     try {
       while (true) {
         const qs = new URLSearchParams({ delegate: target });
-        if (pageToken) qs.set("pageToken", pageToken);
+        if (pageToken) {
+          qs.set("pageToken", pageToken);
+          if (addresses) qs.set("addresses", addresses.join(","));
+        }
         const res = await tfetch(
           `/api/admin/delegation-lookup?${qs.toString()}`,
           { signal: ac.signal },
           pinnedTenantId
         );
         const result = await res.json();
-        if (tenantIdRef.current !== pinnedTenantId) return;
+        if (!live()) return;
         if (!result.success) {
-          setMessage({
-            type: "error",
-            text: result.error || "Delegation lookup failed",
-          });
-          return;
+          outcome = "failed";
+          const text = result.error || "Delegation lookup failed";
+          setFailReason(text);
+          setMessage({ type: "error", text });
+          break;
         }
 
         const data = result.data as {
-          delegate: DelegateInfo;
+          delegate: DelegateInfo | null;
+          addresses?: string[];
           matches: Match[];
           scannedUsers: number;
           skippedSuspended: number;
           unscanned: Unscanned[];
           nextPageToken: string | null;
         };
-        delegateEmail = data.delegate.primaryEmail;
-        setDelegateInfo(data.delegate);
+        if (data.delegate) setDelegateInfo(data.delegate);
+        if (Array.isArray(data.addresses) && data.addresses.length > 0) {
+          addresses = data.addresses;
+        }
         setProgress((p) => ({
           scannedUsers: (p?.scannedUsers ?? 0) + data.scannedUsers,
           skippedSuspended: (p?.skippedSuspended ?? 0) + data.skippedSuspended,
         }));
         if (data.matches.length > 0) {
+          found.push(...data.matches);
           setMatches((prev) => [...prev, ...data.matches]);
         }
         if (data.unscanned.length > 0) {
           setUnscanned((prev) => [...prev, ...data.unscanned]);
         }
 
-        const newOwners = data.matches
-          .map((m) => m.owner)
-          .filter((o) => !seenOwners.has(o));
-        for (const o of newOwners) seenOwners.add(o);
-        if (newOwners.length > 0) {
-          // Local-only call (audit log + sightings file): cheap enough to run
-          // per page so "since" fills in as matches appear.
-          await loadHistory(delegateEmail, newOwners, ac.signal, pinnedTenantId);
-        }
-
         pageToken = data.nextPageToken;
-        if (cancelRef.current || !pageToken) break;
+        if (!pageToken) break;
+        if (cancelRef.current) {
+          outcome = "cancelled";
+          break;
+        }
       }
-      if (cancelRef.current) setCancelled(true);
-      setDone(true);
     } catch {
-      if (!ac.signal.aborted) {
+      if (!live()) return;
+      if (ac.signal.aborted && cancelRef.current) {
+        outcome = "cancelled";
+      } else {
+        outcome = "failed";
+        setFailReason("Failed to connect to the API");
         setMessage({ type: "error", text: "Failed to connect to the API" });
-      } else if (cancelRef.current && tenantIdRef.current === pinnedTenantId) {
-        setCancelled(true);
-        setDone(true);
       }
-    } finally {
-      if (tenantIdRef.current === pinnedTenantId) setScanning(false);
     }
+    if (!live()) return;
+    setScanState(outcome);
+
+    // Local only (audit log + sightings file), so it runs for a cancelled or
+    // stopped scan too: whatever was found gets its dates.
+    if (found.length === 0) {
+      setHistoryState("done");
+      return;
+    }
+    await loadHistory(found, pinnedTenantId, runId);
   };
 
   const cancelLookup = () => {
@@ -286,7 +365,10 @@ export default function DelegationLookup() {
 
   const removeDelegate = async (m: Match, reactivated?: string) => {
     if (!delegateInfo) return;
-    setRemoving(m.owner);
+    const key = matchKey(m);
+    const pinnedTenantId = tenantId;
+    const delegateName = delegateInfo.primaryEmail;
+    setRemoving(key);
     setMessage(null);
     setRemoveError(null);
     try {
@@ -299,17 +381,20 @@ export default function DelegationLookup() {
           // can't be deleted by the primary email.
           body: JSON.stringify({ user: m.owner, delegate: m.delegateAddress }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      // The tenant changed while this was in flight: the page now shows
+      // another tenant, so say nothing there about this one.
+      if (tenantIdRef.current !== pinnedTenantId) return;
       if (result.success) {
         setConfirmRemoveTarget(null);
-        setMatches((prev) => prev.filter((x) => x.owner !== m.owner));
+        setMatches((prev) => prev.filter((x) => matchKey(x) !== key));
         setMessage({
           type: "success",
           text: reactivated
-            ? `Re-enabled ${reactivated} and removed ${delegateInfo.primaryEmail}'s delegate access to ${m.owner}`
-            : `Removed ${delegateInfo.primaryEmail}'s delegate access to ${m.owner}`,
+            ? `Re-enabled ${reactivated} and removed ${delegateName}'s delegate access to ${m.owner}`
+            : `Removed ${delegateName}'s delegate access to ${m.owner}`,
         });
       } else {
         // Stay in the dialog: that is where the operator is looking.
@@ -322,20 +407,25 @@ export default function DelegationLookup() {
         });
       }
     } catch {
+      if (tenantIdRef.current !== pinnedTenantId) return;
       setRemoveError({ message: "Failed to connect to the API" });
     } finally {
-      setRemoving(null);
+      if (tenantIdRef.current === pinnedTenantId) setRemoving(null);
     }
   };
 
   const renderSince = (m: Match) => {
-    const h = history[m.owner];
+    const h = history[matchKey(m)];
     if (!h) {
-      return (
-        <p className="text-xs text-muted-foreground">
-          {historyFailed ? "History unavailable" : "Checking history…"}
-        </p>
-      );
+      const text =
+        historyState === "waiting"
+          ? "Grant date is looked up when the scan ends"
+          : historyState === "loading"
+            ? "Checking history…"
+            : historyState === "failed"
+              ? "History unavailable"
+              : "Grant date unknown";
+      return <p className="text-xs text-muted-foreground">{text}</p>;
     }
     if (h.grantedAt) {
       return (
@@ -372,9 +462,7 @@ export default function DelegationLookup() {
   const summaryLine = () => {
     if (!progress) return "Search for a user to see the mailboxes they can access";
     const parts = [
-      `${progress.scannedUsers.toLocaleString()} mailbox${
-        progress.scannedUsers === 1 ? "" : "es"
-      } checked`,
+      `${plural(progress.scannedUsers, "mailbox", "mailboxes")} checked`,
     ];
     if (progress.skippedSuspended > 0) {
       parts.push(
@@ -384,15 +472,43 @@ export default function DelegationLookup() {
     if (unscanned.length > 0) {
       parts.push(`${unscanned.length.toLocaleString()} unreadable`);
     }
-    const state = scanning
-      ? "Scanning…"
-      : cancelled
-        ? "Cancelled — results are partial."
-        : done
-          ? "Complete."
-          : "";
+    const state =
+      scanState === "scanning"
+        ? "Scanning…"
+        : scanState === "cancelled"
+          ? "Cancelled — results are partial."
+          : scanState === "failed"
+            ? "Stopped early — the scan did not finish, so results are incomplete."
+            : scanState === "complete"
+              ? unscanned.length > 0
+                ? `Finished, but ${plural(unscanned.length, "mailbox", "mailboxes")} couldn't be checked.`
+                : "Complete."
+              : "";
     return `${state} ${parts.join(" · ")}`.trim();
   };
+
+  const emptyText = () => {
+    switch (scanState) {
+      case "scanning":
+        return "Nothing found yet…";
+      case "complete":
+        if (unscanned.length === 0) return "No mailboxes are delegated to this user";
+        return `None of the ${plural(progress?.scannedUsers ?? 0, "mailbox", "mailboxes")} checked are delegated to this user. ${plural(unscanned.length, "mailbox", "mailboxes")} couldn't be checked, so delegation there is unknown.`;
+      case "cancelled":
+        return "No delegated mailboxes found before the scan was cancelled";
+      case "failed":
+        return "No delegated mailboxes found before the scan stopped. The rest of the tenant was not checked.";
+      default:
+        return "No delegated mailboxes to display";
+    }
+  };
+
+  const countSuffix =
+    scanState === "complete" || scanState === "idle"
+      ? ""
+      : scanState === "scanning"
+        ? " found so far"
+        : " found (scan incomplete)";
 
   return (
     <>
@@ -451,7 +567,13 @@ export default function DelegationLookup() {
             {progress && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 {scanning && <Loader2 className="h-4 w-4 animate-spin" />}
-                <span>{summaryLine()}</span>
+                {scanState === "failed" && (
+                  <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
+                )}
+                <span>
+                  {summaryLine()}
+                  {scanState === "failed" && failReason ? ` (${failReason})` : ""}
+                </span>
               </div>
             )}
 
@@ -490,7 +612,8 @@ export default function DelegationLookup() {
                     <Badge variant="warning">suspended</Badge>
                   )}
                   <span>
-                    · {matches.length} mailbox{matches.length === 1 ? "" : "es"}
+                    · {plural(matches.length, "mailbox", "mailboxes")}
+                    {countSuffix}
                   </span>
                 </span>
               ) : (
@@ -501,66 +624,69 @@ export default function DelegationLookup() {
           <CardContent>
             {matches.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground text-sm">
-                {scanning
-                  ? "Nothing found yet…"
-                  : done
-                    ? cancelled
-                      ? "No delegated mailboxes found before the scan was cancelled"
-                      : "No mailboxes are delegated to this user"
-                    : "No delegated mailboxes to display"}
+                {emptyText()}
               </div>
             ) : (
               <div className="space-y-3">
-                {matches.map((m) => (
-                  <div
-                    key={m.owner}
-                    className="flex items-start justify-between gap-3 p-3 rounded-lg border bg-muted/30"
-                  >
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-medium truncate">
-                          {m.ownerName ? `${m.ownerName} · ${m.owner}` : m.owner}
-                        </p>
-                        <Badge
-                          variant={
-                            m.verificationStatus === "accepted"
-                              ? "success"
-                              : "warning"
-                          }
-                        >
-                          {m.verificationStatus}
-                        </Badge>
-                        {m.ownerSuspended && (
-                          <Badge variant="outline">suspended</Badge>
-                        )}
-                        {delegateInfo &&
-                          m.delegateAddress !== delegateInfo.primaryEmail && (
-                            <Badge variant="outline">
-                              via alias {m.delegateAddress}
-                            </Badge>
-                          )}
-                      </div>
-                      {renderSince(m)}
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-label={`Remove delegate access to ${m.owner}`}
-                      onClick={() => {
-                        setMessage(null);
-                        setRemoveError(null);
-                        setConfirmRemoveTarget(m);
-                      }}
-                      disabled={removing === m.owner || scanning}
+                {matches.map((m) => {
+                  const key = matchKey(m);
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-start justify-between gap-3 p-3 rounded-lg border bg-muted/30"
                     >
-                      {removing === m.owner ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4 text-danger" />
-                      )}
-                    </Button>
-                  </div>
-                ))}
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium truncate">
+                            {m.ownerName ? `${m.ownerName} · ${m.owner}` : m.owner}
+                          </p>
+                          <Badge
+                            variant={
+                              m.verificationStatus === "accepted"
+                                ? "success"
+                                : "warning"
+                            }
+                          >
+                            {m.verificationStatus}
+                          </Badge>
+                          {m.ownerSuspended && (
+                            <Badge variant="outline">suspended</Badge>
+                          )}
+                          {delegateInfo &&
+                            m.delegateAddress !== delegateInfo.primaryEmail && (
+                              <Badge variant="outline">
+                                via alias {m.delegateAddress}
+                              </Badge>
+                            )}
+                        </div>
+                        {renderSince(m)}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Remove delegate access to ${m.owner}`}
+                        onClick={() => {
+                          setMessage(null);
+                          setRemoveError(null);
+                          setConfirmRemoveTarget(m);
+                        }}
+                        disabled={removing === key || scanning}
+                      >
+                        {removing === key ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 text-danger" />
+                        )}
+                      </Button>
+                    </div>
+                  );
+                })}
+                {historyIncomplete && (
+                  <p className="text-xs text-muted-foreground">
+                    The audit log was too long to read to the end, so some
+                    grant dates may be missing.
+                  </p>
+                )}
               </div>
             )}
           </CardContent>
@@ -612,7 +738,7 @@ export default function DelegationLookup() {
           }
         }}
         title="Remove mailbox delegate"
-        summary={`${delegateInfo?.primaryEmail ?? ""} will lose access to ${
+        summary={`${confirmRemoveTarget?.delegateAddress ?? ""} will lose access to ${
           confirmRemoveTarget?.owner ?? ""
         }'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
@@ -651,7 +777,7 @@ export default function DelegationLookup() {
         onOpenChange={(o) => {
           if (!o) setReactivateUser(null);
         }}
-        thenLabel={`Remove ${delegateInfo?.primaryEmail ?? ""} as a delegate from ${
+        thenLabel={`Remove ${confirmRemoveTarget?.delegateAddress ?? ""} as a delegate from ${
           confirmRemoveTarget?.owner ?? ""
         }`}
         onReactivated={async (reactivated) => {

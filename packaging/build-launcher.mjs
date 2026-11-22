@@ -32,6 +32,21 @@ const version = JSON.parse(
   fs.readFileSync(path.join(repoRoot, "package.json"), "utf-8")
 ).version;
 
+// Every file's size and SHA-256, which the launcher checks the unpacked copy
+// against before running it (launcher/src/verify.ts). Written by
+// build-payload.mjs together with the archive it describes.
+const manifestPath = path.join(distDir, "payload-manifest.json");
+if (!fs.existsSync(manifestPath)) {
+  fail('no payload-manifest.json - run "npm run package:payload" first.');
+}
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+if (manifest.sha256 !== payload.sha256 || !Array.isArray(manifest.files)) {
+  fail("payload-manifest.json does not describe payload.zip - run \"npm run package:payload\" again.");
+}
+if (manifest.files.length !== payload.fileCount) {
+  fail(`payload-manifest.json lists ${manifest.files.length} files, payload.json says ${payload.fileCount}.`);
+}
+
 const outfile = path.join(distDir, "launcher.cjs");
 
 console.log("build-launcher: bundling launcher ...");
@@ -48,6 +63,9 @@ await build({
   define: {
     __APP_VERSION__: JSON.stringify(version),
     __PAYLOAD_SHA256__: JSON.stringify(payload.sha256),
+    // A string, parsed only when a check runs: JSON.parse of one string is
+    // much cheaper for V8 than an object literal of 2,000-odd entries.
+    __PAYLOAD_MANIFEST__: JSON.stringify(JSON.stringify(manifest.files)),
   },
 });
 console.log(

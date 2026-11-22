@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { changePrimaryDomain } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import {
@@ -10,6 +11,7 @@ import {
 import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Change a user's primary domain.
@@ -27,6 +29,8 @@ import { actorFromRequest } from "@/lib/session";
 const MAX_BODY_BYTES = 16 * 1024;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -92,7 +96,7 @@ export async function POST(request: NextRequest) {
       error: message,
       actor,
     });
-    const status = error instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(error);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

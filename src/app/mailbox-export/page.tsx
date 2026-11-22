@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   Card,
   CardContent,
@@ -28,7 +28,11 @@ import {
   CheckCircle2,
   AlertTriangle,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import {
+  tfetch,
+  useCurrentTenant,
+  tenantPinProblem,
+} from "@/lib/tenant-client";
 
 /** Export-file format version. Bump if the line schema changes. */
 const EXPORT_VERSION = 1;
@@ -76,7 +80,10 @@ function downloadBlob(filename: string, parts: BlobPart[], type: string) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Released later, not straight after click(): some browsers only start
+  // reading the blob after the click handler returns, and revoking it first
+  // cancels a download that can be gigabytes long.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 /** asctime-style UTC date for an mbox "From " postmark (e.g. "Thu Jun 18 ..."). */
@@ -127,17 +134,140 @@ function mboxEntry(
   return out;
 }
 
+
+/**
+ * Where the export goes. In browsers with the File System Access API the
+ * operator picks a file first and each page is written to it as it arrives,
+ * so the mailbox never has to fit in memory. Elsewhere the pages are kept as
+ * Blob segments and downloaded as one file at the end.
+ */
+interface OutputSink {
+  kind: "disk" | "download";
+  write(part: Blob): Promise<void>;
+  /** Keep what was written; `partial` marks a stopped export in its name. */
+  finish(partial: boolean): Promise<{ name: string; markedPartial: boolean }>;
+  /** Throw away what was written. */
+  discard(): Promise<void>;
+}
+
+interface SaveFilePickerOptions {
+  suggestedName?: string;
+  types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+}
+type ShowSaveFilePicker = (
+  options?: SaveFilePickerOptions
+) => Promise<FileSystemFileHandle>;
+
+function saveFilePicker(): ShowSaveFilePicker | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as { showSaveFilePicker?: ShowSaveFilePicker };
+  return typeof w.showSaveFilePicker === "function"
+    ? w.showSaveFilePicker.bind(window)
+    : null;
+}
+
+const noSubscribe = () => () => {};
+
+/** "mailbox.ndjson" → "mailbox-PARTIAL.ndjson". */
+function partialName(name: string): string {
+  return name.replace(/(\.[^./\\]+)?$/, "-PARTIAL$1");
+}
+
+function memorySink(baseName: string, ext: string, type: string): OutputSink {
+  // Blob SEGMENTS, one per fetched page: a single giant string would hit
+  // V8's string cap, and strings or byte arrays live in the JS heap, while
+  // Blobs are managed by the browser's blob storage, which can spill to disk.
+  let parts: Blob[] = [];
+  return {
+    kind: "download",
+    async write(part) {
+      parts.push(part);
+    },
+    async finish(partial) {
+      const name = `${baseName}${partial ? "-PARTIAL" : ""}.${ext}`;
+      downloadBlob(name, parts, type);
+      parts = [];
+      return { name, markedPartial: partial };
+    },
+    async discard() {
+      parts = [];
+    },
+  };
+}
+
+function diskSink(
+  handle: FileSystemFileHandle,
+  writable: FileSystemWritableFileStream
+): OutputSink {
+  return {
+    kind: "disk",
+    async write(part) {
+      await writable.write(part);
+    },
+    async finish(partial) {
+      // The browser writes to a temporary file and only puts it in place on
+      // close, so an export that stopped part-way has to be closed to be kept.
+      await writable.close();
+      if (!partial) return { name: handle.name, markedPartial: false };
+      const renamed = partialName(handle.name);
+      const movable = handle as unknown as {
+        move?: (newName: string) => Promise<void>;
+      };
+      if (typeof movable.move === "function") {
+        try {
+          await movable.move(renamed);
+          return { name: renamed, markedPartial: true };
+        } catch {
+          // Not every browser can rename a file it was handed; say so below.
+        }
+      }
+      return { name: handle.name, markedPartial: false };
+    },
+    async discard() {
+      await writable.abort().catch(() => {});
+    },
+  };
+}
+
+interface Summary {
+  user: string;
+  tenantName: string | null;
+  exported: number;
+  bytes: number;
+  skipped: number;
+  cancelled: boolean;
+  /** Stopped on an error: the file holds only part of the mailbox. */
+  failed: boolean;
+  file: { name: string; markedPartial: boolean; kind: "disk" | "download" } | null;
+}
+
 export default function MailboxExport() {
-  const { id: tenantId } = useCurrentTenant();
+  const { tenant, id: tenantId } = useCurrentTenant();
+  const canStreamToDisk = useSyncExternalStore(
+    noSubscribe,
+    () => saveFilePicker() !== null,
+    () => false
+  );
 
   const [user, setUser] = useState("");
   const [format, setFormat] = useState<"ndjson" | "mbox">("ndjson");
   const [includeSpamTrash, setIncludeSpamTrash] = useState(true);
   const [running, setRunning] = useState(false);
+  // The tenant and file a running export is pinned to, for its panel: after
+  // a tenant switch the page shows another tenant, but this run carries on
+  // against the one it started with.
+  const [runInfo, setRunInfo] = useState<{
+    user: string;
+    tenantName: string | null;
+    fileName: string | null;
+  } | null>(null);
   const cancelRef = useRef(false);
   // Aborts the page request in flight: cancelRef only stops the loop between
   // pages, and one page of large messages can take a while to fetch.
   const abortRef = useRef<AbortController | null>(null);
+  // Mirrors `running` for the tenant effect, which must leave a running
+  // export's panel alone.
+  const runningRef = useRef(false);
   // Tracks whether the component is still mounted. Navigating away mid-export
   // must stop the loop and skip the final download — otherwise the loop keeps
   // fetching invisibly and drops a surprise multi-GB file minutes later.
@@ -151,51 +281,120 @@ export default function MailboxExport() {
     };
   }, []);
 
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
+
   const [progress, setProgress] = useState<{
     exported: number;
     bytes: number;
     estimate: number | null;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [summary, setSummary] = useState<{
-    user: string;
-    exported: number;
-    bytes: number;
-    skipped: number;
-    cancelled: boolean;
-  } | null>(null);
+  const [summary, setSummary] = useState<Summary | null>(null);
 
-  const runExport = async () => {
-    if (!user.trim() || running) return;
-    setRunning(true);
+  // A result belongs to the tenant it was exported from: clear it when the
+  // tenant changes. A running export is left alone — its requests are pinned
+  // and its panel names its tenant.
+  useEffect(() => {
+    if (runningRef.current) return;
     setError(null);
     setSummary(null);
+    setProgress(null);
+    setRunInfo(null);
+  }, [tenantId]);
+
+  const runExport = async () => {
+    const target = user.trim();
+    if (!target || running || runningRef.current) return;
+    setError(null);
+    setSummary(null);
+
+    const pinnedTenantId = tenantId;
+    const pinnedTenantName = tenant?.name ?? null;
+    const problem = await tenantPinProblem(pinnedTenantId);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+
+    // Pin the format for the whole walk so a change mid-export can't change
+    // the output shape.
+    const exportFormat = format;
+    const ext = exportFormat === "mbox" ? "mbox" : "ndjson";
+    const mime =
+      exportFormat === "mbox"
+        ? "application/mbox"
+        : "application/x-ndjson;charset=utf-8";
+    const baseName = `mailbox-${target.toLowerCase()}-${new Date()
+      .toISOString()
+      .slice(0, 10)}`;
+
+    let sink: OutputSink | null = null;
+    let chosenFile: string | null = null;
+    const pick = saveFilePicker();
+    if (pick) {
+      let handle: FileSystemFileHandle | null = null;
+      try {
+        handle = await pick({
+          suggestedName: `${baseName}.${ext}`,
+          types: [
+            {
+              description:
+                exportFormat === "mbox" ? "mbox mailbox" : "Mailbox export",
+              accept: {
+                [exportFormat === "mbox" ? "application/mbox" : "application/x-ndjson"]:
+                  [`.${ext}`],
+              },
+            },
+          ],
+        });
+      } catch (e) {
+        // The operator closed the picker: they chose not to export.
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        // Anything else (a policy, an odd browser): keep the old behaviour.
+      }
+      if (handle) {
+        try {
+          sink = diskSink(handle, await handle.createWritable());
+          chosenFile = handle.name;
+        } catch {
+          sink = null;
+        }
+      }
+    }
+    if (!alive.current) {
+      await sink?.discard();
+      return;
+    }
+    // The picker can stay open a while; a run must not start against a
+    // tenant the page no longer shows.
+    if (tenantIdRef.current !== pinnedTenantId) {
+      await sink?.discard();
+      setError("The tenant changed — start the export again.");
+      return;
+    }
+    if (!sink) sink = memorySink(baseName, ext, mime);
+
+    runningRef.current = true;
+    setRunning(true);
+    setRunInfo({
+      user: target,
+      tenantName: pinnedTenantName,
+      fileName: sink.kind === "disk" ? chosenFile : null,
+    });
     setProgress({ exported: 0, bytes: 0, estimate: null });
     cancelRef.current = false;
     const ac = new AbortController();
     abortRef.current = ac;
-    // Set on any hard failure so the finally block doesn't paint a green
-    // "complete" summary under the error banner.
-    let walkFailed = false;
-    // Pin the tenant and format for the whole walk so a switch mid-export can't
-    // redirect later pages to a different tenant or change the output shape.
-    const pinnedTenantId = tenantId;
-    const exportFormat = format;
 
-    // Accumulate the output as Blob SEGMENTS, one per fetched page. Two
-    // reasons this must not be a flat array of strings/byte-arrays:
-    //  - a single giant string would hit V8's ~512 MB string cap ("Invalid
-    //    string length") and destroy the export;
-    //  - strings and Uint8Arrays live in the JS heap, so a multi-GB mailbox
-    //    would OOM the tab before the download ever starts. Blobs are managed
-    //    by the browser's blob storage, which can spill to disk — sealing each
-    //    page into a Blob keeps the JS heap bounded to roughly one page.
-    const parts: Blob[] = [];
+    // Set when the walk stopped on an error: the file is then partial, and
+    // the summary must say so rather than "complete".
+    let failure: string | null = null;
     let headerWritten = false;
     let exported = 0;
     let bytes = 0;
     let skipped = 0;
-    let exportUser = user.trim().toLowerCase();
+    let exportUser = target.toLowerCase();
 
     try {
       let pageToken: string | undefined;
@@ -203,17 +402,24 @@ export default function MailboxExport() {
       while (true) {
         if (cancelRef.current || !alive.current) break;
         const url =
-          `/api/admin/mailbox-export?user=${encodeURIComponent(user.trim())}` +
+          `/api/admin/mailbox-export?user=${encodeURIComponent(target)}` +
           `&includeSpamTrash=${includeSpamTrash ? "true" : "false"}` +
           (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "") +
           (pendingIds && pendingIds.length
             ? `&pendingIds=${encodeURIComponent(pendingIds.join(","))}`
             : "");
         const res = await tfetch(url, { signal: ac.signal }, pinnedTenantId);
-        const data = await res.json();
-        if (!data.success) {
-          walkFailed = true;
-          setError(data.error || "Export failed");
+        let data;
+        try {
+          data = await res.json();
+        } catch (e) {
+          if (ac.signal.aborted) throw e;
+          failure = `The server sent an unexpected response (HTTP ${res.status}).`;
+          break;
+        }
+        if (!data?.success) {
+          // Includes the server's 429 when other exports hold its slots.
+          failure = data?.error || "Export failed";
           break;
         }
         const page: ExportPage = data.data;
@@ -237,10 +443,11 @@ export default function MailboxExport() {
           headerWritten = true;
           // +1 for the newline pushed after each line. Tracking emitted bytes
           // (here and below) keeps the reported size consistent with mbox and
-          // close to the actual downloaded file.
+          // close to the actual file.
           bytes += headerLine.length + 1;
         }
 
+        let pageExported = 0;
         for (const m of page.messages) {
           if (exportFormat === "mbox") {
             // A message whose raw body won't decode can't be written to the
@@ -249,7 +456,7 @@ export default function MailboxExport() {
               const entry = mboxEntry(m.raw, m.internalDate);
               pageParts.push(entry);
               bytes += entry.length;
-              exported++;
+              pageExported++;
             } catch {
               skipped++;
             }
@@ -263,17 +470,25 @@ export default function MailboxExport() {
               raw: m.raw,
             });
             pageParts.push(line, "\n");
-            exported++;
+            pageExported++;
             bytes += line.length + 1;
           }
         }
-        if (pageParts.length > 0) parts.push(new Blob(pageParts));
+        if (pageParts.length > 0) {
+          try {
+            await sink.write(new Blob(pageParts));
+          } catch (e) {
+            failure = `Couldn't write to the file: ${
+              e instanceof Error ? e.message : String(e)
+            }`;
+            break;
+          }
+        }
+        exported += pageExported;
         skipped += page.skipped?.length ?? 0;
-        setProgress({
-          exported,
-          bytes,
-          estimate: page.resultSizeEstimate,
-        });
+        if (alive.current) {
+          setProgress({ exported, bytes, estimate: page.resultSizeEstimate });
+        }
 
         // Drain any unfetched ids from this list page first (byte budget hit),
         // then advance to the next list page. Stop only when both are exhausted.
@@ -283,48 +498,52 @@ export default function MailboxExport() {
       }
     } catch {
       // An abort is the operator cancelling (or leaving the page): the pages
-      // already captured still download below, as for a cancel between pages.
-      if (!ac.signal.aborted) {
-        walkFailed = true;
-        setError("Failed to connect to the API");
+      // already captured are still kept below, as for a cancel between pages.
+      if (!ac.signal.aborted) failure = "Failed to connect to the API";
+    }
+
+    runningRef.current = false;
+    // If the user navigated away, don't drop a surprise download or push state
+    // into an unmounted component — just stop.
+    if (!alive.current) {
+      await sink.discard();
+      return;
+    }
+    const cancelled = failure === null && cancelRef.current;
+    const partial = failure !== null || cancelled;
+
+    // Keep whatever was captured — even on cancel or a mid-walk error, so a
+    // partial backup isn't thrown away — and name it as partial.
+    let file: Summary["file"] = null;
+    if (exported > 0) {
+      try {
+        const kept = await sink.finish(partial);
+        file = { ...kept, kind: sink.kind };
+      } catch (e) {
+        failure ??= `Couldn't finish writing the file: ${
+          e instanceof Error ? e.message : String(e)
+        }`;
       }
-    } finally {
-      setRunning(false);
-      // If the user navigated away, don't drop a surprise download or push state
-      // into an unmounted component — just stop.
-      if (!alive.current) return;
-      // Download whenever we captured at least one message — even on cancel or
-      // a mid-walk error, so partial backups aren't thrown away.
-      if (exported > 0) {
-        const date = new Date().toISOString().slice(0, 10);
-        if (exportFormat === "mbox") {
-          downloadBlob(
-            `mailbox-${exportUser}-${date}.mbox`,
-            parts,
-            "application/mbox"
-          );
-        } else {
-          downloadBlob(
-            `mailbox-${exportUser}-${date}.ndjson`,
-            parts,
-            "application/x-ndjson;charset=utf-8"
-          );
-        }
-      }
-      // ALWAYS summarise a run that ended without a hard error — an empty
-      // mailbox (or an early cancel) used to end completely silently: spinner
-      // gone, no file, no message, leaving the operator unable to tell whether
-      // the export worked, failed, or had nothing to do. After a hard error the
-      // banner explains the stop; add the summary only if data was captured.
-      if (!walkFailed || exported > 0 || skipped > 0) {
-        setSummary({
-          user: exportUser,
-          exported,
-          bytes,
-          skipped,
-          cancelled: cancelRef.current,
-        });
-      }
+    } else {
+      await sink.discard();
+    }
+
+    setRunning(false);
+    setError(failure);
+    // Summarise every run, including an empty mailbox or an early cancel —
+    // except a hard error before anything was captured, which the error
+    // banner explains on its own.
+    if (failure === null || exported > 0 || skipped > 0) {
+      setSummary({
+        user: exportUser,
+        tenantName: pinnedTenantName,
+        exported,
+        bytes,
+        skipped,
+        cancelled,
+        failed: failure !== null,
+        file,
+      });
     }
   };
 
@@ -332,6 +551,11 @@ export default function MailboxExport() {
     cancelRef.current = true;
     abortRef.current?.abort();
   };
+
+  const summaryWarn =
+    !!summary && (summary.failed || summary.cancelled || summary.skipped > 0);
+  const messages = (n: number) =>
+    `${n.toLocaleString()} message${n === 1 ? "" : "s"}`;
 
   return (
     <>
@@ -343,28 +567,34 @@ export default function MailboxExport() {
 
       {error && (
         <Alert variant="destructive" className="mb-6">
-          <AlertDescription>
-            {error}
-          </AlertDescription>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       {summary && (
-        <Alert
-          variant={summary.skipped > 0 ? "warning" : "success"}
-          className="mb-6"
-        >
-          {summary.skipped > 0 ? <AlertTriangle /> : <CheckCircle2 />}
+        <Alert variant={summaryWarn ? "warning" : "success"} className="mb-6">
+          {summaryWarn ? <AlertTriangle /> : <CheckCircle2 />}
           <AlertDescription>
-            {summary.cancelled ? "Export cancelled — " : "Export complete — "}
-            saved {summary.exported.toLocaleString()} message
-            {summary.exported === 1 ? "" : "s"} (≈{formatBytes(summary.bytes)})
-            from {summary.user}.
-            {summary.exported > 0 ? " The file has been downloaded." : ""}
+            {summary.failed
+              ? `Export stopped — partial file (${messages(summary.exported)}, ≈${formatBytes(summary.bytes)}) from ${summary.user}`
+              : summary.cancelled
+                ? `Export cancelled — partial file (${messages(summary.exported)}, ≈${formatBytes(summary.bytes)}) from ${summary.user}`
+                : `Export complete — saved ${messages(summary.exported)} (≈${formatBytes(summary.bytes)}) from ${summary.user}`}
+            {summary.tenantName ? ` in ${summary.tenantName}` : ""}.
+            {summary.file
+              ? summary.file.kind === "disk"
+                ? ` Saved as ${summary.file.name}.`
+                : ` Downloaded as ${summary.file.name}.`
+              : summary.exported === 0
+                ? " No file was saved."
+                : ""}
+            {summary.file &&
+            (summary.failed || summary.cancelled) &&
+            !summary.file.markedPartial
+              ? " Rename it so it isn't mistaken for a full backup."
+              : ""}
             {summary.skipped > 0 &&
-              ` ${summary.skipped.toLocaleString()} message${
-                summary.skipped === 1 ? "" : "s"
-              } could not be exported (no raw content, or still unreachable after retries) and were left out.`}
+              ` ${messages(summary.skipped)} could not be exported (no raw content, or still unreachable after retries) and were left out.`}
           </AlertDescription>
         </Alert>
       )}
@@ -378,8 +608,8 @@ export default function MailboxExport() {
             </CardTitle>
             <CardDescription>
               Walks every message in the mailbox 25 at a time and streams them
-              into a single file in your browser. Read-only — nothing in the
-              source mailbox is changed.
+              into a single file. Read-only — nothing in the source mailbox is
+              changed.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -443,9 +673,10 @@ export default function MailboxExport() {
               <Info className="h-4 w-4 text-info" />
               <AlertDescription>
                 The export contains the full content of every email. Store the
-                downloaded file somewhere secure. Large mailboxes are held in
-                browser memory until the download is assembled — for very large
-                accounts, run the export on a machine with ample RAM.
+                file somewhere secure.{" "}
+                {canStreamToDisk
+                  ? "Your browser asks where to save it first, then writes each batch of messages to that file as it arrives, so a large mailbox doesn't have to fit in memory."
+                  : "In this browser the whole mailbox is held in memory until the download is assembled — for very large accounts, use a Chromium-based browser (which writes to disk as it goes) or a machine with ample RAM."}
               </AlertDescription>
             </Alert>
 
@@ -458,7 +689,9 @@ export default function MailboxExport() {
               ) : (
                 <Button variant="outline" onClick={cancel}>
                   <StopCircle className="h-4 w-4 mr-1.5" />
-                  Cancel &amp; download what&apos;s gathered
+                  {runInfo?.fileName
+                    ? "Cancel & keep what's saved"
+                    : "Cancel & download what's gathered"}
                 </Button>
               )}
               {running && progress && (
@@ -473,6 +706,16 @@ export default function MailboxExport() {
                 </p>
               )}
             </div>
+            {running && runInfo && (
+              <p className="text-xs text-muted-foreground">
+                Exporting {runInfo.user}
+                {runInfo.tenantName ? ` from ${runInfo.tenantName}` : ""}
+                {runInfo.fileName ? `, writing to ${runInfo.fileName}` : ""}.
+                {runInfo.tenantName && tenant && tenant.name !== runInfo.tenantName
+                  ? ` You have since switched to ${tenant.name}; this export carries on against ${runInfo.tenantName}.`
+                  : ""}
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -82,7 +82,9 @@ describe("group_add", () => {
   it("sends a role in the spelling the API wants, however it was typed", () => {
     assert.equal(op.validateRow([G, A, "manager"]), null);
     assert.deepEqual(op.toBody([G, A, "manager"]), { group: G, member: A, role: "MANAGER" });
-    assert.deepEqual(op.toBody([G, A, " Owner "]), { group: G, member: A, role: "OWNER" });
+    // An owner also carries the confirmation the route asks for: the run's
+    // own typed phrase stands for it.
+    assert.deepEqual(op.toBody([G, A, " Owner "]), { group: G, member: A, role: "OWNER", confirm: A });
   });
 
   it("refuses a role that isn't one", () => {
@@ -191,6 +193,13 @@ describe("duplicateRows", () => {
 });
 
 describe("parseCsv", () => {
+  it("ignores spaces between a closing quote and the comma", () => {
+    assert.deepEqual(parseCsv('"a@example.com" , b@example.com\n"c@x.com"\t,"d"  '), [
+      ["a@example.com", "b@example.com"],
+      ["c@x.com", "d"],
+    ]);
+  });
+
   it("reads quoted cells, doubled quotes, commas in quotes and every line ending", () => {
     assert.deepEqual(parseCsv('a,b\r\n"c,1","d ""x"""\rE , f\n\n'), [
       ["a", "b"],

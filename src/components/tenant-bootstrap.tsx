@@ -1,52 +1,35 @@
 "use client";
 
 import { useEffect } from "react";
-import {
-  setCurrentTenantState,
-  tenantStateGeneration,
-} from "@/lib/tenant-client";
-import type { Tenant } from "@/lib/tenant-types";
+import { usePathname } from "next/navigation";
+import { loadTenantList, tenantListStatus } from "@/lib/tenant-client";
 
 /**
- * On mount, ask the server for the currently active tenant and seed the
- * client-side tenant id and full tenant object. After this every `tfetch()`
- * call will include the selected tenant id as a header, and confirmation
- * dialogs can show "running against <tenant>".
+ * Ask the server for the tenant list and the active tenant, and seed the
+ * client-side tenant state. After this every `tfetch()` call carries the
+ * selected tenant id, and confirmation dialogs can show "running against
+ * <tenant>". The request is shared with the sidebar's switcher.
  *
- * Also re-syncs whenever the page becomes visible again, in case the active
- * tenant changed in another tab.
+ * Asked again on every page until it has worked: the first ask happens on
+ * the sign-in page, before there is a session, and the move to the app after
+ * signing in doesn't reload the page. Also re-synced whenever the page
+ * becomes visible again, in case the active tenant changed in another tab.
+ * An answer from before a switch made in this tab never undoes it (see
+ * loadTenantList).
  */
 export function TenantBootstrap() {
+  const pathname = usePathname();
+
   useEffect(() => {
-    let cancelled = false;
-    async function sync() {
-      try {
-        // Snapshot the tenant-state generation before the round trip: if the
-        // user switches tenants while this fetch is in flight, the response
-        // reflects the PREVIOUS active tenant and applying it would silently
-        // revert their switch.
-        const genBefore = tenantStateGeneration();
-        const r = await fetch("/api/tenants");
-        if (!r.ok) return;
-        const data = await r.json();
-        if (cancelled || tenantStateGeneration() !== genBefore) return;
-        const id: string | null = data.activeTenantId ?? null;
-        const tenants: Tenant[] = Array.isArray(data.tenants) ? data.tenants : [];
-        setCurrentTenantState(
-          id,
-          id ? tenants.find((t) => t.id === id) ?? null : null
-        );
-      } catch {}
-    }
-    sync();
+    if (tenantListStatus() !== "loaded") void loadTenantList();
+  }, [pathname]);
+
+  useEffect(() => {
     function onVisible() {
-      if (document.visibilityState === "visible") sync();
+      if (document.visibilityState === "visible") void loadTenantList();
     }
     document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      document.removeEventListener("visibilitychange", onVisible);
-    };
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
   return null;
 }

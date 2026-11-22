@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   getTenantStoreSnapshot,
   addTenant,
@@ -8,16 +9,18 @@ import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 import {
   isValidEmail,
   validateCredentialsFilePath,
-  ValidationError,
 } from "@/lib/validate";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { audit, boundedParams } from "@/lib/audit";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // Tenant config bodies are tiny — cap aggressively.
 const MAX_BODY_BYTES = 16 * 1024;
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     // One snapshot read: separate getters would read the store twice, and a
     // concurrent write between them could pair a fresh list with a stale
@@ -32,11 +35,13 @@ export async function GET() {
     // does res.json() unconditionally and would otherwise choke on the
     // framework's HTML error page.
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }
 
 export async function POST(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -47,6 +52,14 @@ export async function POST(req: NextRequest) {
 
     if (!name || typeof name !== "string" || !name.trim()) {
       return NextResponse.json({ error: "name is required" }, { status: 400 });
+    }
+    // The name is copied into every audit entry made for this tenant, and the
+    // config import already caps it at the same length.
+    if (name.trim().length > 100) {
+      return NextResponse.json(
+        { error: "name must be at most 100 characters" },
+        { status: 400 }
+      );
     }
     const credPath = validateCredentialsFilePath(credentialsFile);
     if (!isValidEmail(adminEmail)) {
@@ -112,7 +125,7 @@ export async function POST(req: NextRequest) {
       error: message,
       actor,
     });
-    const status = error instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(error);
     return NextResponse.json({ error: message }, { status });
   }
 }

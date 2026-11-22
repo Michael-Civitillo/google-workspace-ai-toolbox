@@ -7,12 +7,18 @@
  * host, loopback spellings, and an operator-allow-listed public origin as a
  * reverse proxy would present), the static assets Next expects you to copy
  * yourself, where state is written, what happens when the port is taken, the
- * warm restart, and the "already running" shortcut.
+ * warm restart, and the "already running" shortcut. Then the launcher's own
+ * guarantees: two launches at once on a fresh install, the check of the
+ * unpacked copy and what clean-up may delete, a stale lock pointing at
+ * another program, a server bound to every address, and what launcher.env
+ * may not set.
  *
  * Usage: node packaging/smoke.mjs [path-to-binary]
  */
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,17 +87,74 @@ async function waitForReady(child, timeoutMs) {
   throw new Error(`server was not ready within ${timeoutMs} ms`);
 }
 
-function launch(args) {
-  const child = spawn(binary, ["--no-browser", ...args], {
+/** Every launcher started, so that none outlives the run. */
+const started = [];
+
+/** Start the binary with exactly these arguments and extra environment. */
+function launchWith(args, env = {}) {
+  const child = spawn(binary, args, {
     stdio: ["ignore", "pipe", "pipe"],
     // The launcher passes its environment through to the embedded server;
     // this is how a tunnel or proxy deployment names its public URL.
-    env: { ...process.env, APP_ALLOWED_ORIGINS: PUBLIC_ORIGIN },
+    env: { ...process.env, APP_ALLOWED_ORIGINS: PUBLIC_ORIGIN, ...env },
   });
   let output = "";
   child.stdout.on("data", (b) => (output += b.toString()));
   child.stderr.on("data", (b) => (output += b.toString()));
-  return { child, output: () => output };
+  const handle = { child, output: () => output };
+  started.push(handle);
+  return handle;
+}
+
+function launch(args) {
+  return launchWith(["--no-browser", ...args]);
+}
+
+/** Resolves with the exit code, or "timeout". */
+function exitOf(handle, timeoutMs) {
+  if (handle.child.exitCode !== null) return Promise.resolve(handle.child.exitCode);
+  return Promise.race([
+    new Promise((resolve) => handle.child.once("exit", (code) => resolve(code))),
+    sleep(timeoutMs).then(() => "timeout"),
+  ]);
+}
+
+const lastLine = (handle) => handle.output().trim().split("\n").pop();
+
+async function statusOf(url) {
+  try {
+    return (await fetch(url, { redirect: "manual" })).status;
+  } catch {
+    return null;
+  }
+}
+
+/** Unpacked application folders: <version>-<12 hex>. */
+const VERSION_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?-[0-9a-f]{12}$/;
+
+/**
+ * macOS and Linux: a stand-in for the desktop's browser opener (`open`,
+ * `xdg-open`) that records what it was given instead of opening anything,
+ * and a default browser that is not a snap. Put first on PATH.
+ */
+function browserStub(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const record = path.join(dir, "opened.txt");
+  const opener =
+    "#!/bin/sh\n" +
+    `printf '%s\\n' "$1" >> "${record}"\n` +
+    `if [ -n "\${APP_PASSWORD+x}" ]; then echo "APP_PASSWORD present" >> "${record}"; fi\n`;
+  for (const name of ["open", "xdg-open"]) {
+    fs.writeFileSync(path.join(dir, name), opener);
+    fs.chmodSync(path.join(dir, name), 0o755);
+  }
+  fs.writeFileSync(path.join(dir, "xdg-settings"), "#!/bin/sh\necho firefox.desktop\n");
+  fs.chmodSync(path.join(dir, "xdg-settings"), 0o755);
+  return {
+    env: { PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}` },
+    opened: () =>
+      fs.existsSync(record) ? fs.readFileSync(record, "utf-8").split("\n").filter(Boolean) : [],
+  };
 }
 
 function start(root, extraArgs = []) {
@@ -318,6 +381,24 @@ async function main() {
       "the lock file records the running instance",
       fs.existsSync(path.join(root, "data", "launcher.lock"))
     );
+    let lockRecord = {};
+    try {
+      lockRecord = JSON.parse(fs.readFileSync(path.join(root, "data", "launcher.lock"), "utf-8"));
+    } catch {
+      // Reported by the next check.
+    }
+    check(
+      "the lock file carries the instance token",
+      /^[0-9a-f]{64}$/.test(lockRecord.token ?? "")
+    );
+    if (process.platform === "win32") {
+      skip("the lock file is private to its owner", "Windows protects it with the profile's permissions");
+    } else {
+      check(
+        "the lock file is private to its owner",
+        (fs.statSync(path.join(root, "data", "launcher.lock")).mode & 0o777) === 0o600
+      );
+    }
 
     // The first instance is still holding PORT, which makes it the "other
     // program" for two launches that keep their state somewhere else.
@@ -410,6 +491,191 @@ async function main() {
     }
     await stop(firstRun.child, 5000);
 
+    // A double-click, then another a moment later, on a machine that has never
+    // run it: the second used to delete the folder the first was starting from.
+    console.log("\nTwo launches a moment apart on a fresh install");
+    const fresh = path.join(root, "fresh");
+    const freshPort = PORT + 50;
+    const freshArgs = ["--root", fresh, "--port", String(freshPort), "--password", PASSWORD];
+    const one = launch(freshArgs);
+    await sleep(200);
+    const two = launch(freshArgs);
+    const oneUrl = await waitForReadyUrl(one, 120_000);
+    const twoExit = await exitOf(two, 120_000);
+    check("the first comes up", oneUrl !== null, lastLine(one));
+    check(
+      "the second waits for it, then hands over to it",
+      twoExit === 0 && /already running/i.test(two.output()),
+      `exit ${twoExit}: ${lastLine(two)}`
+    );
+    check(
+      "the first is still serving afterwards",
+      one.child.exitCode === null && (await statusOf(`http://127.0.0.1:${freshPort}/login`)) === 200
+    );
+    const freshEntries = fs.existsSync(path.join(fresh, "app")) ? fs.readdirSync(path.join(fresh, "app")) : [];
+    check(
+      "one unpacked copy, nothing left half-done",
+      freshEntries.length === 1 && VERSION_DIR.test(freshEntries[0]),
+      freshEntries.join(", ")
+    );
+    await stop(one.child, 5000);
+
+    // Every start checks the unpacked copy against the program (all files, by
+    // hash, outside the per-user folder - as here, with --root) and replaces
+    // one that does not match. Clean-up deletes only the launcher's own folders.
+    console.log("\nThe unpacked copy is checked before each start");
+    const freshApp = path.join(fresh, "app");
+    const appDir = path.join(freshApp, freshEntries[0] ?? "missing");
+    const serverJs = path.join(appDir, "server.js");
+    const genuine = fs.existsSync(serverJs) ? fs.readFileSync(serverJs) : Buffer.alloc(0);
+    if (fs.existsSync(serverJs)) fs.appendFileSync(serverJs, "\n// changed by the smoke test\n");
+    if (fs.existsSync(appDir)) fs.writeFileSync(path.join(appDir, "planted.js"), "// planted by the smoke test\n");
+    fs.mkdirSync(path.join(freshApp, "My Files"), { recursive: true });
+    fs.writeFileSync(path.join(freshApp, "My Files", "keep.txt"), "not the launcher's");
+    const olderCopy = path.join(freshApp, "0.0.1-aaaaaaaaaaaa");
+    fs.mkdirSync(olderCopy, { recursive: true });
+    fs.writeFileSync(path.join(olderCopy, ".complete"), "");
+    const checked = launch(freshArgs);
+    const checkedUrl = await waitForReadyUrl(checked, 120_000);
+    check(
+      "a changed copy is noticed and unpacked again",
+      checkedUrl !== null && /damaged or has been changed/.test(checked.output()),
+      lastLine(checked)
+    );
+    check(
+      "what was changed or planted is gone",
+      !fs.existsSync(path.join(appDir, "planted.js")) &&
+        fs.existsSync(serverJs) &&
+        fs.readFileSync(serverJs).equals(genuine)
+    );
+    for (let i = 0; i < 20 && fs.existsSync(olderCopy); i++) await sleep(250);
+    check("an older version of the launcher's own is cleaned up", !fs.existsSync(olderCopy));
+    check(
+      "a folder that is not the launcher's is left alone",
+      fs.existsSync(path.join(freshApp, "My Files", "keep.txt"))
+    );
+    await stop(checked.child, 5000);
+    const reset = launch([...freshArgs, "--reset-app-cache"]);
+    const resetUrl = await waitForReadyUrl(reset, 120_000);
+    check(
+      "--reset-app-cache unpacks again and leaves other folders alone",
+      resetUrl !== null &&
+        /Unpacked/.test(reset.output()) &&
+        fs.existsSync(path.join(freshApp, "My Files", "keep.txt")),
+      lastLine(reset)
+    );
+    await stop(reset.child, 5000);
+
+    // What closing the window leaves behind, a reused process id, and another
+    // program on the port: the launcher used to take that program for itself
+    // and send it the saved password.
+    console.log("\nA stale lock pointing at another program");
+    const foreignPort = PORT + 60;
+    const seen = [];
+    const foreign = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        seen.push({ method: req.method, url: req.url, body });
+        res.writeHead(req.url === "/login" ? 200 : 404, { "content-type": "text/html" });
+        res.end("<html>another program</html>");
+      });
+    });
+    await new Promise((resolve) => foreign.listen(foreignPort, "127.0.0.1", resolve));
+    try {
+      const staleData = path.join(root, "data-stale");
+      fs.mkdirSync(staleData, { recursive: true });
+      fs.writeFileSync(
+        path.join(staleData, "launcher.json"),
+        JSON.stringify({
+          version: 1,
+          port: foreignPort,
+          password: PASSWORD,
+          sessionSecret: "stale".repeat(13),
+          openBrowser: true,
+        })
+      );
+      fs.writeFileSync(
+        path.join(staleData, "launcher.lock"),
+        JSON.stringify({
+          pid: process.pid,
+          port: foreignPort,
+          host: "127.0.0.1",
+          startedAt: new Date().toISOString(),
+          token: crypto.randomBytes(32).toString("hex"),
+        })
+      );
+      // Windows has no stand-in for the opener, so there the browser stays shut.
+      const posix = process.platform !== "win32";
+      const stub = posix ? browserStub(path.join(root, "browser-stub")) : null;
+      const stale = launchWith(
+        ["--root", root, "--data-dir", staleData, ...(posix ? [] : ["--no-browser"])],
+        stub?.env ?? {}
+      );
+      const staleUrl = await waitForReadyUrl(stale, 60_000);
+      check(
+        "does not take the other program for itself",
+        staleUrl !== null &&
+          staleUrl !== `http://localhost:${foreignPort}` &&
+          !/already running/i.test(stale.output()),
+        lastLine(stale)
+      );
+      check(
+        "sends the other program nothing but probes",
+        seen.length > 0 && seen.every((r) => r.method === "GET" && !r.body.includes(PASSWORD)),
+        seen.map((r) => `${r.method} ${r.url}`).join(", ")
+      );
+      if (stub && staleUrl) {
+        for (let i = 0; i < 20 && stub.opened().length === 0; i++) await sleep(250);
+        const [page = "", ...rest] = stub.opened();
+        const pageText = fs.existsSync(page) ? fs.readFileSync(page, "utf-8") : "";
+        check(
+          "the ticket reaches the browser in a private page, not on a command line",
+          !page.includes("ticket=") &&
+            pageText.includes(`${staleUrl}/api/auth/launch?ticket=`) &&
+            (fs.statSync(page).mode & 0o777) === 0o600,
+          page
+        );
+        check("the browser does not inherit the password", !rest.includes("APP_PASSWORD present"));
+      } else {
+        skip("the ticket reaches the browser in a private page", "Windows passes the URL; see browser.ts");
+        skip("the browser does not inherit the password", "no stand-in for the Windows opener");
+      }
+      await stop(stale.child, 5000);
+    } finally {
+      await new Promise((resolve) => foreign.close(resolve));
+    }
+
+    // Windows refuses connections to 0.0.0.0, so a launcher that waited for
+    // the server at its bind address gave up after a minute and stopped it.
+    console.log("\nBound to every address");
+    const anyPort = PORT + 70;
+    const anyData = path.join(root, "data-anyhost");
+    fs.mkdirSync(anyData, { recursive: true });
+    fs.writeFileSync(
+      path.join(anyData, "launcher.env"),
+      "NODE_TLS_REJECT_UNAUTHORIZED=0\nNODE_OPTIONS=--require ./not-a-real-file.js\nGEMINI_MODEL=smoke\n"
+    );
+    const anyHost = launch([
+      "--root", root,
+      "--data-dir", anyData,
+      "--host", "0.0.0.0",
+      "--port", String(anyPort),
+      "--password", PASSWORD,
+    ]);
+    const anyUrl = await waitForReadyUrl(anyHost, 60_000);
+    check("starts, and is opened as localhost", anyUrl === `http://localhost:${anyPort}`, lastLine(anyHost));
+    check(
+      "answers on loopback",
+      (await statusOf(`http://127.0.0.1:${anyPort}/login`)) === 200
+    );
+    check(
+      "launcher.env may not turn off certificate checks or load code",
+      /Ignored in launcher\.env: NODE_TLS_REJECT_UNAUTHORIZED, NODE_OPTIONS\b/.test(anyHost.output()) &&
+        /Loaded from launcher\.env: GEMINI_MODEL/.test(anyHost.output())
+    );
+    await stop(anyHost.child, 5000);
+
     console.log("\nSecond instance");
     thirdHandle = start(root);
     const secondExit = await new Promise((resolve) => thirdHandle.child.once("exit", resolve));
@@ -453,6 +719,7 @@ async function main() {
     if (thirdHandle) await stop(thirdHandle.child, 5000);
     if (secondHandle) await stop(secondHandle.child, 5000);
     await stop(first.child, 5000);
+    for (const handle of started) await stop(handle.child, 5000);
     fs.rmSync(root, { recursive: true, force: true });
   }
 

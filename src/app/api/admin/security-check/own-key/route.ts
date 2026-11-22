@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { probeUnneededScopes } from "@/lib/preflight";
 import { audit } from "@/lib/audit";
@@ -19,6 +20,8 @@ import { actorFromRequest } from "@/lib/session";
  * runs it only when the operator asks.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   let tenant = null;
   try {

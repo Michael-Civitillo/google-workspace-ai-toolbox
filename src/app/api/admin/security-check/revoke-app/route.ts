@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { revokeAppForUser } from "@/lib/admin-sdk";
 import { REVOKE_APP_BATCH } from "@/lib/security-check";
@@ -27,6 +28,8 @@ import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 const MAX_BODY_BYTES = 64 * 1024;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -40,6 +43,11 @@ export async function POST(request: NextRequest) {
     tenant = tenantFromRequest(request, body);
     const clientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
     if (!clientId) throw new ValidationError("clientId is required");
+    // OAuth client ids are short ("1234…apps.googleusercontent.com"). Refusing
+    // anything longer keeps a junk value out of Google calls and the log.
+    if (clientId.length > 256 || /[\s\u0000-\u001f]/.test(clientId)) {
+      throw new ValidationError("clientId is not an OAuth client id");
+    }
     if (!Array.isArray(body.users) || body.users.length === 0) {
       throw new ValidationError("users must list at least one account");
     }
@@ -69,19 +77,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const results: Array<{ user: string; changed: boolean; error?: string }> = [];
-    for (const user of users) {
-      try {
-        const { changed } = await revokeAppForUser(tenant, user, clientId);
-        results.push({ user, changed });
-      } catch (e) {
-        results.push({
-          user,
-          changed: false,
-          error: (e instanceof Error ? e.message : String(e)).slice(0, 200),
-        });
+    // Five accounts at a time: each revoke is one independent, repeatable
+    // delete, and one after another made a 50-account batch take a minute.
+    // Results keep the request's order. Between accounts only, a caller that
+    // has gone away stops the rest.
+    const REVOKE_APP_CONCURRENCY = 5;
+    type Result = { user: string; changed: boolean; error?: string };
+    const slots: Array<Result | undefined> = new Array(users.length);
+    let cursor = 0;
+    let stopped = false;
+    const resolvedTenant = tenant;
+    const worker = async () => {
+      while (cursor < users.length) {
+        if (request.signal.aborted) {
+          stopped = true;
+          return;
+        }
+        const i = cursor++;
+        const user = users[i];
+        try {
+          const { changed } = await revokeAppForUser(resolvedTenant, user, clientId);
+          slots[i] = { user, changed };
+        } catch (e) {
+          slots[i] = {
+            user,
+            changed: false,
+            error: (e instanceof Error ? e.message : String(e)).slice(0, 200),
+          };
+        }
       }
-    }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(REVOKE_APP_CONCURRENCY, users.length) }, worker)
+    );
+    const results = slots.filter((r): r is Result => r !== undefined);
     const failed = results.filter((r) => r.error).length;
 
     audit({
@@ -93,9 +122,18 @@ export async function POST(request: NextRequest) {
         users,
         revoked: results.filter((r) => r.changed).length,
         failed,
+        ...(stopped ? { stopped: true, reached: results.length } : {}),
       },
-      outcome: failed === results.length ? "error" : "success",
-      error: failed > 0 ? `${failed} of ${results.length} accounts failed` : undefined,
+      outcome: failed === results.length || stopped ? "error" : "success",
+      error:
+        [
+          failed > 0 ? `${failed} of ${results.length} accounts failed` : "",
+          stopped
+            ? `Stopped before finishing: ${results.length} of ${users.length} accounts were reached`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("; ") || undefined,
       actor,
     });
     return NextResponse.json({ success: true, data: { results } });

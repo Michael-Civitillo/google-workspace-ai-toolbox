@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { resolveFilePaths, PATH_RESOLVE_FILE_CAP } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -20,6 +21,8 @@ import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 const MAX_BODY_BYTES = 1 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -56,7 +59,9 @@ export async function POST(request: NextRequest) {
       fileIds.push(trimmed);
     }
 
-    const paths = await resolveFilePaths(tenant, user, fileIds);
+    const paths = await resolveFilePaths(tenant, user, fileIds, {
+      signal: request.signal,
+    });
     return NextResponse.json({ success: true, data: { paths } });
   } catch (e) {
     return errorResponse(e, "Path resolve failed");

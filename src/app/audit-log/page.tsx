@@ -31,22 +31,46 @@ interface AuditLogEntry {
   tenantName?: string | null;
   outcome?: string;
   error?: string;
+  actor?: string;
   params?: unknown;
   [key: string]: unknown;
 }
 
 interface AuditLogResponse {
   entries: AuditLogEntry[];
-  nextCursor: number | null;
+  nextCursor: string | null;
   scannedBytes: number;
   skippedLines: number;
   done: boolean;
+  /** Done because the walk reached entries older than the From date. */
+  reachedFromBound?: boolean;
+  /** Timestamp of the furthest-back entry read, matched or not. */
+  oldestScannedTs?: string | null;
+  /** The log rotated away under the cursor: this page starts from the top. */
+  restarted?: boolean;
 }
 
 // A filtered 512 KiB window can legitimately match nothing, so one click
-// chains a bounded number of windows before handing control back.
-const MAX_REQUESTS_PER_CLICK = 10;
+// chains windows until it has a screenful, reaches the end, or has spent its
+// time budget, then hands control back with a way to keep going.
+const MAX_REQUESTS_PER_CLICK = 40;
+const CLICK_TIME_BUDGET_MS = 3_000;
 const TARGET_ENTRIES_PER_CLICK = 200;
+
+/** Why the last search stopped before reaching the end of the log. */
+type StopReason = "budget" | "cancelled" | "failed";
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatWhen(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleString();
+}
 
 function csvCell(c: string): string {
   let v = c;
@@ -60,6 +84,7 @@ function toCsv(entries: AuditLogEntry[]): string {
   const header = [
     "ts",
     "action",
+    "actor",
     "tenantId",
     "tenantName",
     "outcome",
@@ -70,6 +95,7 @@ function toCsv(entries: AuditLogEntry[]): string {
     [
       e.ts ?? "",
       e.action ?? "",
+      typeof e.actor === "string" ? e.actor : "",
       e.tenantId ?? "",
       e.tenantName ?? "",
       e.outcome ?? "",
@@ -91,7 +117,9 @@ function downloadCsv(filename: string, content: string) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Released later, not straight after click(): some browsers start reading
+  // the blob only after the click handler returns.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export default function AuditLog() {
@@ -104,25 +132,44 @@ export default function AuditLog() {
   const [toDate, setToDate] = useState("");
 
   const [entries, setEntries] = useState<AuditLogEntry[]>([]);
-  const [cursor, setCursor] = useState<number | null>(null);
+  const [cursor, setCursor] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [reachedFromBound, setReachedFromBound] = useState(false);
   const [searched, setSearched] = useState(false);
   const [skippedLines, setSkippedLines] = useState(0);
+  // How much of the log the current search has read, and how far back in
+  // time that got: what an empty or partial result is honestly about.
+  const [scannedBytes, setScannedBytes] = useState(0);
+  const [oldestTs, setOldestTs] = useState<string | null>(null);
+  const [pagesRead, setPagesRead] = useState(0);
+  const [stopReason, setStopReason] = useState<StopReason | null>(null);
+  const [restartedNote, setRestartedNote] = useState(false);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
+  // The query (filters, no cursor) the listed entries were fetched with.
+  // "Load older entries" continues THAT search: building it from the filter
+  // boxes again would pair the cursor with filters edited since, and append
+  // entries that answer a different question to the list.
+  const [listedQuery, setListedQuery] = useState<string | null>(null);
 
   const cancelRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
+  // Bumped by every new search, a tenant switch and unmount: a walk only
+  // writes to the page while it is still the latest one.
+  const searchSeq = useRef(0);
 
   // Stop an in-flight walk and drop results when the page unmounts.
   useEffect(() => {
+    // The counter object, not its value: unmount must bump the live count.
+    const seq = searchSeq;
     return () => {
+      seq.current++;
       cancelRef.current = true;
       abortRef.current?.abort();
     };
@@ -130,19 +177,28 @@ export default function AuditLog() {
 
   // Results filtered under one tenant scope must not survive a switch.
   useEffect(() => {
+    searchSeq.current++;
     cancelRef.current = true;
     abortRef.current?.abort();
+    setLoading(false);
     setEntries([]);
     setCursor(null);
     setDone(false);
+    setReachedFromBound(false);
     setSearched(false);
     setSkippedLines(0);
+    setScannedBytes(0);
+    setOldestTs(null);
+    setPagesRead(0);
+    setStopReason(null);
+    setRestartedNote(false);
+    setListedQuery(null);
     setExpanded(new Set());
   }, [tenantId]);
 
-  const buildQuery = (cursorArg: number | null): string => {
+  /** The filters in the boxes now, as a query string without a cursor. */
+  const buildQuery = (): string => {
     const params = new URLSearchParams();
-    if (cursorArg !== null) params.set("cursor", String(cursorArg));
     params.set("limit", "200");
     if (actionFilter.trim()) params.set("action", actionFilter.trim());
     if (outcomeFilter !== "any") params.set("outcome", outcomeFilter);
@@ -169,64 +225,113 @@ export default function AuditLog() {
   };
 
   const fetchEntries = async (reset: boolean) => {
+    const query = reset ? buildQuery() : listedQuery;
+    if (query === null) return;
+    const seq = ++searchSeq.current;
+    const pinnedTenantId = tenantId;
+    const isLatest = () =>
+      searchSeq.current === seq && tenantIdRef.current === pinnedTenantId;
     setLoading(true);
     setMessage(null);
+    setStopReason(null);
     cancelRef.current = false;
+    abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
-    const pinnedTenantId = tenantId;
+    const startedAt = Date.now();
 
     let localCursor = reset ? null : cursor;
     let collected = 0;
+    let reachedEnd = false;
+    let stopped: StopReason = "budget";
+
+    if (reset) {
+      setListedQuery(query);
+      setEntries([]);
+      setExpanded(new Set());
+      setSkippedLines(0);
+      setScannedBytes(0);
+      setOldestTs(null);
+      setPagesRead(0);
+      setDone(false);
+      setReachedFromBound(false);
+      setRestartedNote(false);
+      setCursor(null);
+      setSearched(true);
+    }
 
     try {
-      if (reset) {
-        setEntries([]);
-        setExpanded(new Set());
-        setSkippedLines(0);
-        setDone(false);
-        setSearched(true);
-      }
       for (let i = 0; i < MAX_REQUESTS_PER_CLICK; i++) {
-        if (cancelRef.current) break;
+        if (cancelRef.current) {
+          stopped = "cancelled";
+          break;
+        }
+        if (i > 0 && Date.now() - startedAt > CLICK_TIME_BUDGET_MS) break;
+        const params = new URLSearchParams(query);
+        if (localCursor !== null) params.set("cursor", localCursor);
         const res = await tfetch(
-          `/api/admin/audit-log?${buildQuery(localCursor)}`,
+          `/api/admin/audit-log?${params.toString()}`,
           { signal: ac.signal },
           pinnedTenantId
         );
         const result = await res.json();
-        if (tenantIdRef.current !== pinnedTenantId) return;
+        if (!isLatest()) return;
 
         if (!result.success) {
+          stopped = "failed";
           setMessage({
             type: "error",
             text: result.error || "Failed to read the audit log",
           });
-          return;
+          break;
         }
         const page = result.data as AuditLogResponse;
-        if (page.entries.length > 0) {
-          setEntries((prev) => [...prev, ...page.entries]);
-          collected += page.entries.length;
-        }
-        if (page.skippedLines > 0) {
-          setSkippedLines((prev) => prev + page.skippedLines);
+        if (page.restarted) {
+          // The file this search was reading rotated away. The page holds
+          // the newest entries again, so replace the list rather than
+          // appending what would be duplicates.
+          setEntries(page.entries);
+          setExpanded(new Set());
+          setSkippedLines(page.skippedLines);
+          setScannedBytes(page.scannedBytes);
+          setOldestTs(page.oldestScannedTs ?? null);
+          setPagesRead(1);
+          setRestartedNote(true);
+          collected = page.entries.length;
+        } else {
+          if (page.entries.length > 0) {
+            setEntries((prev) => [...prev, ...page.entries]);
+            collected += page.entries.length;
+          }
+          if (page.skippedLines > 0) {
+            setSkippedLines((prev) => prev + page.skippedLines);
+          }
+          setScannedBytes((prev) => prev + page.scannedBytes);
+          if (page.oldestScannedTs) setOldestTs(page.oldestScannedTs);
+          setPagesRead((prev) => prev + 1);
         }
         setCursor(page.nextCursor);
         localCursor = page.nextCursor;
         if (page.done) {
+          reachedEnd = true;
           setDone(true);
+          setReachedFromBound(!!page.reachedFromBound);
           break;
         }
         if (collected >= TARGET_ENTRIES_PER_CLICK) break;
       }
     } catch {
-      if (!ac.signal.aborted) {
+      if (!isLatest()) return;
+      if (ac.signal.aborted) {
+        stopped = "cancelled";
+      } else {
+        stopped = "failed";
         setMessage({ type: "error", text: "Failed to connect to the API" });
       }
-    } finally {
-      setLoading(false);
     }
+    if (!isLatest()) return;
+    setStopReason(reachedEnd ? null : stopped);
+    setLoading(false);
   };
 
   const cancelFetch = () => {
@@ -244,17 +349,63 @@ export default function AuditLog() {
   };
 
   const exportCsv = () => {
+    // Only what has been loaded so far: say so in the file name, so a copy
+    // of part of the log is never mistaken for the whole of it.
     downloadCsv(
-      `audit-log-${new Date().toISOString().slice(0, 10)}.csv`,
+      `audit-log-${new Date().toISOString().slice(0, 10)}${done ? "" : "-PARTIAL"}.csv`,
       toCsv(entries)
     );
   };
+
+  const oldestLabel = formatWhen(oldestTs);
+  const howFar = `${formatBytes(scannedBytes)} of the log${
+    oldestLabel ? `, back to ${oldestLabel}` : ""
+  }`;
+  const stoppedNote =
+    stopReason === "cancelled"
+      ? "Search cancelled. "
+      : stopReason === "failed"
+        ? "Search stopped on an error. "
+        : "";
+
+  let entriesSummary: string;
+  if (loading && entries.length === 0) {
+    entriesSummary = pagesRead > 0 ? `Searching… read ${howFar}` : "Searching…";
+  } else if (entries.length > 0) {
+    const loaded = `${entries.length.toLocaleString()} entr${entries.length === 1 ? "y" : "ies"} loaded`;
+    const extent = done
+      ? reachedFromBound
+        ? " — searched back to the From date"
+        : " — reached the oldest entry the log keeps"
+      : ` — searched ${howFar} so far`;
+    const stopped =
+      done || loading
+        ? ""
+        : stopReason === "cancelled"
+          ? " (cancelled)"
+          : stopReason === "failed"
+            ? " (stopped on an error)"
+            : "";
+    const skipped =
+      skippedLines > 0
+        ? ` · ${skippedLines} unreadable line${skippedLines === 1 ? "" : "s"} skipped`
+        : "";
+    entriesSummary = `${loaded}${extent}${stopped}${skipped}`;
+  } else if (searched && done) {
+    entriesSummary = "No entries matched the filters";
+  } else if (searched && pagesRead > 0) {
+    entriesSummary = `${stoppedNote}No matches in the newest ${howFar}. Load older entries to keep searching.`;
+  } else if (searched) {
+    entriesSummary = `${stoppedNote}Nothing has been read yet — try again.`;
+  } else {
+    entriesSummary = "Run a search to load audit entries";
+  }
 
   return (
     <>
       <PageHeader
         title="Audit Log"
-        description="Every mutating action this tool has run, newest first. Secrets are redacted before entries are written."
+        description="Every change this tool has made, newest first, from the live log and its rotated archives. Secrets are redacted before entries are written."
         badge="Local"
       />
 
@@ -359,7 +510,9 @@ export default function AuditLog() {
               disabled={entries.length === 0}
             >
               <Download className="h-4 w-4" />
-              Export CSV
+              {done || entries.length === 0
+                ? "Export CSV"
+                : "Export CSV (loaded so far)"}
             </Button>
           </div>
         </CardContent>
@@ -368,15 +521,15 @@ export default function AuditLog() {
       <Card>
         <CardHeader>
           <CardTitle>Entries</CardTitle>
-          <CardDescription>
-            {entries.length > 0
-              ? `${entries.length.toLocaleString()} entr${entries.length === 1 ? "y" : "ies"} loaded${done ? " — end of log reached" : ""}${skippedLines > 0 ? ` · ${skippedLines} unreadable line${skippedLines === 1 ? "" : "s"} skipped` : ""}`
-              : searched && !loading
-                ? "No entries matched the filters"
-                : "Run a search to load audit entries"}
-          </CardDescription>
+          <CardDescription>{entriesSummary}</CardDescription>
         </CardHeader>
         <CardContent>
+          {restartedNote && (
+            <p className="mb-3 text-xs text-muted-foreground">
+              The log rotated while this search was reading it, so the list
+              started again from the newest entry.
+            </p>
+          )}
           {entries.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground text-sm">
               No entries to display
@@ -434,17 +587,15 @@ export default function AuditLog() {
             </div>
           )}
 
-          {entries.length > 0 && !done && (
+          {searched && !done && listedQuery !== null && (
             <div className="mt-4 flex justify-center">
               <Button
                 variant="outline"
                 onClick={() => fetchEntries(false)}
                 disabled={loading}
               >
-                {loading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : null}
-                Load older entries
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {pagesRead > 0 ? "Load older entries" : "Try again"}
               </Button>
             </div>
           )}

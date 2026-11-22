@@ -13,18 +13,21 @@ import { usePathname, useRouter } from "next/navigation";
  * wizard has been completed or skipped — both record completion server-side.
  */
 const SESSION_FLAG = "gws_onboarding_prompted";
+// Also remembered in memory, for a browser that blocks storage: without it,
+// "Back" out of the wizard landed on the dashboard and was sent straight back.
+let promptedInThisPage = false;
 
 export function OnboardingRedirect() {
   const pathname = usePathname();
   const router = useRouter();
 
   useEffect(() => {
-    if (pathname !== "/") return;
+    if (pathname !== "/" || promptedInThisPage) return;
     try {
       if (sessionStorage.getItem(SESSION_FLAG)) return;
     } catch {
       // Storage unavailable (rare, e.g. blocked cookies) — still offer the
-      // wizard; worst case the redirect repeats in this tab.
+      // wizard once; the in-memory flag stops it repeating.
     }
     let cancelled = false;
     fetch("/api/config")
@@ -36,6 +39,7 @@ export function OnboardingRedirect() {
           data.tenantCount === 0 &&
           !data.sso;
         if (freshInstall) {
+          promptedInThisPage = true;
           try {
             sessionStorage.setItem(SESSION_FLAG, "1");
           } catch {}

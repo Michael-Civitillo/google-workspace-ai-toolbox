@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { resolveImportLabels, type GmailLabelInfo } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // Label lists are small, but a mailbox near Gmail's ~10k-label ceiling with
 // long names can still approach a few MB of JSON — give it headroom.
@@ -23,6 +25,8 @@ const MAX_LABELS = 10_000;
  * batches so label resolution stays out of the per-message insert loop.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Resolved before the try so the error path can attribute the failure too.
   const actor = await actorFromRequest(request);
 
@@ -41,6 +45,15 @@ export async function POST(request: NextRequest) {
     // non-JSON 500.
     tenant = tenantFromRequest(request, body);
     const user = requireEmail(body.user, "user");
+    // Creating labels changes the mailbox, so the page's typed confirmation is
+    // checked here as well: this route accepts anything holding a session.
+    const confirmed =
+      typeof body.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+    if (confirmed !== user) {
+      throw new ValidationError(
+        "Type the mailbox's address into the confirm field to create its labels."
+      );
+    }
 
     if (!Array.isArray(body.labels)) {
       throw new ValidationError("labels must be an array");
@@ -57,30 +70,51 @@ export async function POST(request: NextRequest) {
       };
     });
 
-    const map = await resolveImportLabels(tenant, user, labels);
+    const { map, unmapped, unmappedCount } = await resolveImportLabels(
+      tenant,
+      user,
+      labels,
+      { signal: request.signal }
+    );
 
     audit({
       action: "mailbox_import.labels",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: { user, sourceLabels: labels.length, mapped: Object.keys(map).length },
-      outcome: "success",
+      params: {
+        user,
+        sourceLabels: labels.length,
+        mapped: Object.keys(map).length,
+        ...(unmappedCount > 0
+          ? { unmappedCount, unmapped: unmapped.slice(0, 20).map((u) => ({ name: u.name, reason: u.reason })) }
+          : {}),
+      },
+      outcome: unmappedCount > 0 ? "error" : "success",
+      error:
+        unmappedCount > 0
+          ? `${unmappedCount} label${unmappedCount === 1 ? "" : "s"} could not be created; messages carrying them import without them`
+          : undefined,
       actor,
     });
 
-    return NextResponse.json({ success: true, data: { map } });
+    // `unmapped` is for the page to show before the import starts: the
+    // messages that carry these labels will arrive without them.
+    return NextResponse.json({
+      success: true,
+      data: { map, unmapped, unmappedCount },
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Label resolution failed";
     audit({
       action: "mailbox_import.labels",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: { user: typeof body.user === "string" ? body.user : null },
+      params: { user: typeof body.user === "string" ? body.user.slice(0, 320) : null },
       outcome: "error",
       error: message,
       actor,
     });
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

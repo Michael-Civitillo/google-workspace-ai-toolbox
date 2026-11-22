@@ -186,6 +186,22 @@ describe("checkDomainEmailAuth", () => {
     assert.ok(asked.includes("_dmarc.mail.example.com"), "its own record is tried first");
   });
 
+  it("inherits only from the organizational domain, never from a public suffix", async () => {
+    const { lookup, asked } = dns({
+      "_dmarc.gov.uk": ["v=DMARC1; p=reject"],
+      "_dmarc.b.example.com": ["v=DMARC1; p=none"],
+      "_dmarc.example.com": ["v=DMARC1; p=quarantine"],
+    });
+    const council = await checkDomainEmailAuth({ domainName: "council.gov.uk", isPrimary: true }, lookup);
+    assert.notEqual(council.dmarc.verdict, "ok", "gov.uk's own record covers nobody else");
+    assert.ok(!asked.includes("_dmarc.gov.uk"));
+    const deep = await checkDomainEmailAuth({ domainName: "a.b.example.com", isPrimary: false }, lookup);
+    assert.match(deep.dmarc.summary, /inherited from example\.com/);
+    assert.ok(!asked.includes("_dmarc.b.example.com"), "not an intermediate parent");
+    const ukSub = await checkDomainEmailAuth({ domainName: "mail.shop.co.uk", isPrimary: false }, dns({ "_dmarc.shop.co.uk": ["v=DMARC1; p=reject"] }).lookup);
+    assert.match(ukSub.dmarc.summary, /inherited from shop\.co\.uk/);
+  });
+
   it("reports a failed lookup as unknown, never as a missing record", async () => {
     const { lookup } = dns({
       "example.com": new Error("the DNS server did not answer in time"),

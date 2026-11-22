@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getAppConfig } from "@/lib/app-config";
 import { getTenantStoreSnapshot } from "@/lib/tenants-server";
 import { readSsoConfig } from "@/lib/sso-server";
@@ -13,6 +14,7 @@ import {
   type ConfigBundle,
 } from "@/lib/app-config-types";
 import type { Tenant } from "@/lib/tenant-types";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Download the app configuration as a portable JSON bundle: single sign-on
@@ -100,11 +102,13 @@ async function respondWithBundle(req: NextRequest, includeSecrets: boolean) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }
 
 export async function GET(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   if (req.nextUrl.searchParams.get("secrets") === "1") {
     return NextResponse.json(
       {
@@ -117,6 +121,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });

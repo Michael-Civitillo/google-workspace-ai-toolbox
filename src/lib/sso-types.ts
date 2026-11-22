@@ -227,3 +227,27 @@ export const SSO_ERROR_MESSAGES: Record<string, string> = {
     "This account isn't allowed to use Open Admin. Ask an administrator to add your email or domain.",
   server_error: "Something went wrong on the server while signing you in.",
 };
+
+/**
+ * Which provider an issuer really is, judged from its host and never from the
+ * provider chosen in the wizard's menu. Rules that depend on a provider's
+ * behaviour (Google's hosted-domain claim, Entra's administrator-controlled
+ * user principal name) follow this, so a mislabelled configuration can't
+ * borrow another provider's leniency.
+ */
+export type IssuerFamily = "google" | "entra" | "other";
+
+export function issuerFamily(issuer: string): IssuerFamily {
+  let host: string;
+  try {
+    host = new URL(issuer).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return "other";
+  }
+  if (host === "accounts.google.com") return "google";
+  if (host === "login.microsoftonline.com" || host === "sts.windows.net") return "entra";
+  return "other";
+}
+
+/** What the page asks people to type, and the server checks, before password sign-in goes off. */
+export const SSO_ONLY_CONFIRM_PHRASE = "ENABLE SSO";

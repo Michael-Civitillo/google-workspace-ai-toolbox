@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
+import { writeFileAtomicSync } from "./fsutil.ts";
 
 /**
  * The launcher's own settings: the admin password for the web UI, the session
@@ -25,6 +25,16 @@ export interface LauncherConfig {
   openBrowser: boolean;
 }
 
+/**
+ * What launcher.json holds. The password is absent when the only one known
+ * came from the environment for a single run, which is not saved.
+ */
+export type StoredConfig = Omit<LauncherConfig, "password"> & { password?: string };
+
+export function isValidPort(port: unknown): port is number {
+  return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 export function readConfigFile(file: string): Partial<LauncherConfig> {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
@@ -34,7 +44,10 @@ export function readConfigFile(file: string): Partial<LauncherConfig> {
     if (typeof raw.version === "number" && Number.isInteger(raw.version)) {
       out.version = raw.version;
     }
-    if (typeof raw.port === "number" && Number.isInteger(raw.port)) out.port = raw.port;
+    // A port nothing can listen on (0, 70000, -1) would stop every start, or
+    // in the case of 0 have Next pick its own while the launcher waits on
+    // another: dropped like any other bad field, so the default applies.
+    if (isValidPort(raw.port)) out.port = raw.port;
     if (typeof raw.password === "string" && raw.password) out.password = raw.password;
     if (typeof raw.sessionSecret === "string" && raw.sessionSecret) {
       out.sessionSecret = raw.sessionSecret;
@@ -47,20 +60,16 @@ export function readConfigFile(file: string): Partial<LauncherConfig> {
   }
 }
 
-/** Atomic write, same tmp-then-rename discipline as the app's own JSON stores. */
-export function writeConfigFile(file: string, config: LauncherConfig): void {
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
-  fs.renameSync(tmp, file);
-  try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // Windows ignores POSIX modes; the folder ACL is what protects it there.
-  }
+/**
+ * Save launcher.json the way the app saves its own stores
+ * (src/lib/json-store.ts): an unpredictable temporary name created
+ * exclusively, owner-only from the start, fully written and flushed, renamed
+ * into place with retries for Windows, and removed if anything fails, since it
+ * holds the password. Returns false when the file could not be made private
+ * because the drive has no POSIX permissions (see writeFileAtomicSync).
+ */
+export function writeConfigFile(file: string, config: StoredConfig): boolean {
+  return writeFileAtomicSync(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
 /**
@@ -89,25 +98,72 @@ export function parseEnvFile(text: string): Record<string, string> {
 }
 
 /**
+ * Settings launcher.env may not make. The file sits in the data folder, which
+ * in portable mode is beside the executable and can be somewhere other people
+ * write to; a line there must not be able to turn off certificate checking or
+ * choose code for this program, the server, or the programs it starts to load
+ * or run. Anyone who really needs one of these sets it in the environment
+ * instead, where it applies only to what they start. Proxy settings
+ * (HTTPS_PROXY, NO_PROXY, ...) remain allowed.
+ */
+const REFUSED_ENV_NAMES: ReadonlySet<string> = new Set([
+  // Turn off, or widen, certificate checks.
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  // Load code into Node, or into programs started with this environment.
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "NODE_COMPILE_CACHE",
+  "OPENSSL_CONF",
+  "OPENSSL_MODULES",
+  "OPENSSL_ENGINES",
+  // Choose which program runs.
+  "PATH",
+  "PATHEXT",
+  "COMSPEC",
+  "GWS_BIN",
+]);
+const REFUSED_ENV_PREFIXES = ["LD_", "DYLD_"];
+
+/** True for a name launcher.env may not set (case-insensitive, as on Windows). */
+export function isRefusedEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return REFUSED_ENV_NAMES.has(upper) || REFUSED_ENV_PREFIXES.some((p) => upper.startsWith(p));
+}
+
+export interface EnvFileResult {
+  /** Names set from the file. */
+  applied: string[];
+  /** Names in the file that were ignored because the file may not set them. */
+  refused: string[];
+}
+
+/**
  * Apply a launcher.env file to the process environment. Real environment
  * variables win: the file is a convenience for people who would rather not
  * touch Windows' system settings, not an override of what they typed.
  */
-export function applyEnvFile(file: string): string[] {
+export function applyEnvFile(file: string, env: NodeJS.ProcessEnv = process.env): EnvFileResult {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf-8");
   } catch {
-    return [];
+    return { applied: [], refused: [] };
   }
   const applied: string[] = [];
+  const refused: string[] = [];
   for (const [key, value] of Object.entries(parseEnvFile(text))) {
-    if (process.env[key] === undefined) {
-      process.env[key] = value;
+    if (isRefusedEnvName(key)) {
+      refused.push(key);
+    } else if (env[key] === undefined) {
+      env[key] = value;
       applied.push(key);
     }
   }
-  return applied;
+  return { applied, refused };
 }
 
 export function generateSessionSecret(): string {

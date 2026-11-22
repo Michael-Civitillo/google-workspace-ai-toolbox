@@ -25,6 +25,7 @@ import {
   type SsoConfigResponse,
 } from "@/lib/sso-client";
 import {
+  SSO_ONLY_CONFIRM_PHRASE,
   SSO_PROVIDER_PRESETS,
   type PublicSsoConfig,
   type SsoTestResult,
@@ -82,11 +83,13 @@ export default function SsoPage() {
     setData((d) => (d ? { ...d, config: cfg } : { config: cfg, envDisabled: false, configPath: "" }));
   }
 
-  async function setEnabled(enabled: boolean) {
+  async function setEnabled(enabled: boolean, confirmPhrase?: string) {
     setBusy(enabled ? "enable" : "disable");
     setError(null);
     try {
-      applySaved(await saveSsoConfig({ enabled }));
+      applySaved(
+        await saveSsoConfig(confirmPhrase ? { enabled, confirm: confirmPhrase } : { enabled })
+      );
       setConfirm(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update");
@@ -418,7 +421,7 @@ export default function SsoPage() {
         summary="This configuration turns the password form off: from now on only accounts your identity provider vouches for (and the allowlist accepts) can sign in."
         tenant={null}
         severity="high"
-        confirmPhrase="ENABLE SSO"
+        confirmPhrase={SSO_ONLY_CONFIRM_PHRASE}
         confirmLabel="Enable single sign-on"
         busy={busy === "enable"}
         changes={[
@@ -432,7 +435,7 @@ export default function SsoPage() {
           },
           { label: "Recovery", after: "APP_SSO_DISABLED=true on the server" },
         ]}
-        onConfirm={() => void setEnabled(true)}
+        onConfirm={() => void setEnabled(true, SSO_ONLY_CONFIRM_PHRASE)}
       />
 
       <ConfirmActionDialog

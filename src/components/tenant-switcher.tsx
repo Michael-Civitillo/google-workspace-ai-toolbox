@@ -1,86 +1,52 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, ChevronsUpDown, Building2, PlusCircle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { TENANT_COLOR_CLASSES, type Tenant, type TenantColor } from "@/lib/tenants";
+import { tenantColorClasses } from "@/lib/tenants";
 import {
+  loadTenantList,
   setCurrentTenantState,
-  subscribeTenantId,
   subscribeTenantsChanged,
+  useCurrentTenant,
+  useTenantList,
 } from "@/lib/tenant-client";
-
-interface TenantSwitcherState {
-  tenants: Tenant[];
-  activeTenantId: string | null;
-}
 
 export function TenantSwitcher() {
   const router = useRouter();
-  const [state, setState] = useState<TenantSwitcherState>({
-    tenants: [],
-    activeTenantId: null,
-  });
+  // One list for the whole page, shared with the bootstrap: fetched once,
+  // and never allowed to undo a switch made while it was on its way.
+  const { tenants, status } = useTenantList();
+  const { id: activeTenantId } = useCurrentTenant();
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    fetch("/api/tenants")
-      .then(async (r) => {
-        // An error response has no tenant list — treating its body as one
-        // would blank the switcher AND null the global tenant pin, silently
-        // retargeting every later request at the server-side default.
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data) => {
-        const tenants: Tenant[] = data.tenants ?? [];
-        const activeId: string | null = data.activeTenantId ?? null;
-        setState({ tenants, activeTenantId: activeId });
-        setCurrentTenantState(
-          activeId,
-          activeId ? tenants.find((t) => t.id === activeId) ?? null : null
-        );
-      })
-      .catch(() => {
-        // Keep the current list/pin — stale beats wrong-tenant.
-      });
-  }, []);
+  // The sidebar appears once signed in; if the list hasn't loaded by then
+  // (the first try was on the sign-in page), ask now.
+  useEffect(() => {
+    if (status === "loading") void loadTenantList();
+  }, [status]);
 
   useEffect(() => {
-    load();
-    // Stay in sync if another component updates the current tenant id.
-    const unsubId = subscribeTenantId((id) => {
-      setState((prev) => (prev.activeTenantId === id ? prev : { ...prev, activeTenantId: id }));
-    });
     // Re-fetch the whole list when tenants are added/deleted/renamed elsewhere.
     // This component lives in the persistent layout and never remounts on
     // client navigation, so without this it would show a stale list.
-    const unsubList = subscribeTenantsChanged(load);
-    return () => {
-      unsubId();
-      unsubList();
-    };
-  }, [load]);
+    return subscribeTenantsChanged(() => void loadTenantList());
+  }, []);
 
-  const activeTenant =
-    state.tenants.find((t) => t.id === state.activeTenantId) ?? null;
+  const activeTenant = tenants.find((t) => t.id === activeTenantId) ?? null;
 
   async function switchTenant(id: string) {
-    if (id === state.activeTenantId || switching) return;
+    if (id === activeTenantId || switching) return;
     setSwitching(true);
     setSwitchError(null);
     setOpen(false);
     try {
       const res = await fetch(`/api/tenants/${id}/activate`, { method: "POST" });
       if (res.ok) {
-        setState((prev) => ({ ...prev, activeTenantId: id }));
-        setCurrentTenantState(
-          id,
-          state.tenants.find((t) => t.id === id) ?? null
-        );
+        setCurrentTenantState(id, tenants.find((t) => t.id === id) ?? null);
         router.refresh();
       } else {
         // A silent failure is dangerous here: the dropdown already closed, so
@@ -88,7 +54,7 @@ export function TenantSwitcher() {
         // the next action against the OLD tenant. A 404 also means our list is
         // stale (tenant deleted elsewhere) — reload it.
         setSwitchError("Switch failed — still on the previous tenant");
-        load();
+        void loadTenantList();
       }
     } catch {
       // Without this catch a network failure became an unhandled rejection —
@@ -112,11 +78,30 @@ export function TenantSwitcher() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
 
-  const colorClasses = activeTenant
-    ? TENANT_COLOR_CLASSES[activeTenant.color as TenantColor]
-    : TENANT_COLOR_CLASSES.slate;
+  const colorClasses = tenantColorClasses(activeTenant?.color);
 
-  if (state.tenants.length === 0) {
+  // Until the list has loaded, say so: "Add a tenant" while a real tenant is
+  // in use would be wrong, and so would a blank.
+  if (tenants.length === 0 && status !== "loaded") {
+    return (
+      <button
+        onClick={() => void loadTenantList()}
+        disabled={status === "loading"}
+        className="flex w-full items-center gap-2.5 rounded-lg border border-sidebar-border px-3 py-2 text-left text-xs text-muted-foreground disabled:opacity-70"
+      >
+        {status === "loading" ? (
+          <Loader2 className="size-3.5 shrink-0 animate-spin" />
+        ) : (
+          <Building2 className="size-3.5 shrink-0" />
+        )}
+        <span className="flex-1 truncate">
+          {status === "loading" ? "Loading tenants…" : "Tenants could not be loaded — retry"}
+        </span>
+      </button>
+    );
+  }
+
+  if (tenants.length === 0) {
     return (
       <button
         onClick={() => router.push("/tenants")}
@@ -176,9 +161,9 @@ export function TenantSwitcher() {
           className="absolute top-full right-0 left-0 z-50 mt-1.5 overflow-hidden rounded-lg border border-border bg-popover shadow-lg shadow-black/10 dark:shadow-black/40"
         >
           <div className="space-y-0.5 p-1">
-            {state.tenants.map((tenant) => {
-              const tc = TENANT_COLOR_CLASSES[tenant.color as TenantColor];
-              const isActive = tenant.id === state.activeTenantId;
+            {tenants.map((tenant) => {
+              const tc = tenantColorClasses(tenant.color);
+              const isActive = tenant.id === activeTenantId;
               return (
                 <button
                   key={tenant.id}

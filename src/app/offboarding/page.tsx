@@ -25,7 +25,11 @@ import {
   Circle,
   AlertTriangle,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import {
+  tfetch,
+  useCurrentTenant,
+  tenantPinProblem,
+} from "@/lib/tenant-client";
 import {
   ConfirmActionDialog,
   type DiffRow,
@@ -162,6 +166,9 @@ const RUN_ORDER: StepId[] = STEPS
   .sort((a, b) => a.order - b.order)
   .map((s) => s.id);
 
+type StepResults = Record<StepId, { status: StepStatus; message?: string }>;
+
+
 export default function Offboarding() {
   const { tenant, id: tenantId } = useCurrentTenant();
   const [email, setEmail] = useState("");
@@ -179,10 +186,27 @@ export default function Offboarding() {
     "I'm no longer with the company. Please reach out to my team for any open items."
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<Record<StepId, { status: StepStatus; message?: string }>>(
-    {} as Record<StepId, { status: StepStatus; message?: string }>
-  );
+  // Mirrors `running` for the tenant effect: a run in flight keeps its panel.
+  const runningRef = useRef(false);
+  const [results, setResults] = useState<StepResults>({} as StepResults);
+  // The tenant the looked-up user belongs to. A lookup made in one tenant
+  // must never drive a run in another, so Review needs this to match the
+  // tenant the page is on now.
+  const [preflightTenant, setPreflightTenant] = useState<{
+    id: string | null;
+    name: string | null;
+  } | null>(null);
+  // What the current (or last) run was pinned to, for its panel.
+  const [runInfo, setRunInfo] = useState<{
+    user: string;
+    tenantName: string | null;
+  } | null>(null);
+  // The successor's address typed a second time when it is outside the
+  // tenant's verified domains: the server's confirmExternal comes from this,
+  // never from the successor field itself.
+  const [externalConfirm, setExternalConfirm] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Verified domains for detecting an external successor. null = unknown
@@ -199,6 +223,8 @@ export default function Offboarding() {
       alive.current = false;
     };
   }, []);
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
 
   // Security Check links here with the account already chosen
   // (/offboarding?user=...). Only the field is filled in: nothing is looked up
@@ -220,6 +246,13 @@ export default function Offboarding() {
     // in-flight domains response land afterwards and misclassify successors.
     let cancelled = false;
     setVerifiedDomains(null);
+    // A confirmation opened under the previous tenant must not survive the
+    // switch: left open, it would confirm a run against the new tenant, and
+    // left "open" behind an unmounted dialog, the next lookup popped it
+    // straight up.
+    setConfirmOpen(false);
+    setDialogError(null);
+    setExternalConfirm("");
     // The looked-up user and step results are tenant-scoped too: keeping them
     // across a switch pairs tenant B's confirmation dialog with tenant A's
     // user, burning a fully-confirmed run on guaranteed server-side failures.
@@ -228,8 +261,16 @@ export default function Offboarding() {
     // own setLookingUp(false) (it's guarded to the latest seq) — clear the
     // spinner here or it stays on forever and blocks all future lookups.
     setLookingUp(false);
-    setPreflight(null);
-    setResults({} as Record<StepId, { status: StepStatus; message?: string }>);
+    // A run in flight is left alone: its requests are pinned to its tenant,
+    // and blanking the page would hide steps that are still firing. Its
+    // panel names the tenant, and Review stays off until the user is looked
+    // up again here (preflightTenant no longer matches).
+    if (!runningRef.current) {
+      setPreflight(null);
+      setPreflightTenant(null);
+      setResults({} as StepResults);
+      setRunInfo(null);
+    }
     tfetch("/api/admin/domains", {}, tenantId)
       .then((r) => r.json())
       .then((d) => {
@@ -260,22 +301,28 @@ export default function Offboarding() {
     // racing lookups could otherwise resolve out of order and leave the
     // preflight card (and the typed confirmation it feeds) showing a DIFFERENT
     // user than the input — the run would then target the wrong real account.
-    if (!email.trim() || lookingUp) return;
+    if (!email.trim() || lookingUp || running) return;
     const seq = ++lookupSeq.current;
+    const pinnedTenantId = tenantId;
+    const pinnedTenantName = tenant?.name ?? null;
     setLookingUp(true);
     setError(null);
+    setConfirmOpen(false);
     setPreflight(null);
-    setResults({} as Record<StepId, { status: StepStatus; message?: string }>);
+    setPreflightTenant(null);
+    setResults({} as StepResults);
+    setRunInfo(null);
     try {
       const res = await tfetch(
         `/api/offboarding/preflight?user=${encodeURIComponent(email)}`,
         {},
-        tenantId
+        pinnedTenantId
       );
       const data = await res.json();
       if (seq !== lookupSeq.current) return;
       if (data.success) {
         setPreflight(data.data);
+        setPreflightTenant({ id: pinnedTenantId, name: pinnedTenantName });
       } else {
         setError(data.error || "Failed to look up user");
       }
@@ -289,15 +336,30 @@ export default function Offboarding() {
 
   const selectedSteps = STEPS.filter((s) => enabled[s.id]);
   const needsSuccessor = selectedSteps.some((s) => s.needsSuccessor);
+  // Compared with the account the lookup found, not with what was typed in
+  // the Leaver box: that may be an alias, or edited since the lookup.
+  const leaverAddress = preflight?.user.primaryEmail.toLowerCase() ?? "";
+  const successorIsLeaver =
+    !!successor.trim() &&
+    !!leaverAddress &&
+    successor.trim().toLowerCase() === leaverAddress;
   const successorOk =
     !needsSuccessor ||
-    (/^\S+@\S+\.\S+$/.test(successor.trim()) &&
-      successor.trim().toLowerCase() !== email.trim().toLowerCase());
+    (/^\S+@\S+\.\S+$/.test(successor.trim()) && !successorIsLeaver);
+  // An outside successor gets this user's mail, calendar and Drive: the
+  // operator types its address a second time to say they mean it.
+  const externalConfirmNeeded = needsSuccessor && successorIsExternal;
+  const externalConfirmOk =
+    !externalConfirmNeeded ||
+    externalConfirm.trim().toLowerCase() === successor.trim().toLowerCase();
+  const preflightIsCurrent = !!preflightTenant && preflightTenant.id === tenantId;
 
   const canReview =
     !!preflight &&
+    preflightIsCurrent &&
     selectedSteps.length > 0 &&
     successorOk &&
+    externalConfirmOk &&
     !preflight.user.isAdmin && // we'll display a warning if admin
     !running;
 
@@ -351,15 +413,41 @@ export default function Offboarding() {
   }
 
   const runAll = async () => {
-    if (!preflight) return;
+    if (!preflight || runningRef.current) return;
     const pinnedTenantId = tenantId;
+    const problem = await tenantPinProblem(pinnedTenantId);
+    if (problem) {
+      setDialogError(problem);
+      return;
+    }
+    if (!alive.current) return;
+    if (
+      tenantIdRef.current !== pinnedTenantId ||
+      preflightTenant?.id !== pinnedTenantId
+    ) {
+      setDialogError("The tenant changed — look the user up again.");
+      return;
+    }
+    // Everything the run sends is pinned here, so nothing edited on the page
+    // while it runs (or a tenant switch) changes what the later steps do.
+    const pinnedUser = preflight.user.primaryEmail;
     const pinnedSuccessor = successor.trim();
-    // Pin external status at run time so it can't drift mid-run.
-    const pinnedConfirmExternal = successorIsExternal ? pinnedSuccessor : undefined;
+    const pinnedEnabled = { ...enabled };
+    const pinnedVacationSubject = vacationSubject;
+    const pinnedVacationMessage = vacationMessage;
+    // Sent only when the page judged the successor external, and only as the
+    // operator typed it: the server compares it with the successor.
+    const pinnedConfirmExternal = externalConfirmNeeded
+      ? externalConfirm.trim()
+      : undefined;
+    runningRef.current = true;
     setRunning(true);
+    setRunInfo({ user: pinnedUser, tenantName: preflightTenant?.name ?? null });
     setError(null);
-    const newResults: Record<StepId, { status: StepStatus; message?: string }> =
-      {} as Record<StepId, { status: StepStatus; message?: string }>;
+    setDialogError(null);
+    // The step list behind the dialog is where the run shows its progress.
+    setConfirmOpen(false);
+    const newResults: StepResults = {} as StepResults;
 
     // Once any step fails, do NOT run the irreversible account-cutoff steps
     // (sign-out, suspend). Suspending after a failed forward/calendar step would
@@ -371,7 +459,7 @@ export default function Offboarding() {
 
     for (const id of RUN_ORDER) {
       if (!alive.current) return;
-      if (!enabled[id]) {
+      if (!pinnedEnabled[id]) {
         newResults[id] = { status: "skipped" };
         setResults({ ...newResults });
         continue;
@@ -395,13 +483,13 @@ export default function Offboarding() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               step: id,
-              user: preflight.user.primaryEmail,
+              user: pinnedUser,
               // Every step requires the typed confirmation server-side too —
               // send the pinned preflight address the dialog just confirmed.
-              confirm: preflight.user.primaryEmail,
+              confirm: pinnedUser,
               successor: pinnedSuccessor,
-              vacationSubject,
-              vacationMessage,
+              vacationSubject: pinnedVacationSubject,
+              vacationMessage: pinnedVacationMessage,
               confirmExternal: pinnedConfirmExternal,
             }),
           },
@@ -426,9 +514,9 @@ export default function Offboarding() {
       setResults({ ...newResults });
     }
 
+    runningRef.current = false;
     if (!alive.current) return;
     setRunning(false);
-    setConfirmOpen(false);
   };
 
   const statusIcon = (s: StepStatus) => {
@@ -482,12 +570,15 @@ export default function Offboarding() {
                   placeholder="leaver@yourdomain.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && !lookingUp && lookup()}
+                  onKeyDown={(e) =>
+                    e.key === "Enter" && !lookingUp && !running && lookup()
+                  }
+                  disabled={running}
                 />
                 <Button
                   variant="secondary"
                   onClick={lookup}
-                  disabled={!email.trim() || lookingUp}
+                  disabled={!email.trim() || lookingUp || running}
                 >
                   {lookingUp ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -556,15 +647,47 @@ export default function Offboarding() {
                       id="successor"
                       placeholder="manager@yourdomain.com"
                       value={successor}
-                      onChange={(e) => setSuccessor(e.target.value)}
+                      onChange={(e) => {
+                        setSuccessor(e.target.value);
+                        // A confirmation typed for one address must not
+                        // carry over to another.
+                        setExternalConfirm("");
+                      }}
+                      disabled={running}
                     />
-                    {successor &&
-                      successor.trim().toLowerCase() ===
-                        email.trim().toLowerCase() && (
-                        <p className="text-xs text-danger">
-                          Successor must be different from the leaver.
+                    {successorIsLeaver && (
+                      <p className="text-xs text-danger">
+                        Successor must be different from the leaver (
+                        {preflight.user.primaryEmail}).
+                      </p>
+                    )}
+                    {externalConfirmNeeded && !successorIsLeaver && (
+                      <div className="space-y-1.5 rounded-lg border border-warning/30 bg-warning/8 p-3">
+                        <p className="text-xs text-warning-fg">
+                          <strong>{successor.trim()}</strong> is outside your
+                          organisation
+                          {verifiedDomains === null
+                            ? " (or the tenant's domains couldn't be checked)"
+                            : ""}
+                          . Forwarded mail, ownership of the primary calendar
+                          and every Drive file this user owns would go to an
+                          account your organisation doesn&apos;t control.
                         </p>
-                      )}
+                        <Label htmlFor="externalConfirm" className="text-xs">
+                          Type the successor&apos;s address to confirm
+                        </Label>
+                        <Input
+                          id="externalConfirm"
+                          value={externalConfirm}
+                          onChange={(e) => setExternalConfirm(e.target.value)}
+                          placeholder={successor.trim()}
+                          className="font-mono text-sm"
+                          autoComplete="off"
+                          spellCheck={false}
+                          disabled={running}
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -636,6 +759,7 @@ export default function Offboarding() {
                         id="vacSubject"
                         value={vacationSubject}
                         onChange={(e) => setVacationSubject(e.target.value)}
+                        disabled={running}
                       />
                     </div>
                     <div className="space-y-1.5">
@@ -647,15 +771,38 @@ export default function Offboarding() {
                         value={vacationMessage}
                         onChange={(e) => setVacationMessage(e.target.value)}
                         rows={4}
+                        disabled={running}
                       />
                     </div>
                   </div>
                 )}
 
+                {runInfo && (running || Object.keys(results).length > 0) && (
+                  <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {running ? "Offboarding" : "Offboarded"} {runInfo.user}
+                    {runInfo.tenantName ? ` in ${runInfo.tenantName}` : ""}
+                    {running ? "…" : "."}
+                    {runInfo.tenantName && tenant && tenant.name !== runInfo.tenantName
+                      ? ` You have since switched to ${tenant.name}; ${running ? "this run carries on against" : "this ran against"} ${runInfo.tenantName}.`
+                      : ""}
+                  </p>
+                )}
+                {!preflightIsCurrent && !running && (
+                  <p className="text-xs text-warning-fg">
+                    This user was looked up in{" "}
+                    {preflightTenant?.name ?? "another tenant"}. Look them up
+                    again to offboard them in the tenant shown in the sidebar.
+                  </p>
+                )}
+
                 <Button
                   className="w-full"
                   size="lg"
-                  onClick={() => setConfirmOpen(true)}
+                  onClick={() => {
+                    setDialogError(null);
+                    setConfirmOpen(true);
+                  }}
                   disabled={!canReview}
                 >
                   <UserMinus className="mr-2 h-4 w-4" />
@@ -708,7 +855,11 @@ export default function Offboarding() {
       {preflight && (
         <ConfirmActionDialog
           open={confirmOpen}
-          onOpenChange={(o) => !running && setConfirmOpen(o)}
+          onOpenChange={(o) => {
+            if (running) return;
+            if (!o) setDialogError(null);
+            setConfirmOpen(o);
+          }}
           title={`Offboard ${preflight.user.primaryEmail}`}
           summary="Sequential, audited offboarding. Each step runs server-side; if any step fails, the account-cutoff steps (sign-out, suspend) are held back so you can fix it and re-run only what's left."
           tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
@@ -719,11 +870,12 @@ export default function Offboarding() {
           changes={buildDiff()}
           warnings={
             <>
-              {successorIsExternal && successor.trim() && (
+              {externalConfirmNeeded && successor.trim() && (
                 <p className="mb-2">
                   <strong>{successor.trim()}</strong> is outside this
-                  tenant&apos;s verified domains — mail forwarding and calendar
-                  ownership will be handed to an external account.
+                  tenant&apos;s verified domains — forwarded mail, calendar
+                  ownership and the user&apos;s Drive files will be handed to an
+                  external account.
                 </p>
               )}
               <strong>Drive transfer is irreversible without admin support.</strong>{" "}
@@ -732,6 +884,7 @@ export default function Offboarding() {
               re-authorise apps after un-suspension.
             </>
           }
+          error={dialogError}
           onConfirm={runAll}
         />
       )}

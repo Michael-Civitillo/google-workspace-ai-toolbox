@@ -115,13 +115,17 @@ export function ConfirmActionDialog({
     onOpenChange(next);
   }
 
-  const phraseRequired = severity === "high" && !!confirmPhrase;
+  // High severity always means typing something. A caller that hands over an
+  // empty phrase (an address field not filled in yet, say) gets a dialog that
+  // can't be confirmed, never a one-click one.
+  const phraseRequired = severity === "high";
   // Trim BOTH sides: several callers pass raw input (e.g. a pasted email with
   // a trailing space) as the phrase, and comparing a trimmed entry against an
   // untrimmed phrase makes the confirmation impossible to type — the confirm
   // button just stays disabled with no explanation.
-  const phraseOk =
-    !phraseRequired || typed.trim() === (confirmPhrase ?? "").trim();
+  const phrase = (confirmPhrase ?? "").trim();
+  const phraseMissing = phraseRequired && phrase === "";
+  const phraseOk = !phraseRequired || (!phraseMissing && typed.trim() === phrase);
   const canConfirm = phraseOk && !busy;
 
   return (
@@ -206,7 +210,14 @@ export function ConfirmActionDialog({
             </div>
           )}
 
-          {phraseRequired && (
+          {phraseMissing && (
+            <p role="alert" className="text-xs text-danger-fg">
+              There is nothing to type to confirm this yet, so it can&apos;t
+              run. Close this, check the form is filled in, and try again.
+            </p>
+          )}
+
+          {phraseRequired && !phraseMissing && (
             <div className="space-y-1.5">
               <Label htmlFor="confirm-phrase" className="text-xs">
                 Type{" "}

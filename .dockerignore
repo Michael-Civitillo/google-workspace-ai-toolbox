@@ -6,7 +6,9 @@ packaging/dist
 .git
 .github
 docs
-deploy
+# Only the image's health check is needed from deploy/.
+deploy/*
+!deploy/docker
 *.md
 
 # Local state: never ship a tenants file, sign-on config, audit log or keys.
