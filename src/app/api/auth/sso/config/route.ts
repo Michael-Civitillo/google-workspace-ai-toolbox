@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   readSsoConfig,
   saveSsoConfig,
@@ -16,7 +17,9 @@ import { errorStatusFor } from "@/lib/api-errors";
 // Allowlists can hold a few hundred addresses; still tiny.
 const MAX_BODY_BYTES = 64 * 1024;
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const cfg = readSsoConfig();
     return NextResponse.json({
@@ -32,6 +35,8 @@ export async function GET() {
 
 /** Create or update the configuration. Missing fields keep their stored value. */
 export async function PUT(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
@@ -80,6 +85,8 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = describeActor(await identityFromRequest(req));
   try {
     const removed = await deleteSsoConfig();

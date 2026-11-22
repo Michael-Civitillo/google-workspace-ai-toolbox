@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { listDomains } from "@/lib/admin-sdk";
 import { makeTxtLookup } from "@/lib/dns-txt";
@@ -25,6 +26,8 @@ import { errorResponse } from "@/lib/api-errors";
 const MAX_DOMAINS = 100;
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const domains = (await listDomains(tenant))

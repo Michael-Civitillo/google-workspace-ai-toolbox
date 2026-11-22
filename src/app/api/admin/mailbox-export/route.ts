@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { exportMailboxPage, isAbortError } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -52,6 +53,8 @@ function claimExportAudit(key: string, now = Date.now()): boolean {
  * `nextPageToken` to walk the rest of the mailbox.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Resolved before the try so the error path can attribute the failure too.
   const actor = await actorFromRequest(request);
 

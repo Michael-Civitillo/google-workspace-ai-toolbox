@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   getTenantStoreSnapshot,
   addTenant,
@@ -17,7 +18,9 @@ import { errorStatusFor } from "@/lib/api-errors";
 // Tenant config bodies are tiny — cap aggressively.
 const MAX_BODY_BYTES = 16 * 1024;
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     // One snapshot read: separate getters would read the store twice, and a
     // concurrent write between them could pair a fresh list with a stale
@@ -37,6 +40,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

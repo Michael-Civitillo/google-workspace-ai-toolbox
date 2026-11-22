@@ -29,9 +29,9 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import {
-  tenantStateGeneration,
   tfetch,
   useCurrentTenant,
+  tenantPinProblem,
 } from "@/lib/tenant-client";
 
 /** Export-file format version. Bump if the line schema changes. */
@@ -134,30 +134,6 @@ function mboxEntry(
   return out;
 }
 
-/**
- * Why a run may not start with this tenant id, or null when it may. Every
- * request of a run is pinned to the id it started with, but a null pin sends
- * no tenant at all, and the server then uses whichever tenant is active in
- * its own settings. While the tenant list is still loading that is not
- * necessarily the tenant the page is about to show. Once the list has loaded
- * empty, null is right: the install runs on environment-variable credentials.
- */
-async function tenantPinProblem(tenantId: string | null): Promise<string | null> {
-  if (tenantId) return null;
-  if (tenantStateGeneration() === 0) {
-    return "The tenant list is still loading — try again in a moment.";
-  }
-  try {
-    const r = await fetch("/api/tenants");
-    if (r.ok) {
-      const d = await r.json();
-      if (Array.isArray(d?.tenants) && d.tenants.length === 0) return null;
-    }
-  } catch {
-    // Fall through: unknown is not "no tenants".
-  }
-  return "No tenant is selected — pick one in the sidebar first.";
-}
 
 /**
  * Where the export goes. In browsers with the File System Access API the

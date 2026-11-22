@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { checkGwsStatus } from "@/lib/gws";
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // `?fresh=1` (the Re-check buttons) bypasses the short status cache.
   const fresh = request.nextUrl.searchParams.get("fresh") === "1";
   const status = await checkGwsStatus({ fresh });

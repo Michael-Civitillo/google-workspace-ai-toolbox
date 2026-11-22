@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { readAuditLogPage, type AuditCursor } from "@/lib/audit-reader";
 import { getDelegationSightings } from "@/lib/delegation-sightings";
@@ -82,6 +83,8 @@ function readPairs(body: Record<string, unknown>): Array<{ owner: string; delega
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   updateTenant,
   deleteTenant,
@@ -23,6 +24,8 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
@@ -138,6 +141,8 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   let tenantId: string | null = null;
   let tenant = null;

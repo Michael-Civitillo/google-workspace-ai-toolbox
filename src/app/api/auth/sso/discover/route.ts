@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { validateIssuer } from "@/lib/sso-server";
 import { checkIssuer, OidcFlowError } from "@/lib/oidc";
 import { ValidationError } from "@/lib/validate";
@@ -25,6 +26,8 @@ const DISCOVER_LIMIT = 10;
 const DISCOVER_WINDOW_MS = 60_000;
 
 export async function POST(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const gate = rateLimit(
     `sso-discover:${clientKey(req)}`,
     DISCOVER_LIMIT,

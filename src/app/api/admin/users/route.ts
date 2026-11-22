@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { listUsers } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { ValidationError } from "@/lib/validate";
@@ -13,6 +14,8 @@ import { errorStatusFor } from "@/lib/api-errors";
  * mailbox to scan, but generic enough to feed any future tenant-wide flow.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const pageToken = request.nextUrl.searchParams.get("pageToken") || undefined;

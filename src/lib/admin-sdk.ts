@@ -2721,6 +2721,11 @@ export async function listActivityEvents(
     userKey?: string;
     /** RFC3339 lower bound. */
     startTime: string;
+    /**
+     * RFC3339 upper bound. Pin it across pages: without one, each later page
+     * is asked of a window that keeps growing as time passes.
+     */
+    endTime?: string;
     pageToken?: string;
     maxResults?: number;
     /** The route's `request.signal`: stop once the caller is gone. */
@@ -2738,6 +2743,7 @@ export async function listActivityEvents(
           userKey: opts.userKey ?? "all",
           applicationName: opts.app,
           startTime: opts.startTime,
+          ...(opts.endTime ? { endTime: opts.endTime } : {}),
           maxResults: Math.min(
             ACTIVITY_MAX_RESULTS,
             Math.max(1, opts.maxResults ?? ACTIVITY_MAX_RESULTS)

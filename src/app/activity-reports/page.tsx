@@ -17,6 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert } from "@/components/feedback-alert";
 import { AiSummary } from "@/components/ai-summary";
+import { CoverageNote, readCoverage, type Coverage } from "@/components/coverage-note";
 import {
   Activity,
   Loader2,
@@ -93,6 +94,8 @@ export default function ActivityReports() {
   const [digestDays, setDigestDays] = useState("7");
   const [digest, setDigest] = useState("");
   const [digestMeta, setDigestMeta] = useState("");
+  // What the digest could not cover, from the server, not from the model.
+  const [digestGaps, setDigestGaps] = useState<Coverage | null>(null);
   const [digestLoading, setDigestLoading] = useState(false);
 
   const [message, setMessage] = useState<{
@@ -117,6 +120,7 @@ export default function ActivityReports() {
     user: string;
     days: number | null;
     startTime: string | null;
+    endTime: string | null;
   } | null>(null);
 
   // Events fetched for tenant A must not survive a switch to tenant B.
@@ -127,6 +131,7 @@ export default function ActivityReports() {
     setExpanded(new Set());
     setDigest("");
     setDigestMeta("");
+    setDigestGaps(null);
     setListedFilters(null);
   }, [tenantId]);
 
@@ -154,12 +159,14 @@ export default function ActivityReports() {
             user: userFilter.trim(),
             days: Number.isInteger(d) && d >= 1 ? d : null,
             startTime: null,
+            endTime: null,
           };
     try {
       const params = new URLSearchParams({ app: pinnedTab, pageSize: "100" });
       if (filters.user) params.set("user", filters.user);
       if (filters.startTime) params.set("startTime", filters.startTime);
       else if (filters.days !== null) params.set("days", String(filters.days));
+      if (filters.endTime) params.set("endTime", filters.endTime);
       if (append && pageToken) params.set("pageToken", pageToken);
 
       const res = await tfetch(
@@ -183,6 +190,8 @@ export default function ActivityReports() {
               typeof result.data.startTime === "string"
                 ? result.data.startTime
                 : null,
+            endTime:
+              typeof result.data.endTime === "string" ? result.data.endTime : null,
           });
         }
         setEvents((prev) =>
@@ -212,6 +221,7 @@ export default function ActivityReports() {
     setDigestLoading(true);
     setMessage(null);
     setDigest("");
+    setDigestGaps(null);
     const pinnedTenantId = tenantId;
     try {
       const d = Number(digestDays);
@@ -231,6 +241,7 @@ export default function ActivityReports() {
 
       if (result.success) {
         setDigest(result.data.summary);
+        setDigestGaps(readCoverage(result.data));
         setDigestMeta(
           `Last ${result.data.days} day${result.data.days === 1 ? "" : "s"}`
         );
@@ -337,6 +348,7 @@ export default function ActivityReports() {
                       Security Digest — {digestMeta}
                     </p>
                   </div>
+                  <CoverageNote gaps={digestGaps} />
                   {/* AiSummary carries the "advisory, verify it" callout itself. */}
                   <AiSummary text={digest} />
                 </div>

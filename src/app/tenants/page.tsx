@@ -37,6 +37,7 @@ import { cn } from "@/lib/utils";
 import {
   TENANT_COLORS,
   TENANT_COLOR_CLASSES,
+  tenantColorClasses,
   type Tenant,
   type TenantColor,
 } from "@/lib/tenants";
@@ -397,7 +398,7 @@ export default function TenantsPage() {
               </div>
             ) : (
               state.tenants.map((tenant, idx) => {
-                const tc = TENANT_COLOR_CLASSES[tenant.color as TenantColor];
+                const tc = tenantColorClasses(tenant.color);
                 const isActive =
                   tenant.id === (currentTenantId ?? state.activeTenantId);
                 const isEditing = editingId === tenant.id;

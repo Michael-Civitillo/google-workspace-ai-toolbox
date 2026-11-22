@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { resolveImportLabels, type GmailLabelInfo } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -24,6 +25,8 @@ const MAX_LABELS = 10_000;
  * batches so label resolution stays out of the per-message insert loop.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Resolved before the try so the error path can attribute the failure too.
   const actor = await actorFromRequest(request);
 

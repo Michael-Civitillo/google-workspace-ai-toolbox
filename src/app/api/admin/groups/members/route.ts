@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   addGroupMember,
@@ -26,6 +27,8 @@ function tooLarge() {
 
 /** List the direct members of a group. */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const params = request.nextUrl.searchParams;
@@ -64,6 +67,8 @@ function parseRole(raw: unknown): GroupMemberRole {
 
 /** Add a member to a group. */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
@@ -168,6 +173,8 @@ export async function POST(request: NextRequest) {
 
 /** Remove a member from a group. */
 export async function DELETE(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();

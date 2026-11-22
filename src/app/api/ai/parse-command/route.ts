@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { generateObject } from "ai";
 import { z } from "zod";
 import {
@@ -33,6 +34,8 @@ const MAX_BODY_BYTES = 16 * 1024; // commands are short — cap to keep AI bills
 const MAX_COMMAND_CHARS = 4_000;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Same budget as the two report routes — one Gemini bill, one allowance.
   const overBudget = await chargeAiBudget(request);
   if (overBudget) return overBudget;

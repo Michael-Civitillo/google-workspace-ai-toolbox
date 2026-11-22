@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { listGroups } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -9,6 +10,8 @@ import { errorStatusFor } from "@/lib/api-errors";
  * with `userKey` — the groups a specific user is a direct member of.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const params = request.nextUrl.searchParams;

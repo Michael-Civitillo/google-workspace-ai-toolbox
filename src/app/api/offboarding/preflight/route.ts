@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getUser, listOAuthTokens, isNotFoundError } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail } from "@/lib/validate";
@@ -9,6 +10,8 @@ import { errorStatusFor } from "@/lib/api-errors";
  * confirmation diff: name, status, OAuth token count, etc. Read-only.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const user = requireEmail(

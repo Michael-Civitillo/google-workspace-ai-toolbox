@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   decodeAuditCursor,
   encodeAuditCursor,
@@ -49,6 +50,8 @@ function dateParamMs(raw: string | null, field: string): number | undefined {
 }
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const params = request.nextUrl.searchParams;
 

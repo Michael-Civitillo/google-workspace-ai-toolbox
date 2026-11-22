@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getAppConfig } from "@/lib/app-config";
 import { getTenantStoreSnapshot } from "@/lib/tenants-server";
 import { readSsoConfig } from "@/lib/sso-server";
@@ -106,6 +107,8 @@ async function respondWithBundle(req: NextRequest, includeSecrets: boolean) {
 }
 
 export async function GET(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   if (req.nextUrl.searchParams.get("secrets") === "1") {
     return NextResponse.json(
       {
@@ -118,6 +121,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { revokeExternalPermissions, type RevokeCategory } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -35,6 +36,8 @@ const MAX_BODY_BYTES = 1 * 1024 * 1024;
  * file's failure never aborts the rest of the batch.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

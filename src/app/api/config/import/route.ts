@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import { sessionRefusal } from "@/lib/route-guard";
 import { NextRequest, NextResponse } from "next/server";
 import { updateAppConfig } from "@/lib/app-config";
 import {
@@ -55,6 +56,8 @@ function freshId(): string {
  *     missing files come back as warnings so the operator knows what to copy.
  */
 export async function POST(req: NextRequest) {
+  const noSession = await sessionRefusal(req);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(req);
   const body = await readCappedJson(req, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

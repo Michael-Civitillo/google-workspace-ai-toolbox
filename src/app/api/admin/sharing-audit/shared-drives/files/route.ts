@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { listExternallySharedDriveFiles } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -20,6 +21,8 @@ import { errorResponse } from "@/lib/api-errors";
 const MAX_AS = 5;
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const params = request.nextUrl.searchParams;

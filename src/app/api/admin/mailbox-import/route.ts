@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   importMessageBatch,
   MAILBOX_IMPORT_BATCH_CAP,
@@ -37,6 +38,8 @@ const MAX_BODY_BYTES = 80 * 1024 * 1024;
  * of the audit log — only counts are recorded.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Resolved before the try so the error path can attribute the failure too.
   const actor = await actorFromRequest(request);
 

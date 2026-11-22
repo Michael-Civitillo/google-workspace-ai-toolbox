@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { generateText } from "ai";
 import { getModel, isTimeoutError } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
@@ -84,6 +85,8 @@ function coverage(rawData: Record<Section, unknown>): {
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Spend the caller's AI budget before the six Workspace probes and the
   // Gemini call, so a loop is refused for free rather than billed.
   const overBudget = await chargeAiBudget(request);

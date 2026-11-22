@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   buildGmailClient,
@@ -86,6 +87,8 @@ async function suspensionResponse(
 }
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   let tenant = null;
   let user: string | null = null;
   try {
@@ -117,6 +120,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();
@@ -171,6 +176,8 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) return tooLarge();

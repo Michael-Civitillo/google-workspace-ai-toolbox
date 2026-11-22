@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { changePrimaryDomain } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import {
@@ -28,6 +29,8 @@ import { errorStatusFor } from "@/lib/api-errors";
 const MAX_BODY_BYTES = 16 * 1024;
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

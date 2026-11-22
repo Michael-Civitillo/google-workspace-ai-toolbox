@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   buildGmailClient,
@@ -42,6 +43,8 @@ const DISPOSITION_MAP: Record<string, string> = {
  * caller must explicitly opt in with `confirmExternal: "<target email>"`.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

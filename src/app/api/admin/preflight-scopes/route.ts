@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { preflightTenantScopesCached } from "@/lib/preflight";
 import { audit } from "@/lib/audit";
@@ -17,6 +18,8 @@ import { errorStatusFor } from "@/lib/api-errors";
  * We only ask Google's OAuth server for tokens.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   let tenant = null;
   try {

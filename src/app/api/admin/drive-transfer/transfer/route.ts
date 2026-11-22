@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import {
   buildInitialTransferCursor,
   sanitizeTransferCursor,
@@ -33,6 +34,8 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
  * for the untouched remainder, so a re-run resumes instead of restarting.
  */
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

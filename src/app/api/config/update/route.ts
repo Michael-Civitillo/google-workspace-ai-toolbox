@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { getAppConfig, setUpdateCheck } from "@/lib/app-config";
 import {
   clearUpdateCheck,
@@ -38,7 +39,9 @@ function status(enabled: boolean, result: UpdateCheckResult | null) {
 
 const noStore = { headers: { "cache-control": "no-store" } };
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const { updateCheck } = getAppConfig();
     const result = updateCheck ? await latestRelease() : null;
@@ -50,6 +53,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {

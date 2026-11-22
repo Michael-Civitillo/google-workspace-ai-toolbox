@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import {
   findMailboxesDelegatedTo,
@@ -37,6 +38,8 @@ import { errorResponse } from "@/lib/api-errors";
 const MAX_ADDRESSES = 200;
 
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const params = request.nextUrl.searchParams;

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { listDelegationChanges, serviceAccountClientId } from "@/lib/admin-sdk";
 import { usedScopes } from "@/lib/preflight";
@@ -23,6 +24,8 @@ import { errorResponse } from "@/lib/api-errors";
  * paged account scan.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const { events, truncated } = await listDelegationChanges(tenant, {

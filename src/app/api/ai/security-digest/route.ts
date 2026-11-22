@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { generateText } from "ai";
 import { getModel, isTimeoutError } from "@/lib/ai";
 import { tenantFromRequest } from "@/lib/gws";
@@ -83,6 +84,8 @@ function coverage(sets: Record<string, GatheredEvents>): {
 }
 
 export async function POST(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   // Shared with the other AI routes: the digest can page hundreds of Reports
   // events before it ever reaches Gemini, so refuse over-budget callers first.
   const overBudget = await chargeAiBudget(request);

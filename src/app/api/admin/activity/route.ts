@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sessionRefusal } from "@/lib/route-guard";
 import { tenantFromRequest } from "@/lib/gws";
 import { listActivityEvents } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
@@ -14,11 +15,14 @@ const DAY_MS = 86_400_000;
  * GET /api/admin/activity?app=login[&user=...][&days=7 | &startTime=ISO]
  *       [&pageToken=...][&pageSize=100]
  *
- * The answer carries the `startTime` it used. A follow-up page must send that
- * back instead of `days`: a page token belongs to the query it came from, and
- * recomputing "7 days ago" a minute later asks Google for a different window.
+ * The answer carries the `startTime` and `endTime` it used. A follow-up page
+ * must send both back instead of `days`: a page token belongs to the query it
+ * came from, and recomputing "7 days ago" (or "now") a minute later asks
+ * Google for a different window.
  */
 export async function GET(request: NextRequest) {
+  const noSession = await sessionRefusal(request);
+  if (noSession) return noSession;
   try {
     const tenant = tenantFromRequest(request);
     const params = request.nextUrl.searchParams;
@@ -60,6 +64,19 @@ export async function GET(request: NextRequest) {
       startTime = new Date(Date.now() - days * DAY_MS).toISOString();
     }
 
+    let endTime: string;
+    const endRaw = params.get("endTime");
+    if (endRaw !== null && endRaw !== "") {
+      const ms = Date.parse(endRaw);
+      if (Number.isNaN(ms)) throw new ValidationError("endTime must be a valid date");
+      if (ms > Date.now() + DAY_MS || ms < Date.parse(startTime)) {
+        throw new ValidationError("endTime must be after startTime and not in the future");
+      }
+      endTime = new Date(ms).toISOString();
+    } else {
+      endTime = new Date().toISOString();
+    }
+
     const pageSizeRaw = params.get("pageSize");
     let maxResults: number | undefined;
     if (pageSizeRaw !== null && pageSizeRaw !== "") {
@@ -74,10 +91,12 @@ export async function GET(request: NextRequest) {
       app,
       userKey,
       startTime,
+      endTime,
       pageToken: params.get("pageToken") || undefined,
       maxResults,
+      signal: request.signal,
     });
-    return NextResponse.json({ success: true, data: { ...result, startTime } });
+    return NextResponse.json({ success: true, data: { ...result, startTime, endTime } });
   } catch (e) {
     return errorResponse(e, "Failed to load activity");
   }

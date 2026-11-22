@@ -26,9 +26,9 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import {
-  tenantStateGeneration,
   tfetch,
   useCurrentTenant,
+  tenantPinProblem,
 } from "@/lib/tenant-client";
 import {
   ConfirmActionDialog,
@@ -168,30 +168,6 @@ const RUN_ORDER: StepId[] = STEPS
 
 type StepResults = Record<StepId, { status: StepStatus; message?: string }>;
 
-/**
- * Why a run may not start with this tenant id, or null when it may. Every
- * request of a run is pinned to the id it started with, but a null pin sends
- * no tenant at all, and the server then uses whichever tenant is active in
- * its own settings. While the tenant list is still loading that is not
- * necessarily the tenant the page is about to show. Once the list has loaded
- * empty, null is right: the install runs on environment-variable credentials.
- */
-async function tenantPinProblem(tenantId: string | null): Promise<string | null> {
-  if (tenantId) return null;
-  if (tenantStateGeneration() === 0) {
-    return "The tenant list is still loading — try again in a moment.";
-  }
-  try {
-    const r = await fetch("/api/tenants");
-    if (r.ok) {
-      const d = await r.json();
-      if (Array.isArray(d?.tenants) && d.tenants.length === 0) return null;
-    }
-  } catch {
-    // Fall through: unknown is not "no tenants".
-  }
-  return "No tenant is selected — pick one in the sidebar first.";
-}
 
 export default function Offboarding() {
   const { tenant, id: tenantId } = useCurrentTenant();
