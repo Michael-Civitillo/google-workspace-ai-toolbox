@@ -10,13 +10,13 @@
 # APP_ALLOWED_ORIGINS=https://admin.example.com - see docs/DEPLOY-CLOUDFLARE.md,
 # which includes a Compose file with a Cloudflare Tunnel in front.
 
-FROM node:22-alpine AS deps
+FROM node:22.23.5-alpine AS deps
 WORKDIR /app
 ENV PUPPETEER_SKIP_DOWNLOAD=1 NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
-FROM node:22-alpine AS build
+FROM node:22.23.5-alpine AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
@@ -26,7 +26,7 @@ COPY . .
 # does anything but talk to Google's APIs.
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:22.23.5-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
@@ -44,13 +44,19 @@ ENV NODE_ENV=production \
     # small semi-space keeps scavenge copying - and so RSS - down for the
     # short-lived objects a request cycle produces.
     NODE_OPTIONS="--max-old-space-size=768 --max-semi-space-size=8"
+# The application is owned by root and only readable by the user it runs as,
+# so nothing the server does can rewrite its own code. /data, where every
+# piece of state lives, is the only place it can write.
 RUN mkdir -p /data && chown node:node /data
-COPY --from=build --chown=node:node /app/.next/standalone ./
-COPY --from=build --chown=node:node /app/.next/static ./.next/static
-COPY --from=build --chown=node:node /app/public ./public
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+COPY --from=build /app/public ./public
+COPY deploy/docker/healthcheck.cjs /usr/local/lib/open-admin/healthcheck.cjs
 USER node
 VOLUME ["/data"]
 EXPOSE 3000
+# Healthy means: answering on $PORT, APP_PASSWORD set (without it every API
+# call is refused), and /data writable by this user. See healthcheck.cjs.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD wget -qO /dev/null http://127.0.0.1:3000/login || exit 1
+  CMD ["node", "/usr/local/lib/open-admin/healthcheck.cjs"]
 CMD ["node", "server.js"]

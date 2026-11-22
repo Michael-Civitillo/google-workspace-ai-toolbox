@@ -28,7 +28,12 @@ services:
       - data:/data
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Pinned, so the program holding the tunnel token changes only when this
+    # line does. To update: pick a release from
+    # https://github.com/cloudflare/cloudflared/releases and replace both the
+    # version and the digest (docker buildx imagetools inspect
+    # cloudflare/cloudflared:<version> prints it).
+    image: cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
     restart: unless-stopped
     command: tunnel --no-autoupdate run
     environment:
