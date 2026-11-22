@@ -5,6 +5,37 @@ import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { actorFromRequest } from "@/lib/session";
 import { acquireSlot, BusyError } from "@/lib/concurrency";
+import { errorStatusFor } from "@/lib/api-errors";
+
+// When each (tenant, operator, mailbox) export was last written to the audit
+// log. The log records who read whose mail, decided here rather than by the
+// caller saying "this is the first page": a page with a token still reads
+// mail. Once per half hour keeps a long export to one entry.
+const EXPORT_AUDIT_WINDOW_MS = 30 * 60_000;
+const EXPORT_AUDIT_MAX_KEYS = 1000;
+const g = globalThis as typeof globalThis & {
+  __openAdminExportAudited?: Map<string, number>;
+};
+const exportAudited = (g.__openAdminExportAudited ??= new Map<string, number>());
+
+/** True when this export has not been logged in the last half hour, and marks it logged. */
+function claimExportAudit(key: string, now = Date.now()): boolean {
+  const last = exportAudited.get(key);
+  if (last !== undefined && now - last < EXPORT_AUDIT_WINDOW_MS) return false;
+  if (exportAudited.size >= EXPORT_AUDIT_MAX_KEYS) {
+    for (const [k, at] of exportAudited) {
+      if (now - at >= EXPORT_AUDIT_WINDOW_MS) exportAudited.delete(k);
+    }
+    // Still full: drop the oldest, so the newest export is always logged.
+    if (exportAudited.size >= EXPORT_AUDIT_MAX_KEYS) {
+      const oldest = exportAudited.keys().next().value;
+      if (oldest !== undefined) exportAudited.delete(oldest);
+    }
+  }
+  exportAudited.delete(key);
+  exportAudited.set(key, now);
+  return true;
+}
 
 /**
  * Export one page of a user's mailbox for backup.
@@ -91,10 +122,10 @@ export async function GET(request: NextRequest) {
       signal: request.signal,
     });
 
-    // Audit the start of an export only (the very first call — no pageToken and
-    // no pendingIds continuation). A full mailbox dump is sensitive — record who
-    // pulled whose mail — but auditing every page would bury the log.
-    if (!pageToken && !pendingIds) {
+    // A full mailbox dump is sensitive — record who pulled whose mail — but
+    // auditing every page would bury the log: once per export, as decided
+    // above, whichever page it starts from.
+    if (claimExportAudit(`${tenant?.id ?? ""}|${actor}|${user}`)) {
       audit({
         action: "mailbox_export",
         tenantId: tenant?.id ?? null,
@@ -102,6 +133,8 @@ export async function GET(request: NextRequest) {
         params: {
           user,
           includeSpamTrash,
+          // Started from a page other than the first (a resumed export).
+          ...(pageToken || pendingIds ? { continued: true } : {}),
           // The caller went away mid-page: some mail was still read, so the
           // entry stays, flagged as cut short rather than as a clean export.
           ...(result.aborted ? { aborted: true } : {}),
@@ -128,7 +161,7 @@ export async function GET(request: NextRequest) {
       );
     }
     const message = e instanceof Error ? e.message : "Mailbox export failed";
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   } finally {
     release?.();

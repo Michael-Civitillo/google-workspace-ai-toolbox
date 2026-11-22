@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { listUsers } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { ValidationError } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Page through tenant users.
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: result });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Failed to list users";
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

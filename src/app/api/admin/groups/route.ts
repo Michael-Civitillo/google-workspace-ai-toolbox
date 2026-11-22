@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { tenantFromRequest } from "@/lib/gws";
 import { listGroups } from "@/lib/admin-sdk";
 import { requireEmail, ValidationError } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * List groups in the tenant (optionally narrowed by a Directory query), or —
@@ -44,6 +45,6 @@ export async function GET(request: NextRequest) {
 
 function errorResponse(e: unknown) {
   const message = e instanceof Error ? e.message : "Unexpected error";
-  const status = e instanceof ValidationError ? 400 : 500;
+  const status = errorStatusFor(e);
   return NextResponse.json({ success: false, error: message }, { status });
 }

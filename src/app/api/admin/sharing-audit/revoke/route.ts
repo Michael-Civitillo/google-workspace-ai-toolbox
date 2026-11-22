@@ -5,6 +5,7 @@ import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 const VALID_CATEGORIES: ReadonlySet<RevokeCategory> = new Set([
   "anyone",
@@ -185,11 +186,19 @@ export async function POST(request: NextRequest) {
         ...(noOps.length > 0 ? { noOps } : {}),
       },
       actor,
-      outcome: filesWithErrors > 0 ? "error" : "success",
+      // A batch cut short did not do what was asked, even with no errors.
+      outcome: filesWithErrors > 0 || result.aborted ? "error" : "success",
       error:
-        filesWithErrors > 0
-          ? `${filesWithErrors} of ${fileIds.length} files had permission deletion errors`
-          : undefined,
+        [
+          filesWithErrors > 0
+            ? `${filesWithErrors} of ${fileIds.length} files had permission deletion errors`
+            : "",
+          result.aborted
+            ? `Stopped before finishing: ${result.results.length} of ${fileIds.length} files were reached, and the last may be partly done`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("; ") || undefined,
     });
 
     return NextResponse.json({ success: true, data: result });
@@ -204,7 +213,7 @@ export async function POST(request: NextRequest) {
       outcome: "error",
       error: message,
     });
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

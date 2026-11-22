@@ -104,10 +104,22 @@ export async function POST(request: NextRequest) {
     }
 
     // Granting OWNER hands full calendar control (including re-sharing and
-    // deletion) to the delegate — for an address outside the tenant's verified
-    // domains that's the same exposure as a calendar transfer, so mirror the
-    // sibling flows' typed confirmExternal gate. Lower roles stay ungated:
-    // sharing free/busy or read access with an external partner is routine.
+    // deletion) to the delegate, so the page's typed confirmation is checked
+    // here too: this route accepts anything holding a session.
+    if (role === "owner") {
+      const confirm =
+        typeof body.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+      if (!constantTimeStringEqual(confirm, delegateEmail)) {
+        throw new ValidationError(
+          `Making "${delegateEmail}" an owner gives them full control of this calendar. Type their address into the confirm field to proceed.`
+        );
+      }
+    }
+
+    // For an address outside the tenant's verified domains that's the same
+    // exposure as a calendar transfer, so mirror the sibling flows' typed
+    // confirmExternal gate as well. Lower roles stay ungated: sharing
+    // free/busy or read access with an external partner is routine.
     if (role === "owner" && (await isExternalTarget(tenant, delegateEmail))) {
       const confirm =
         typeof body.confirmExternal === "string"
@@ -168,6 +180,24 @@ export async function DELETE(request: NextRequest) {
     const ruleId = requireRuleId(body.ruleId);
 
     const cal = buildCalendarClient(tenant, calendarId);
+    // Removing an owner takes away control of the calendar, so it needs the
+    // same typed confirmation the page asks for. Read the rule to know: the
+    // role is Google's to say, not the caller's.
+    const rule = await withGoogleRetry(
+      () => cal.acl.get({ calendarId, ruleId }),
+      { retryServerErrors: true }
+    );
+    const role = rule.data.role ?? null;
+    if (role === "owner") {
+      const owner = (rule.data.scope?.value || "").toLowerCase();
+      const confirm =
+        typeof body.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+      if (!owner || !constantTimeStringEqual(confirm, owner)) {
+        throw new ValidationError(
+          `"${owner || ruleId}" is an owner of this calendar. Type that address into the confirm field to remove their access.`
+        );
+      }
+    }
     await withGoogleRetry(() => cal.acl.delete({ calendarId, ruleId }), {
       retryServerErrors: false,
     });
@@ -176,7 +206,7 @@ export async function DELETE(request: NextRequest) {
       action: "calendar_delegation.remove",
       tenantId: tenant?.id ?? null,
       tenantName: tenant?.name ?? null,
-      params: { calendarId, ruleId },
+      params: { calendarId, ruleId, role },
       outcome: "success",
       actor,
     });

@@ -13,6 +13,7 @@ import {
   type ConfigBundle,
 } from "@/lib/app-config-types";
 import type { Tenant } from "@/lib/tenant-types";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Download the app configuration as a portable JSON bundle: single sign-on
@@ -100,7 +101,7 @@ async function respondWithBundle(req: NextRequest, includeSecrets: boolean) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }
 

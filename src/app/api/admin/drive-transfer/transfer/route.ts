@@ -9,6 +9,7 @@ import { requireEmail, ValidationError } from "@/lib/validate";
 import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // The largest legitimate body is a continuation cursor: a queue capped at
 // 20,000 ids (~90 chars each) ≈ 2 MB. 4 MB leaves headroom while still
@@ -167,7 +168,7 @@ export async function POST(request: NextRequest) {
       error: message,
       actor,
     });
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

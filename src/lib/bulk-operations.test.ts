@@ -82,7 +82,9 @@ describe("group_add", () => {
   it("sends a role in the spelling the API wants, however it was typed", () => {
     assert.equal(op.validateRow([G, A, "manager"]), null);
     assert.deepEqual(op.toBody([G, A, "manager"]), { group: G, member: A, role: "MANAGER" });
-    assert.deepEqual(op.toBody([G, A, " Owner "]), { group: G, member: A, role: "OWNER" });
+    // An owner also carries the confirmation the route asks for: the run's
+    // own typed phrase stands for it.
+    assert.deepEqual(op.toBody([G, A, " Owner "]), { group: G, member: A, role: "OWNER", confirm: A });
   });
 
   it("refuses a role that isn't one", () => {

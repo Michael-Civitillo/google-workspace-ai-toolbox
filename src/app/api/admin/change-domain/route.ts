@@ -10,6 +10,7 @@ import {
 import { audit, boundedParams } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Change a user's primary domain.
@@ -92,7 +93,7 @@ export async function POST(request: NextRequest) {
       error: message,
       actor,
     });
-    const status = error instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(error);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

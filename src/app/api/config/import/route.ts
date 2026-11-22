@@ -24,6 +24,7 @@ import {
   CONFIG_BUNDLE_VERSION,
 } from "@/lib/app-config-types";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // Bundles now carry embedded key files (~2.5 KB each) — still small, but give
 // large tenant fleets headroom.
@@ -256,14 +257,13 @@ export async function POST(req: NextRequest) {
         ? tenantsPart.activeTenantId
         : null;
 
-    // ---- Restore SSO settings -------------------------------------------
-    // Validates and writes in one step, and nothing else has been written
-    // yet: a malformed block fails the whole import before any side effect.
-    // Secretless bundles and password-off configurations are handled inside
-    // (kept / softened with a warning) so a restore can't lock the server out.
-    let ssoResult: Awaited<ReturnType<typeof importSsoConfig>>;
+    // ---- Check the SSO settings (written last, below) ----------------------
+    // Nothing has been written yet: a malformed block fails the whole import
+    // before any side effect. Secretless bundles and password-off
+    // configurations are handled inside (kept / softened with a warning) so a
+    // restore can't lock the server out.
     try {
-      ssoResult = await importSsoConfig(appPart.sso ?? null);
+      await importSsoConfig(appPart.sso ?? null, { dryRun: true });
     } catch (e) {
       if (e instanceof ValidationError) {
         return NextResponse.json(
@@ -273,7 +273,41 @@ export async function POST(req: NextRequest) {
       }
       throw e;
     }
-    warnings.push(...ssoResult.warnings);
+
+    // ---- Gemini keys a bundle without secrets left out --------------------
+    // An export without secrets drops every tenant's Gemini key. Restoring it
+    // over the same tenants keeps the keys this server already has, as the
+    // single sign-on secret is kept; anything else is said, not silent.
+    const previous = getTenantStoreSnapshot();
+    if (body.includesSecrets !== true) {
+      const kept: string[] = [];
+      const missing: string[] = [];
+      for (const p of pending) {
+        if (p.geminiApiKey) continue;
+        const same = previous.tenants.find(
+          (t) => t.id === p.id && t.adminEmail.toLowerCase() === p.adminEmail
+        );
+        if (same?.geminiApiKey) {
+          p.geminiApiKey = same.geminiApiKey;
+          kept.push(p.name);
+        } else {
+          missing.push(p.name);
+        }
+      }
+      const names = (list: string[]) =>
+        list.slice(0, 5).map((n) => `"${n}"`).join(", ") +
+        (list.length > 5 ? ` and ${list.length - 5} more` : "");
+      if (kept.length > 0) {
+        notes.push(
+          `Kept the Gemini API key this server already had for ${names(kept)}: the bundle has none.`
+        );
+      }
+      if (missing.length > 0 && (body.includesSecrets === false || kept.length > 0)) {
+        warnings.push(
+          `No Gemini API key for ${names(missing)}: the bundle was exported without secrets. Add the key${missing.length === 1 ? "" : "s"} on the Tenants page to use the AI features there.`
+        );
+      }
+    }
 
     const onboardingCompletedAt =
       typeof appPart.onboardingCompletedAt === "string"
@@ -312,7 +346,25 @@ export async function POST(req: NextRequest) {
     });
 
     // ---- Persist --------------------------------------------------------
+    // The tenant list first, then single sign-on, so a failure in between
+    // never leaves one bundle's sign-in settings beside another's tenants: if
+    // single sign-on can't be written, the tenant list goes back as it was.
     await replaceTenantStore(tenants, activeTenantId);
+    let ssoResult: Awaited<ReturnType<typeof importSsoConfig>>;
+    try {
+      ssoResult = await importSsoConfig(appPart.sso ?? null);
+    } catch (e) {
+      try {
+        await replaceTenantStore(previous.tenants, previous.activeTenantId);
+      } catch (rollbackError) {
+        console.error("[config.import] could not restore the previous tenant list:", rollbackError);
+        throw new Error(
+          `Restoring single sign-on failed (${e instanceof Error ? e.message : String(e)}), and the previous tenant list could not be put back either. The tenant list is the bundle's; single sign-on is unchanged.`
+        );
+      }
+      throw e;
+    }
+    warnings.push(...ssoResult.warnings);
     await updateAppConfig((config) => {
       // Never un-complete onboarding on import: a configured server that
       // restores a pre-wizard bundle shouldn't start prompting again.
@@ -327,7 +379,15 @@ export async function POST(req: NextRequest) {
       actor,
       params: {
         tenantCount: tenants.length,
+        // Which tenants the server now has, bounded: the audit log is the
+        // record of who restored what over whom.
+        tenants: tenants.slice(0, 20).map((t) => ({
+          name: t.name.slice(0, 100),
+          adminEmail: t.adminEmail.slice(0, 320),
+        })),
+        replacedTenantCount: previous.tenants.length,
         ssoConfigured: Boolean(ssoResult.config),
+        ssoIssuer: ssoResult.config?.issuer?.slice(0, 200) ?? null,
         credentialFilesRestored: filesRestored,
         warnings: warnings.length,
       },
@@ -359,6 +419,6 @@ export async function POST(req: NextRequest) {
       outcome: "error",
       error: message,
     });
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }

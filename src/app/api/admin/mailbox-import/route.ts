@@ -10,6 +10,7 @@ import { audit } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
 import { acquireSlot, BusyError } from "@/lib/concurrency";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // Raw messages carry attachments, so the import body is allowed to be large.
 // A single base64url message can be ~72 MB (MAILBOX_MAX_RAW_CHARS), so the cap
@@ -124,12 +125,23 @@ export async function POST(request: NextRequest) {
               insertedIndexes: result.insertedIndexes ?? [],
             }
           : {}),
+        // In the mailbox, but stored without any of their labels.
+        ...(result.insertedWithoutLabels
+          ? { insertedWithoutLabels: result.insertedWithoutLabels.length }
+          : {}),
       },
-      outcome: result.failed === 0 ? "success" : "error",
+      outcome: result.failed === 0 && !result.aborted ? "success" : "error",
       error:
-        result.failed > 0
-          ? `${result.failed} of ${batchSize} message(s) failed to import`
-          : undefined,
+        [
+          result.failed > 0
+            ? `${result.failed} of ${batchSize} message(s) failed to import`
+            : "",
+          result.aborted
+            ? "Stopped before finishing: the messages after the cancel were not imported"
+            : "",
+        ]
+          .filter(Boolean)
+          .join("; ") || undefined,
       actor,
     });
 
@@ -151,7 +163,7 @@ export async function POST(request: NextRequest) {
       error: message,
       actor,
     });
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   } finally {
     release?.();

@@ -11,6 +11,7 @@ import { calendar_v3 } from "googleapis/build/src/apis/calendar/v3";
 import { licensing_v1 } from "googleapis/build/src/apis/licensing/v1";
 import { JWT } from "google-auth-library";
 import { readFileSync, statSync, type Stats } from "fs";
+import { createHash } from "crypto";
 import type { Tenant } from "./tenant-types";
 import {
   isValidEmail,
@@ -57,7 +58,15 @@ const ADMIN_API_TIMEOUT_MS = 30_000;
 // `timeout`, which overrides this floor. (This used to be a single
 // `google.options(...)` on the catalogue object; with deep imports there is no
 // catalogue, so each constructor carries it.)
-const CLIENT_DEFAULTS = { timeout: ADMIN_API_TIMEOUT_MS } as const;
+//
+// `retry: false` turns off the Google client library's own retries, which it
+// applies by default to GET, PUT and DELETE (up to three times on 5xx, 408
+// and 429, twice more on no response). withGoogleRetry is meant to be the
+// only retry layer: with both, one failing call made 24 requests, a stalled
+// connection took about nine minutes to report, and writes the code marks
+// "never retry after a server error" (a primary-email rename, removing a
+// calendar share) were re-sent anyway.
+const CLIENT_DEFAULTS = { timeout: ADMIN_API_TIMEOUT_MS, retry: false } as const;
 
 export function buildGmailClient(tenant: Tenant | null, impersonateEmail: string, scopes: string[]) {
   const auth = buildAuth(tenant, impersonateEmail, scopes);
@@ -196,11 +205,29 @@ function loadCredentials(credFile: string): ServiceAccountCreds {
  * per JWT instance, so reusing the instance avoids a fresh signed-JWT grant
  * against Google's OAuth endpoint on every call/page (~100-250ms each). Keyed by
  * credential file + impersonated subject + scope set, and — crucially — by the
- * file's mtime/size so a key rotation produces a new instance rather than
- * serving a stale (possibly revoked) token for the life of the process.
+ * key itself, so a rotated key produces a new instance rather than serving a
+ * stale (possibly revoked) token for the life of the process. Not by the
+ * file's timestamp and size: a replacement can match both (a copy that keeps
+ * its timestamp, a key of the same length), and the key file is re-read at
+ * least every CREDS_CACHE_TTL_MS anyway.
  */
 const JWT_CACHE_MAX = 100;
 const jwtCache = new Map<string, JWT>();
+const keyFingerprints = new WeakMap<ServiceAccountCreds, string>();
+
+function keyFingerprint(creds: ServiceAccountCreds): string {
+  let fp = keyFingerprints.get(creds);
+  if (!fp) {
+    fp = createHash("sha256")
+      .update(creds.client_email ?? "")
+      .update("\0")
+      .update(creds.private_key ?? "")
+      .digest("hex")
+      .slice(0, 32);
+    keyFingerprints.set(creds, fp);
+  }
+  return fp;
+}
 
 function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
   const credFile =
@@ -214,10 +241,10 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     );
   }
 
-  const stat = statCredentialsFile(credFile);
+  const creds = loadCredentials(credFile);
   const cacheKey = `${credFile}|${subject.toLowerCase()}|${[...scopes]
     .sort()
-    .join(",")}|${stat.mtimeMs}|${stat.size}`;
+    .join(",")}|${keyFingerprint(creds)}`;
   const cached = jwtCache.get(cacheKey);
   if (cached) {
     // Touch for recency: Map iterates in insertion order, so re-inserting on
@@ -229,7 +256,6 @@ function buildAuth(tenant: Tenant | null, subject: string, scopes: string[]) {
     return cached;
   }
 
-  const creds = loadCredentials(credFile);
   const jwt = new JWT({
     email: creds.client_email,
     key: creds.private_key,
@@ -351,7 +377,7 @@ function getDataTransferClient(
  */
 function getDriveClient(tenant: Tenant | null, asUser: string): drive_v3.Drive {
   if (!isValidEmail(asUser)) {
-    throw new Error("asUser must be a valid email address");
+    throw new ValidationError("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_METADATA_READONLY]);
   return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
@@ -367,7 +393,7 @@ function getDriveClientWritable(
   asUser: string
 ): drive_v3.Drive {
   if (!isValidEmail(asUser)) {
-    throw new Error("asUser must be a valid email address");
+    throw new ValidationError("asUser must be a valid email address");
   }
   const auth = buildAuth(tenant, asUser, [SCOPES.DRIVE_FULL]);
   return new drive_v3.Drive({ ...CLIENT_DEFAULTS, auth });
@@ -422,7 +448,7 @@ export async function getUser(
   userEmail: string
 ): Promise<UserInfo> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
   const res = await withGoogleRetry(
@@ -459,7 +485,7 @@ export async function userExists(
   email: string
 ): Promise<boolean> {
   if (!isValidEmail(email)) {
-    throw new Error("email must be a valid email address");
+    throw new ValidationError("email must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
   try {
@@ -719,11 +745,11 @@ export async function findMailboxesDelegatedTo(
   }
 ): Promise<DelegationLookupPage> {
   if (opts.delegateEmails.size === 0) {
-    throw new Error("delegateEmails must name at least one address");
+    throw new ValidationError("delegateEmails must name at least one address");
   }
   for (const d of opts.delegateEmails) {
     if (!isValidEmail(d)) {
-      throw new Error("delegateEmails must be valid email addresses");
+      throw new ValidationError("delegateEmails must be valid email addresses");
     }
   }
   const pageSize = Math.min(
@@ -1501,9 +1527,12 @@ export async function disableAutoForwarding(
   expectedTarget: string
 ): Promise<{ changed: boolean; previousTarget: string | null }> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
+  // Reading the setting needs gmail.settings.basic (Google does not accept
+  // gmail.settings.sharing for the read); changing it needs .sharing.
   const gmail = buildGmailClient(tenant, userEmail, [
+    ...GMAIL_SETTINGS_READ_SCOPES,
     "https://www.googleapis.com/auth/gmail.settings.sharing",
   ]);
   const current = await withGoogleRetry(
@@ -1549,10 +1578,10 @@ export async function deleteForwardingFilter(
   expectedTarget: string
 ): Promise<{ changed: boolean }> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   if (!/^[A-Za-z0-9_-]{1,200}$/.test(filterId)) {
-    throw new Error("filterId is malformed");
+    throw new ValidationError("filterId is malformed");
   }
   const gmail = buildGmailClient(tenant, userEmail, [
     ...GMAIL_SETTINGS_READ_SCOPES,
@@ -1605,10 +1634,10 @@ export async function revokeAppForUser(
   clientId: string
 ): Promise<{ changed: boolean }> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   if (!clientId || clientId.length > 300 || /[\s/?#]/.test(clientId)) {
-    throw new Error("clientId is malformed");
+    throw new ValidationError("clientId is malformed");
   }
   const { client } = getAdminClient(tenant);
   try {
@@ -1767,26 +1796,20 @@ export async function changePrimaryDomain(
   verifiedNewPrimary: string;
 }> {
   if (!isValidEmail(currentEmail)) {
-    throw new Error("currentEmail must be a valid email address");
+    throw new ValidationError("currentEmail must be a valid email address");
   }
   if (!isValidDomain(newDomain)) {
-    throw new Error("newDomain must be a valid domain");
+    throw new ValidationError("newDomain must be a valid domain");
   }
   if (newUsername !== undefined && newUsername !== "" && !isValidUsername(newUsername)) {
-    throw new Error("newUsername contains invalid characters");
+    throw new ValidationError("newUsername contains invalid characters");
   }
 
   const { client, impersonatedAdmin } = getAdminClient(tenant);
 
-  const username = newUsername || currentEmail.split("@")[0];
-  const newEmail = `${username}@${newDomain}`.toLowerCase();
   const currentLower = currentEmail.toLowerCase();
-
-  if (newEmail === currentLower) {
-    throw new Error("New email is the same as the current email");
-  }
   if (currentLower === impersonatedAdmin) {
-    throw new Error(
+    throw new ValidationError(
       "Refusing to change the primary email of the admin account this tool is impersonating — that would break subsequent admin operations. Use the Google Admin Console for this change."
     );
   }
@@ -1796,13 +1819,13 @@ export async function changePrimaryDomain(
     (d) => d.domainName === newDomain.toLowerCase()
   );
   if (!targetDomain) {
-    throw new Error(`Domain "${newDomain}" is not configured in this tenant`);
+    throw new ValidationError(`Domain "${newDomain}" is not configured in this tenant`);
   }
   if (!targetDomain.verified) {
-    throw new Error(`Domain "${newDomain}" is not verified — refusing to change primary email to an unverified domain`);
+    throw new ValidationError(`Domain "${newDomain}" is not verified — refusing to change primary email to an unverified domain`);
   }
   if (targetDomain.isAlias) {
-    throw new Error(
+    throw new ValidationError(
       `Domain "${newDomain}" is a domain alias. Every user already has an address there, but a primary email can only be on a full domain of the tenant.`
     );
   }
@@ -1814,15 +1837,22 @@ export async function changePrimaryDomain(
   try {
     targetInfo = await getUser(tenant, currentEmail);
   } catch (e) {
-    if (isNotFoundError(e)) {
-      throw new Error(`No user found with email "${currentEmail}"`);
-    }
+    if (isNotFoundError(e)) throw new NoSuchAccountError(currentLower);
     throw e;
   }
-  if (targetInfo.primaryEmail.toLowerCase() === impersonatedAdmin) {
-    throw new Error(
+  const primaryLower = targetInfo.primaryEmail.toLowerCase();
+  if (primaryLower === impersonatedAdmin) {
+    throw new ValidationError(
       "Refusing to change the primary email of the admin account this tool is impersonating — that would break subsequent admin operations. Use the Google Admin Console for this change."
     );
+  }
+
+  // Built from the account's own address, not from what was typed: typing one
+  // of the person's aliases must not rename them to the alias's name.
+  const username = newUsername || primaryLower.split("@")[0];
+  const newEmail = `${username}@${newDomain}`.toLowerCase();
+  if (newEmail === primaryLower) {
+    throw new ValidationError("New email is the same as the current email");
   }
 
   // `userKey` resolves aliases, so a plain existence check would also match
@@ -1843,11 +1873,8 @@ export async function changePrimaryDomain(
   } catch (e) {
     if (!isNotFoundError(e)) throw e;
   }
-  if (
-    conflictOwner !== null &&
-    conflictOwner !== targetInfo.primaryEmail.toLowerCase()
-  ) {
-    throw new Error(
+  if (conflictOwner !== null && conflictOwner !== primaryLower) {
+    throw new UserAlreadyExistsError(
       `"${newEmail}" is already in use by another user. Pick a different username or domain.`
     );
   }
@@ -1859,7 +1886,7 @@ export async function changePrimaryDomain(
     () =>
       client.users.update(
         {
-          userKey: currentEmail,
+          userKey: primaryLower,
           requestBody: { primaryEmail: newEmail },
         },
         { timeout: ADMIN_API_TIMEOUT_MS }
@@ -1885,7 +1912,7 @@ export async function changePrimaryDomain(
   );
 
   return {
-    previousEmail: currentLower,
+    previousEmail: primaryLower,
     newEmail,
     verifiedNewPrimary: (after.data.primaryEmail || "").toLowerCase(),
   };
@@ -2097,28 +2124,85 @@ export async function resetUserPassword(
 }
 
 /** Suspend a user. Refuses to suspend the impersonated admin themselves. */
+// The account id of each tenant's impersonated admin, so the guard below can
+// compare accounts rather than addresses without looking the admin up on every
+// call. An account's id never changes; the entry ages out in case the tenant
+// is pointed at another admin under the same address.
+const ADMIN_ID_TTL_MS = 10 * 60_000;
+const ADMIN_ID_CACHE_MAX = 100;
+const adminIdCache = new Map<string, { at: number; id: string }>();
+
+/**
+ * Refuse to act on the account this tool signs in as. Compared by account, not
+ * by text: one of the admin's aliases, or a second address on it, reaches the
+ * same account, and suspending, forwarding or emptying it would lock Open
+ * Admin out of the tenant just the same.
+ *
+ * Also the existence check: an address that reaches no account is refused
+ * with NoSuchAccountError.
+ */
+export async function assertNotImpersonatedAdmin(
+  tenant: Tenant | null,
+  userEmail: string,
+  doing: string
+): Promise<void> {
+  if (!isValidEmail(userEmail)) {
+    throw new ValidationError("userEmail must be a valid email address");
+  }
+  const { client, impersonatedAdmin } = getAdminClient(tenant);
+  const refusal = () =>
+    new ValidationError(
+      `Refusing to ${doing} ${userEmail.toLowerCase()}: it is the admin account Open Admin signs in as (${impersonatedAdmin}), and that would lock Open Admin out of the tenant. Move domain-wide delegation to another admin first.`
+    );
+  if (userEmail.toLowerCase() === impersonatedAdmin) throw refusal();
+
+  const lookup = (userKey: string) =>
+    withGoogleRetry(
+      () =>
+        client.users.get(
+          { userKey, projection: "basic", fields: "id,primaryEmail" },
+          { timeout: ADMIN_API_TIMEOUT_MS }
+        ),
+      { retryServerErrors: true }
+    );
+  let target: admin_directory_v1.Schema$User;
+  try {
+    target = (await lookup(userEmail)).data;
+  } catch (e) {
+    if (isNotFoundError(e)) throw new NoSuchAccountError(userEmail.toLowerCase());
+    throw e;
+  }
+  if ((target.primaryEmail || "").toLowerCase() === impersonatedAdmin) throw refusal();
+
+  // The admin may itself be configured by an alias, so the primary compare
+  // above is not the whole answer: compare the accounts' ids.
+  const key = `${tenant?.id ?? "(environment)"}|${impersonatedAdmin}`;
+  let admin = adminIdCache.get(key);
+  if (!admin || Date.now() - admin.at > ADMIN_ID_TTL_MS) {
+    const id = (await lookup(impersonatedAdmin)).data.id || "";
+    admin = { at: Date.now(), id };
+    if (id) {
+      if (adminIdCache.size >= ADMIN_ID_CACHE_MAX) {
+        const oldest = adminIdCache.keys().next().value;
+        if (oldest !== undefined) adminIdCache.delete(oldest);
+      }
+      adminIdCache.set(key, admin);
+    }
+  }
+  if (admin.id && target.id === admin.id) throw refusal();
+}
+
 export async function suspendUser(
   tenant: Tenant | null,
   userEmail: string
 ): Promise<void> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
-  const { client, impersonatedAdmin } = getAdminClient(tenant);
-  if (userEmail.toLowerCase() === impersonatedAdmin) {
-    throw new Error(
-      "Refusing to suspend the admin this tool is impersonating — would lock Open Admin out."
-    );
-  }
-  // `userKey` accepts aliases and resolves them to the same account, so resolve
-  // the canonical primary email before suspending: an alias of the admin would
-  // otherwise slip past the string compare above and lock Open Admin out.
-  const target = await getUser(tenant, userEmail);
-  if (target.primaryEmail.toLowerCase() === impersonatedAdmin) {
-    throw new Error(
-      "Refusing to suspend the admin this tool is impersonating — would lock Open Admin out."
-    );
-  }
+  const { client } = getAdminClient(tenant);
+  // `userKey` accepts aliases and resolves them to the same account, so this
+  // compares accounts, not the address as typed.
+  await assertNotImpersonatedAdmin(tenant, userEmail, "suspend");
   await withGoogleRetry(
     () =>
       client.users.update(
@@ -2143,7 +2227,7 @@ export async function unsuspendUser(
   userEmail: string
 ): Promise<{ primaryEmail: string; suspended: boolean }> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
   const res = await withGoogleRetry(
@@ -2179,7 +2263,7 @@ export async function signOutAllSessions(
   userEmail: string
 ): Promise<void> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
   await withGoogleRetry(
@@ -2202,7 +2286,7 @@ export async function listOAuthTokens(
   userEmail: string
 ): Promise<Array<{ clientId: string; displayText: string; scopes: string[] }>> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const { client } = getAdminClient(tenant);
   const res = await withGoogleRetry(
@@ -2255,6 +2339,12 @@ export async function revokeAllOAuthTokens(
         );
         revoked++;
       } catch (e) {
+        // Gone already (the person removed the app, or a previous run got
+        // there first): that is what this step is for.
+        if (isNotFoundError(e)) {
+          revoked++;
+          continue;
+        }
         failed++;
         // Keep the reason: "3 tokens failed to revoke" is undiagnosable without it.
         errors.push({
@@ -2313,10 +2403,10 @@ export async function listGroups(
   } = {}
 ): Promise<{ groups: GroupSummary[]; nextPageToken: string | null }> {
   if (opts.userKey && opts.query) {
-    throw new Error("query cannot be combined with userKey");
+    throw new ValidationError("query cannot be combined with userKey");
   }
   if (opts.userKey && !isValidEmail(opts.userKey)) {
-    throw new Error("userKey must be a valid email address");
+    throw new ValidationError("userKey must be a valid email address");
   }
   const { client } = getGroupsClient(tenant);
   const maxResults = Math.min(
@@ -2357,7 +2447,7 @@ export async function listGroupMembers(
   opts: { pageToken?: string; pageSize?: number } = {}
 ): Promise<{ members: GroupMember[]; nextPageToken: string | null }> {
   if (!isValidEmail(groupKey)) {
-    throw new Error("groupKey must be a valid email address");
+    throw new ValidationError("groupKey must be a valid email address");
   }
   const { client } = getGroupsClient(tenant);
   const res = await withGoogleRetry(
@@ -2408,10 +2498,10 @@ export async function addGroupMember(
   opts: { enforceRole?: boolean } = {}
 ): Promise<{ alreadyMember: boolean; previousRole?: string; roleChanged?: boolean }> {
   if (!isValidEmail(groupKey)) {
-    throw new Error("groupKey must be a valid email address");
+    throw new ValidationError("groupKey must be a valid email address");
   }
   if (!isValidEmail(memberEmail)) {
-    throw new Error("memberEmail must be a valid email address");
+    throw new ValidationError("memberEmail must be a valid email address");
   }
   const { client } = getGroupsClient(tenant);
   try {
@@ -2472,10 +2562,10 @@ export async function removeGroupMember(
   memberEmail: string
 ): Promise<{ removed: boolean }> {
   if (!isValidEmail(groupKey)) {
-    throw new Error("groupKey must be a valid email address");
+    throw new ValidationError("groupKey must be a valid email address");
   }
   if (!isValidEmail(memberEmail)) {
-    throw new Error("memberEmail must be a valid email address");
+    throw new ValidationError("memberEmail must be a valid email address");
   }
   const { client } = getGroupsClient(tenant);
   try {
@@ -2534,7 +2624,7 @@ export async function removeUserFromAllGroups(
   truncated: boolean;
 }> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
 
   // Enumerate every membership up front. Bounded so a pathological tenant
@@ -2633,10 +2723,12 @@ export async function listActivityEvents(
     startTime: string;
     pageToken?: string;
     maxResults?: number;
+    /** The route's `request.signal`: stop once the caller is gone. */
+    signal?: AbortSignal;
   }
 ): Promise<{ events: ActivityEvent[]; nextPageToken: string | null }> {
   if (opts.userKey && !isValidEmail(opts.userKey)) {
-    throw new Error("userKey must be a valid email address");
+    throw new ValidationError("userKey must be a valid email address");
   }
   const { client } = getReportsClient(tenant);
   const res = await withGoogleRetry(
@@ -2651,10 +2743,15 @@ export async function listActivityEvents(
             Math.max(1, opts.maxResults ?? ACTIVITY_MAX_RESULTS)
           ),
           pageToken: opts.pageToken,
+          // Only what is read below: a full activity record carries etags,
+          // kinds, unique qualifiers and owner details for every item, which
+          // on a 1,000-item page is most of the response.
+          fields:
+            "nextPageToken, items(id(time), actor(email, callerType), ipAddress, events(type, name, parameters(name, value, boolValue, intValue, multiValue)))",
         },
-        { timeout: ADMIN_API_TIMEOUT_MS }
+        { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
       ),
-    { retryServerErrors: true }
+    { retryServerErrors: true, signal: opts.signal }
   );
 
   const events: ActivityEvent[] = [];
@@ -2750,10 +2847,10 @@ export async function transferDrive(
   toUser: string
 ): Promise<{ transferId: string }> {
   if (!isValidEmail(fromUser) || !isValidEmail(toUser)) {
-    throw new Error("fromUser and toUser must be valid email addresses");
+    throw new ValidationError("fromUser and toUser must be valid email addresses");
   }
   if (fromUser.toLowerCase() === toUser.toLowerCase()) {
-    throw new Error("fromUser and toUser must be different");
+    throw new ValidationError("fromUser and toUser must be different");
   }
 
   // Look up the user IDs Google requires for the transfer call.
@@ -2780,6 +2877,13 @@ export async function transferDrive(
   const toId = toU.data.id;
   if (!fromId || !toId) {
     throw new Error("Could not resolve user IDs for Drive transfer");
+  }
+  // Two addresses of one account (an alias and its primary) pass the text
+  // compare above.
+  if (fromId === toId) {
+    throw new ValidationError(
+      `${fromUser} and ${toUser} are the same account — pick someone else to receive the files`
+    );
   }
 
   const transfer = getDataTransferClient(tenant);
@@ -2856,6 +2960,59 @@ export interface SharingAuditResult {
    */
   nextPageToken: string | null;
   files: ExternalSharedFile[];
+  /**
+   * Files whose sharing could not be read in full (the permission list
+   * failed after retries). They are not reported as clean: the caller shows
+   * them as not checked. At most UNREADABLE_LIST_CAP are listed; the count is
+   * exact.
+   */
+  unreadable: UnreadableFile[];
+  unreadableCount: number;
+  /**
+   * Permissions with no address or domain to judge by (Drive sometimes omits
+   * them, for example for a deleted account). Not reported as outside, but
+   * counted so the result doesn't claim they were checked.
+   */
+  unidentifiedPermissions: number;
+}
+
+export interface UnreadableFile {
+  id: string;
+  name: string;
+  error: string;
+}
+
+const UNREADABLE_LIST_CAP = 50;
+
+/** Collects the files a scan couldn't read, keeping a bounded list. */
+function unreadableTracker() {
+  const list: UnreadableFile[] = [];
+  let count = 0;
+  return {
+    add(id: string | null | undefined, name: string | null | undefined, e: unknown) {
+      count++;
+      if (list.length < UNREADABLE_LIST_CAP) {
+        list.push({
+          id: id || "",
+          name: name || "(untitled)",
+          error: (e instanceof Error ? e.message : String(e)).slice(0, 200),
+        });
+      }
+    },
+    get list() {
+      return list;
+    },
+    get count() {
+      return count;
+    },
+  };
+}
+
+/** A user, group or domain permission with nothing to classify it by. */
+function isUnidentifiedPermission(p: drive_v3.Schema$Permission): boolean {
+  if (p.type === "user" || p.type === "group") return !p.emailAddress;
+  if (p.type === "domain") return !p.domain;
+  return false;
 }
 
 const SHARING_AUDIT_FILE_CAP = 1000;
@@ -2878,10 +3035,14 @@ const SHARING_AUDIT_FILE_CAP = 1000;
 export async function listExternallySharedFiles(
   tenant: Tenant | null,
   userEmail: string,
-  startPageToken?: string
+  startPageToken?: string,
+  opts: {
+    /** The route's `request.signal`: stop scanning once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<SharingAuditResult> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
 
   const verifiedDomains = new Set(
@@ -2928,9 +3089,9 @@ export async function listExternallySharedFiles(
               pageToken: permPageToken,
               supportsAllDrives: true,
             },
-            { timeout: ADMIN_API_TIMEOUT_MS }
+            { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
           ),
-        { retryServerErrors: true }
+        { retryServerErrors: true, signal: opts.signal }
       );
       all.push(...(r.data.permissions || []));
       permPageToken = r.data.nextPageToken ?? undefined;
@@ -2946,6 +3107,8 @@ export async function listExternallySharedFiles(
   const SHARING_AUDIT_MAX_PAGES = 50;
   let pagesFetched = 0;
 
+  const unreadable = unreadableTracker();
+  let unidentified = 0;
   while (scanned < SHARING_AUDIT_FILE_CAP && pagesFetched < SHARING_AUDIT_MAX_PAGES) {
     pagesFetched++;
     const remaining = SHARING_AUDIT_FILE_CAP - scanned;
@@ -2968,9 +3131,9 @@ export async function listExternallySharedFiles(
             includeItemsFromAllDrives: true,
             corpora: "user",
           },
-          { timeout: ADMIN_API_TIMEOUT_MS }
+          { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
         ),
-      { retryServerErrors: true }
+      { retryServerErrors: true, signal: opts.signal }
     );
 
     const files = res.data.files || [];
@@ -2978,15 +3141,20 @@ export async function listExternallySharedFiles(
       scanned++;
       let perms = f.permissions || [];
       if (perms.length >= INLINE_PERMISSIONS_CAP && f.id) {
+        if (opts.signal?.aborted) throw new RequestAbortedError();
         try {
           perms = await listAllPermissions(f.id);
-        } catch {
-          // Fall back to the (possibly truncated) inline set rather than
-          // failing the whole scan for one over-shared file.
+        } catch (e) {
+          if (isAbortError(e)) throw e;
+          // Keep what the inline list shows, but don't let the file pass as
+          // checked: its list was cut off at Drive's inline cap, and the
+          // outside grants may be past it.
+          unreadable.add(f.id, f.name, e);
         }
       }
       const externals: ExternalSharedFile["external"] = [];
       for (const p of perms) {
+        if (isUnidentifiedPermission(p)) unidentified++;
         const flag = classifyPermission(p, verifiedDomains);
         if (flag) externals.push(flag);
       }
@@ -3013,6 +3181,9 @@ export async function listExternallySharedFiles(
     truncated: !!pageToken,
     nextPageToken: pageToken ?? null,
     files: matches,
+    unreadable: unreadable.list,
+    unreadableCount: unreadable.count,
+    unidentifiedPermissions: unidentified,
   };
 }
 
@@ -3205,22 +3376,22 @@ export async function listExternallySharedDriveFiles(
   }
 ): Promise<SharedDriveFilesResult> {
   if (!SHARED_DRIVE_ID_RE.test(opts.driveId)) {
-    throw new Error("driveId is malformed");
+    throw new ValidationError("driveId is malformed");
   }
   const verifiedDomains = await internalDomainsOrThrow(tenant, "scan a shared drive");
   const asUsers = [...new Set(opts.asUsers.map((u) => u.trim().toLowerCase()))].filter(Boolean);
   if (asUsers.length === 0) {
-    throw new Error("No internal member to read this shared drive as");
+    throw new ValidationError("No internal member to read this shared drive as");
   }
   for (const user of asUsers) {
-    if (!isValidEmail(user)) throw new Error("asUsers must be valid email addresses");
+    if (!isValidEmail(user)) throw new ValidationError("asUsers must be valid email addresses");
     // Never impersonate someone outside the organisation, whatever a caller sends.
     if (!verifiedDomains.has(emailDomain(user))) {
-      throw new Error(`${user} is not in one of this tenant's domains`);
+      throw new ValidationError(`${user} is not in one of this tenant's domains`);
     }
   }
   if (opts.pageToken && asUsers.length !== 1) {
-    throw new Error("A continued scan must name the one user it started as");
+    throw new ValidationError("A continued scan must name the one user it started as");
   }
 
   const call = { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal };
@@ -3270,6 +3441,8 @@ export async function listExternallySharedDriveFiles(
   }
 
   const matches: ExternalSharedFile[] = [];
+  const unreadable = unreadableTracker();
+  let unidentified = 0;
   let scanned = 0;
   let pagesFetched = 1;
   let page: { data: drive_v3.Schema$FileList } = firstPage;
@@ -3304,6 +3477,7 @@ export async function listExternallySharedDriveFiles(
         const details = p.permissionDetails || [];
         const ownGrant = details.length === 0 || details.some((d) => d.inherited !== true);
         if (!ownGrant) continue;
+        if (isUnidentifiedPermission(p)) unidentified++;
         const external = classifyPermission(p, verifiedDomains);
         if (external) out.push(external);
       }
@@ -3326,7 +3500,9 @@ export async function listExternallySharedDriveFiles(
           externals = await ownExternalPermissions(f.id as string);
         } catch (e) {
           if (isAbortError(e)) throw e;
-          // One unreadable file must not hide the rest of the drive.
+          // One unreadable file must not hide the rest of the drive, and must
+          // not count as checked either: it is reported as not read.
+          unreadable.add(f.id, f.name, e);
           continue;
         }
         if (externals.length > 0) {
@@ -3361,6 +3537,9 @@ export async function listExternallySharedDriveFiles(
     truncated: !!pageToken,
     nextPageToken: pageToken ?? null,
     files: matches,
+    unreadable: unreadable.list,
+    unreadableCount: unreadable.count,
+    unidentifiedPermissions: unidentified,
   };
 }
 
@@ -3428,16 +3607,20 @@ interface FolderNode {
 export async function resolveFilePaths(
   tenant: Tenant | null,
   userEmail: string,
-  fileIds: string[]
+  fileIds: string[],
+  opts: {
+    /** The route's `request.signal`: stop climbing once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<Record<string, string>> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   if (!Array.isArray(fileIds) || fileIds.length === 0) {
     return {};
   }
   if (fileIds.length > PATH_RESOLVE_FILE_CAP) {
-    throw new Error(
+    throw new ValidationError(
       `Too many files in one resolve batch — cap is ${PATH_RESOLVE_FILE_CAP}`
     );
   }
@@ -3453,6 +3636,7 @@ export async function resolveFilePaths(
     const cached = folderCache.get(id);
     if (cached !== undefined) return cached;
     const p = (async (): Promise<FolderNode | null> => {
+      if (opts.signal?.aborted) throw new RequestAbortedError();
       try {
         const meta = await withGoogleRetry(
           () =>
@@ -3462,16 +3646,17 @@ export async function resolveFilePaths(
                 fields: "id, name, parents, driveId",
                 supportsAllDrives: true,
               },
-              { timeout: ADMIN_API_TIMEOUT_MS }
+              { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
             ),
-          { retryServerErrors: true }
+          { retryServerErrors: true, signal: opts.signal }
         );
         return {
           name: meta.data.name || "(untitled)",
           parents: meta.data.parents || [],
           driveId: meta.data.driveId ?? undefined,
         };
-      } catch {
+      } catch (e) {
+        if (isAbortError(e)) throw e;
         return null;
       }
     })();
@@ -3485,11 +3670,16 @@ export async function resolveFilePaths(
     const p = (async (): Promise<string> => {
       try {
         const d = await withGoogleRetry(
-          () => drive.drives.get({ driveId }, { timeout: ADMIN_API_TIMEOUT_MS }),
-          { retryServerErrors: true }
+          () =>
+            drive.drives.get(
+              { driveId },
+              { timeout: ADMIN_API_TIMEOUT_MS, signal: opts.signal }
+            ),
+          { retryServerErrors: true, signal: opts.signal }
         );
         return `Shared Drive: ${d.data.name || driveId}`;
-      } catch {
+      } catch (e) {
+        if (isAbortError(e)) throw e;
         return `Shared Drive: ${driveId}`;
       }
     })();
@@ -3556,6 +3746,7 @@ export async function resolveFilePaths(
   let cursor = 0;
   const worker = async () => {
     while (cursor < fileIds.length) {
+      if (opts.signal?.aborted) throw new RequestAbortedError();
       const idx = cursor++;
       await resolveOne(fileIds[idx]);
     }
@@ -3634,6 +3825,10 @@ export function isAlreadyExistsError(e: unknown): boolean {
   };
   const status = err.code ?? err.status ?? err.response?.status;
   if (status === 409) return true;
+  // Some Google APIs report a duplicate as a plain 400. Only there is the
+  // wording trusted: a server error or a refusal that happens to mention
+  // "already exists" must not be taken for "it's done".
+  if (status !== 400) return false;
   const msg = (
     err.response?.data?.error?.message ??
     err.message ??
@@ -3698,6 +3893,11 @@ export interface RevokeFileOutcome {
   permissionsSeen?: number;
   /** Of permissionsSeen, how many were classified as external and matched the category filter. */
   permissionsTargeted?: number;
+  /**
+   * Cancelled part-way through this file: some of its outside permissions
+   * were never tried, so it may still be shared.
+   */
+  stoppedEarly?: true;
 }
 
 export interface RevokeBatchResult {
@@ -3749,13 +3949,13 @@ export async function revokeExternalPermissions(
   options: RevokeOptions = {}
 ): Promise<RevokeBatchResult> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   if (!Array.isArray(fileIds) || fileIds.length === 0) {
-    throw new Error("fileIds must be a non-empty array");
+    throw new ValidationError("fileIds must be a non-empty array");
   }
   if (fileIds.length > REVOKE_FILE_CAP) {
-    throw new Error(
+    throw new ValidationError(
       `Too many files in one revoke batch — cap is ${REVOKE_FILE_CAP}`
     );
   }
@@ -3763,7 +3963,7 @@ export async function revokeExternalPermissions(
     // Refuse silent no-op: an empty allowlist would filter every external
     // permission to "skip" and audit as success. Callers that want the
     // historical strip-all behavior should omit `categories` entirely.
-    throw new Error("categories must be a non-empty array of permission types");
+    throw new ValidationError("categories must be a non-empty array of permission types");
   }
 
   const allowedCategories = options.categories
@@ -3787,7 +3987,7 @@ export async function revokeExternalPermissions(
     );
   }
   if (!verifiedDomains.has(emailDomain(userEmail))) {
-    throw new Error(
+    throw new ValidationError(
       `Owner's domain (${emailDomain(
         userEmail
       )}) is not a verified domain of this tenant — refusing to revoke sharing to avoid misclassifying internal collaborators.`
@@ -3844,11 +4044,15 @@ export async function revokeExternalPermissions(
     )
   );
 
+  const done = results.filter((r): r is RevokeFileOutcome => r !== undefined);
+  // A cancellation that landed inside a file, after the last one was picked
+  // up, still left work undone.
+  if (done.some((r) => r.stoppedEarly)) aborted = true;
   return {
     user: userEmail.toLowerCase(),
     // Drop holes left by blank ids (skipped above), and by files a cancellation
     // never reached, so the shape is unchanged.
-    results: results.filter((r): r is RevokeFileOutcome => r !== undefined),
+    results: done,
     ...(aborted ? { aborted: true as const } : {}),
   };
 }
@@ -3932,7 +4136,10 @@ async function revokeForOneFile(
     // cancelled operator's request stops rather than spending more Drive quota.
     // The delete in flight is left alone — it is a write, so dropping it would
     // leave the permission's fate unknown.
-    if (signal?.aborted) break;
+    if (signal?.aborted) {
+      outcome.stoppedEarly = true;
+      break;
+    }
     const target =
       p.type === "anyone"
         ? "anyone"
@@ -3991,13 +4198,17 @@ async function revokeForOneFile(
           outcome.removedAsAdmin = (outcome.removedAsAdmin ?? 0) + 1;
           continue;
         } catch (e2) {
-          if (isNotFoundError(e2)) continue;
+          // Not "already gone": the first attempt has just seen it. A "not
+          // found" here most often means the admin account can't see the
+          // file at all, so the sharing is still in place.
           outcome.errors.push({
             permissionId: p.id,
             target,
-            message: `Inherited permission — domain-admin retry also failed: ${
-              e2 instanceof Error ? e2.message : String(e2)
-            }`,
+            message: isNotFoundError(e2)
+              ? "Inherited permission: the admin account could not reach this file to remove it, so it is probably still shared. Remove the sharing from the folder or shared drive it comes from."
+              : `Inherited permission — domain-admin retry also failed: ${
+                  e2 instanceof Error ? e2.message : String(e2)
+                }`,
           });
           continue;
         }
@@ -4027,7 +4238,7 @@ const DRIVE_ID_RE = /^[A-Za-z0-9_-]{8,256}$/;
 function assertDriveFolderId(id: string): void {
   if (id === "root") return;
   if (!DRIVE_ID_RE.test(id)) {
-    throw new Error(`Folder id ${JSON.stringify(id)} looks invalid`);
+    throw new ValidationError(`Folder id ${JSON.stringify(id)} looks invalid`);
   }
 }
 
@@ -4064,7 +4275,7 @@ export async function listDriveFolders(
   pageToken?: string
 ): Promise<DriveFolderListing> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const effectiveParent = parentId ?? "root";
   assertDriveFolderId(effectiveParent);
@@ -4196,10 +4407,10 @@ export function buildInitialTransferCursor(
   folderIds: string[]
 ): DriveTransferCursor {
   if (folderIds.length === 0) {
-    throw new Error("folderIds must be a non-empty array");
+    throw new ValidationError("folderIds must be a non-empty array");
   }
   if (folderIds.length > TRANSFER_FOLDER_SELECTION_CAP) {
-    throw new Error(
+    throw new ValidationError(
       `Too many folders selected — cap is ${TRANSFER_FOLDER_SELECTION_CAP}`
     );
   }
@@ -4209,7 +4420,7 @@ export function buildInitialTransferCursor(
     const id = String(raw || "").trim();
     assertDriveFolderId(id);
     if (id === "root") {
-      throw new Error(
+      throw new ValidationError(
         "Cannot transfer ownership of My Drive root — pick specific folders inside it"
       );
     }
@@ -4226,25 +4437,25 @@ export function buildInitialTransferCursor(
  */
 function sanitizeCursor(cursor: unknown): DriveTransferCursor {
   if (typeof cursor !== "object" || cursor === null) {
-    throw new Error("cursor must be an object");
+    throw new ValidationError("cursor must be an object");
   }
   const c = cursor as { queue?: unknown; current?: unknown; selected?: unknown };
   if (!Array.isArray(c.queue)) {
-    throw new Error("cursor.queue must be an array");
+    throw new ValidationError("cursor.queue must be an array");
   }
   if (c.queue.length > TRANSFER_QUEUE_HARD_CAP) {
-    throw new Error(
+    throw new ValidationError(
       `cursor.queue exceeds hard cap of ${TRANSFER_QUEUE_HARD_CAP} entries`
     );
   }
   const queue: string[] = [];
   for (const q of c.queue) {
-    if (typeof q !== "string") throw new Error("cursor.queue entries must be strings");
+    if (typeof q !== "string") throw new ValidationError("cursor.queue entries must be strings");
     assertDriveFolderId(q);
     // buildInitialTransferCursor refuses "root"; the continuation path must too,
     // or a crafted cursor could walk and transfer the entire My Drive.
     if (q === "root") {
-      throw new Error("cursor may not reference My Drive root");
+      throw new ValidationError("cursor may not reference My Drive root");
     }
     queue.push(q);
   }
@@ -4256,16 +4467,16 @@ function sanitizeCursor(cursor: unknown): DriveTransferCursor {
       selfTransferred?: unknown;
     };
     if (typeof cur.folderId !== "string") {
-      throw new Error("cursor.current.folderId must be a string");
+      throw new ValidationError("cursor.current.folderId must be a string");
     }
     assertDriveFolderId(cur.folderId);
     if (cur.folderId === "root") {
-      throw new Error("cursor may not reference My Drive root");
+      throw new ValidationError("cursor may not reference My Drive root");
     }
     let pageToken: string | null = null;
     if (cur.pageToken !== null && cur.pageToken !== undefined) {
       if (typeof cur.pageToken !== "string" || cur.pageToken.length > 4096) {
-        throw new Error("cursor.current.pageToken is malformed");
+        throw new ValidationError("cursor.current.pageToken is malformed");
       }
       pageToken = cur.pageToken;
     }
@@ -4278,21 +4489,21 @@ function sanitizeCursor(cursor: unknown): DriveTransferCursor {
   let selected: string[] | undefined;
   if (c.selected !== undefined && c.selected !== null) {
     if (!Array.isArray(c.selected)) {
-      throw new Error("cursor.selected must be an array");
+      throw new ValidationError("cursor.selected must be an array");
     }
     if (c.selected.length > TRANSFER_FOLDER_SELECTION_CAP) {
-      throw new Error(
+      throw new ValidationError(
         `cursor.selected exceeds the selection cap of ${TRANSFER_FOLDER_SELECTION_CAP}`
       );
     }
     selected = [];
     for (const s of c.selected) {
       if (typeof s !== "string") {
-        throw new Error("cursor.selected entries must be strings");
+        throw new ValidationError("cursor.selected entries must be strings");
       }
       assertDriveFolderId(s);
       if (s === "root") {
-        throw new Error("cursor may not reference My Drive root");
+        throw new ValidationError("cursor may not reference My Drive root");
       }
       selected.push(s);
     }
@@ -4328,10 +4539,10 @@ export async function transferDriveFoldersOwnership(
   } = {}
 ): Promise<DriveTransferProgress> {
   if (!isValidEmail(fromUser) || !isValidEmail(toUser)) {
-    throw new Error("fromUser and toUser must be valid email addresses");
+    throw new ValidationError("fromUser and toUser must be valid email addresses");
   }
   if (fromUser.toLowerCase() === toUser.toLowerCase()) {
-    throw new Error("fromUser and toUser must be different");
+    throw new ValidationError("fromUser and toUser must be different");
   }
 
   const verified = new Set(
@@ -4342,13 +4553,29 @@ export async function transferDriveFoldersOwnership(
   const fromDom = emailDomain(fromUser);
   const toDom = emailDomain(toUser);
   if (!verified.has(fromDom)) {
-    throw new Error(
+    throw new ValidationError(
       `Source user's domain (${fromDom}) is not a verified domain of this tenant — Drive ownership transfers must stay inside the tenant`
     );
   }
   if (!verified.has(toDom)) {
-    throw new Error(
+    throw new ValidationError(
       `Target user's domain (${toDom}) is not a verified domain of this tenant — Drive ownership transfers must stay inside the tenant`
+    );
+  }
+
+  // Compare owners against the target's real primary address: Drive reports
+  // owners by primary, so an alias typed into the form would never match and
+  // every file the target already owns would be sent another transfer.
+  let toPrimary: string;
+  try {
+    toPrimary = (await getUser(tenant, toUser)).primaryEmail.toLowerCase();
+  } catch (e) {
+    if (isNotFoundError(e)) throw new NoSuchAccountError(toUser.toLowerCase());
+    throw e;
+  }
+  if (!toPrimary || !verified.has(emailDomain(toPrimary))) {
+    throw new ValidationError(
+      `Target user's primary address (${toPrimary || "none"}) is not in a verified domain of this tenant — Drive ownership transfers must stay inside the tenant`
     );
   }
 
@@ -4379,7 +4606,13 @@ export async function transferDriveFoldersOwnership(
   };
 
   let budget = TRANSFER_BATCH_BUDGET;
-  const toUserLower = toUser.toLowerCase();
+  const toUserLower = toPrimary;
+  // The operator's own selection. Every other folder this walk reaches was
+  // first met as a child of one of these, and was transferred then; only a
+  // selected folder still needs its own transfer when its walk begins. A
+  // cursor from before `selected` existed transfers every folder it walks,
+  // as it always did.
+  const selectedSet = local.selected ? new Set(local.selected) : null;
 
   // The item budget alone can't bound this loop: Drive may return sparse or
   // empty list pages while still supplying a nextPageToken, and an empty page
@@ -4403,7 +4636,8 @@ export async function transferDriveFoldersOwnership(
       local.current = {
         folderId: next,
         pageToken: null,
-        selfTransferred: false,
+        // A folder found while walking was handled as a child of its parent.
+        selfTransferred: selectedSet ? !selectedSet.has(next) : false,
       };
     }
 
@@ -4441,8 +4675,10 @@ export async function transferDriveFoldersOwnership(
               // from the listing instead of spending a permissions.list plus a
               // guaranteed-failing ownership write on every item the source
               // user doesn't own.
+              // permissions come with the listing so most items need no
+              // separate permissions.list before their transfer.
               fields:
-                "nextPageToken, files(id, name, mimeType, ownedByMe, owners(emailAddress))",
+                "nextPageToken, files(id, name, mimeType, ownedByMe, owners(emailAddress), permissions(id, type, role, emailAddress))",
               pageSize,
               pageToken: local.current!.pageToken ?? undefined,
               corpora: "user",
@@ -4495,6 +4731,9 @@ export async function transferDriveFoldersOwnership(
         const child = children[childCursor++];
         const childId = child.id;
         if (!childId) continue;
+        // A selected folder inside another selected folder gets its own walk,
+        // which transfers it: handling it here as well would count it twice.
+        if (selectedSet?.has(childId)) continue;
         let result: TransferOneOutcome;
         if (child.ownedByMe === false) {
           // Not the source user's item — no transfer is possible, so classify
@@ -4508,7 +4747,7 @@ export async function transferDriveFoldersOwnership(
             ? { kind: "alreadyOwned" }
             : { kind: "notOwned", reason: "Not owned by the source user" };
         } else {
-          result = await transferOneItem(drive, childId, toUserLower);
+          result = await transferOneItem(drive, childId, toUserLower, child.permissions);
         }
         applyTransferResult(out, childId, child.name ?? null, result);
         if (child.mimeType === DRIVE_FOLDER_MIME) {
@@ -4577,54 +4816,71 @@ type TransferOneOutcome =
  */
 function isNotOwnerError(message: string): boolean {
   const m = message.toLowerCase();
+  // Not "different domain": that is Drive refusing the transfer itself, which
+  // the operator needs to see as a failure, not a harmless skip.
   return (
     m.includes("only the current owner") ||
     m.includes("not the current owner") ||
     m.includes("owner only") ||
-    m.includes("consumer accounts") ||
-    m.includes("different domain")
+    m.includes("consumer accounts")
   );
 }
+
+/** Drive cuts the permissions it returns with a file listing off at about this many. */
+const LISTED_PERMISSIONS_CAP = 100;
 
 async function transferOneItem(
   drive: drive_v3.Drive,
   fileId: string,
-  toUserLower: string
+  toUserLower: string,
+  /** The permissions that came with the file listing, if any. */
+  listed?: drive_v3.Schema$Permission[]
 ): Promise<TransferOneOutcome> {
   const perms: drive_v3.Schema$Permission[] = [];
-  try {
-    // Paginate: a file with >100 permissions could hide the target user's
-    // existing grant on a later page, which would make us take the create path
-    // for an already-owned file and misreport it. Include nextPageToken in the
-    // field mask (a single-page fetch can't paginate without it).
-    let pageToken: string | undefined;
-    do {
-      const res = await withGoogleRetry(
-        () =>
-          drive.permissions.list(
-            {
-              fileId,
-              fields:
-                "nextPageToken, permissions(id, type, role, emailAddress)",
-              pageSize: 100,
-              pageToken,
-              supportsAllDrives: true,
-            },
-            { timeout: ADMIN_API_TIMEOUT_MS }
-          ),
-        { retryServerErrors: true }
-      );
-      perms.push(...(res.data.permissions || []));
-      pageToken = res.data.nextPageToken ?? undefined;
-    } while (pageToken);
-  } catch (e) {
-    if (isNotFoundError(e)) {
-      return { kind: "notOwned", reason: "File no longer accessible" };
+  // A short list from the listing is complete; a full one may be cut off and
+  // hide the target's existing grant, so it is read again in full.
+  if (
+    listed &&
+    listed.length > 0 &&
+    listed.length < LISTED_PERMISSIONS_CAP &&
+    listed.every((p) => p.id)
+  ) {
+    perms.push(...listed);
+  } else {
+    try {
+      // Paginate: a file with >100 permissions could hide the target user's
+      // existing grant on a later page, which would make us take the create path
+      // for an already-owned file and misreport it. Include nextPageToken in the
+      // field mask (a single-page fetch can't paginate without it).
+      let pageToken: string | undefined;
+      do {
+        const res = await withGoogleRetry(
+          () =>
+            drive.permissions.list(
+              {
+                fileId,
+                fields:
+                  "nextPageToken, permissions(id, type, role, emailAddress)",
+                pageSize: 100,
+                pageToken,
+                supportsAllDrives: true,
+              },
+              { timeout: ADMIN_API_TIMEOUT_MS }
+            ),
+          { retryServerErrors: true }
+        );
+        perms.push(...(res.data.permissions || []));
+        pageToken = res.data.nextPageToken ?? undefined;
+      } while (pageToken);
+    } catch (e) {
+      if (isNotFoundError(e)) {
+        return { kind: "notOwned", reason: "File no longer accessible" };
+      }
+      return {
+        kind: "error",
+        message: e instanceof Error ? e.message : "Failed to list permissions",
+      };
     }
-    return {
-      kind: "error",
-      message: e instanceof Error ? e.message : "Failed to list permissions",
-    };
   }
 
   const targetPerm = perms.find(
@@ -4987,11 +5243,7 @@ const EXHAUSTED_QUOTA_REASONS = new Set([
  * writes like message inserts, where a 5xx might have committed and a blind
  * retry would duplicate.
  */
-function isRetriableGoogleError(
-  e: unknown,
-  opts: { retryServerErrors: boolean }
-): boolean {
-  const status = httpStatusOf(e);
+function quotaState(e: unknown): { rateLimited: boolean; exhausted: boolean; msg: string } {
   const msg =
     typeof e === "object" && e && "message" in e
       ? String((e as { message?: unknown }).message ?? "").toLowerCase()
@@ -5001,13 +5253,31 @@ function isRetriableGoogleError(
     reasons.some((r) => EXHAUSTED_QUOTA_REASONS.has(r)) ||
     quotaLimits.some((q) => q.includes("perday")) ||
     /per day|daily limit|daily quota|storage quota/.test(msg);
-  if (exhausted) return false;
   const rateLimited =
     reasons.some((r) => RATE_LIMIT_REASONS.has(r)) ||
     msg.includes("rate limit") ||
     msg.includes("ratelimit") ||
     msg.includes("user rate") ||
     msg.includes("quota");
+  return { rateLimited, exhausted, msg };
+}
+
+/** Google said "slow down" or "out of quota", which says nothing about the request itself. */
+function isQuotaRefusal(e: unknown): boolean {
+  const status = httpStatusOf(e);
+  if (status === 429) return true;
+  if (status !== 403) return false;
+  const { rateLimited, exhausted } = quotaState(e);
+  return rateLimited || exhausted;
+}
+
+function isRetriableGoogleError(
+  e: unknown,
+  opts: { retryServerErrors: boolean }
+): boolean {
+  const status = httpStatusOf(e);
+  const { rateLimited, exhausted, msg } = quotaState(e);
+  if (exhausted) return false;
   if (status === 429) return true;
   if (status === 403 && rateLimited) return true;
   if (opts.retryServerErrors) {
@@ -5101,7 +5371,7 @@ export async function listGmailLabels(
   userEmail: string
 ): Promise<GmailLabelInfo[]> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_READONLY_SCOPES);
   const res = await withGoogleRetry(
@@ -5144,7 +5414,7 @@ export async function exportMailboxPage(
   } = {}
 ): Promise<MailboxExportPage> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   const pageSize = Math.min(
     MAILBOX_EXPORT_MAX_PAGE,
@@ -5294,6 +5564,37 @@ export async function exportMailboxPage(
   return page;
 }
 
+export interface ImportLabelResolution {
+  /** `{ sourceLabelId: targetLabelId }`, applied to each message before insert. */
+  map: Record<string, string>;
+  /**
+   * Labels that could not be matched or created. Messages that carry them
+   * import without them; the caller says which. At most 200 are listed; the
+   * count is exact.
+   */
+  unmapped: Array<{ id: string; name: string; reason: string }>;
+  unmappedCount: number;
+}
+
+function unmappedLabelTracker() {
+  const list: ImportLabelResolution["unmapped"] = [];
+  let count = 0;
+  return {
+    add(id: string, name: string, reason: string) {
+      count++;
+      if (list.length < 200) {
+        list.push({ id, name: name.slice(0, 225), reason: reason.slice(0, 300) });
+      }
+    },
+    get list() {
+      return list;
+    },
+    get count() {
+      return count;
+    },
+  };
+}
+
 /**
  * Resolve the source mailbox's labels to label IDs in the target mailbox,
  * creating any missing user labels by name.
@@ -5307,13 +5608,17 @@ export async function exportMailboxPage(
 export async function resolveImportLabels(
   tenant: Tenant | null,
   userEmail: string,
-  sourceLabels: GmailLabelInfo[]
-): Promise<Record<string, string>> {
+  sourceLabels: GmailLabelInfo[],
+  opts: {
+    /** The route's `request.signal`: stop creating labels once the caller is gone. */
+    signal?: AbortSignal;
+  } = {}
+): Promise<ImportLabelResolution> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   if (!Array.isArray(sourceLabels)) {
-    throw new Error("sourceLabels must be an array");
+    throw new ValidationError("sourceLabels must be an array");
   }
 
   const gmail = buildGmailClient(tenant, userEmail, GMAIL_LABELS_SCOPES);
@@ -5329,9 +5634,9 @@ export async function resolveImportLabels(
       () =>
         gmail.users.labels.list(
           { userId: "me" },
-          { timeout: MAILBOX_API_TIMEOUT_MS }
+          { timeout: MAILBOX_API_TIMEOUT_MS, signal: opts.signal }
         ),
-      { retryServerErrors: true }
+      { retryServerErrors: true, signal: opts.signal }
     );
     byNameLower.clear();
     for (const l of res.data.labels || []) {
@@ -5343,6 +5648,7 @@ export async function resolveImportLabels(
   await refreshExisting();
 
   const map: Record<string, string> = {};
+  const unmapped = unmappedLabelTracker();
   // Labels that need an API round trip (create, or conflict-resolve). Mapped
   // sequentially below only in the cheap in-memory cases.
   const pending: Array<{ sourceId: string; name: string; nameLower: string }> =
@@ -5362,7 +5668,10 @@ export async function resolveImportLabels(
     // caps label names at 225 chars, so anything longer is junk from a
     // malformed/crafted export and would only waste a failing API round trip.
     const name = (sl.name || "").trim();
-    if (!name || name.length > 225) continue;
+    if (!name || name.length > 225) {
+      unmapped.add(sourceId, sl.name || "", name ? "The name is longer than Gmail allows" : "The label has no name");
+      continue;
+    }
     const nameLower = name.toLowerCase();
 
     const existing = byNameLower.get(nameLower);
@@ -5393,6 +5702,9 @@ export async function resolveImportLabels(
   let cursor = 0;
   const worker = async () => {
     while (cursor < pending.length) {
+      // Between creates: what exists already stays, and a re-run maps it by
+      // name instead of creating it again.
+      if (opts.signal?.aborted) throw new RequestAbortedError();
       const item = pending[cursor++];
       // An earlier worker may have created this name (case-variant duplicates
       // in the export) — map without another round trip.
@@ -5423,17 +5735,28 @@ export async function resolveImportLabels(
         if (created.data.id) {
           map[item.sourceId] = created.data.id;
           byNameLower.set(item.nameLower, created.data.id);
+        } else {
+          unmapped.add(item.sourceId, item.name, "Gmail did not return the new label");
         }
       } catch (e) {
+        if (isAbortError(e)) throw e;
         // A racing create (or a name that already exists under a different case)
         // surfaces as a conflict — re-list and map to whatever now exists.
         if (isAlreadyExistsError(e)) {
           await refreshOnce();
           const now = byNameLower.get(item.nameLower);
-          if (now) map[item.sourceId] = now;
+          if (now) {
+            map[item.sourceId] = now;
+            continue;
+          }
+          // Gmail's own names (Inbox, Sent…) and nested names whose parent
+          // clashes land here: taken, but not by a label we can use.
+          unmapped.add(item.sourceId, item.name, "Gmail says the name is taken, but not by a label this import can use");
+          continue;
         }
-        // Any other failure: skip this label. The message still imports, just
-        // without this one tag (import is resilient by design).
+        // Any other failure: the messages still import, without this label,
+        // and the caller is told which labels those are.
+        unmapped.add(item.sourceId, item.name, e instanceof Error ? e.message : String(e));
       }
     }
   };
@@ -5443,7 +5766,7 @@ export async function resolveImportLabels(
       worker
     )
   );
-  return map;
+  return { map, unmapped: unmapped.list, unmappedCount: unmapped.count };
 }
 
 export interface ImportMessageInput {
@@ -5466,6 +5789,12 @@ export interface ImportBatchResult {
    * re-run that re-sends one of these stores a duplicate copy.
    */
   insertedIndexes?: number[];
+  /**
+   * Indexes of messages Gmail refused with their labels and accepted without
+   * them. They are in the mailbox, counted under `inserted`, but carry none of
+   * their labels (not even Inbox or Unread), so the caller says so.
+   */
+  insertedWithoutLabels?: number[];
 }
 
 // A real message carries a handful of labels; cap the array so a crafted
@@ -5506,13 +5835,13 @@ export async function importMessageBatch(
   } = {}
 ): Promise<ImportBatchResult> {
   if (!isValidEmail(userEmail)) {
-    throw new Error("userEmail must be a valid email address");
+    throw new ValidationError("userEmail must be a valid email address");
   }
   if (!Array.isArray(messages) || messages.length === 0) {
-    throw new Error("messages must be a non-empty array");
+    throw new ValidationError("messages must be a non-empty array");
   }
   if (messages.length > MAILBOX_IMPORT_BATCH_CAP) {
-    throw new Error(
+    throw new ValidationError(
       `Too many messages in one import batch — cap is ${MAILBOX_IMPORT_BATCH_CAP}`
     );
   }
@@ -5522,6 +5851,7 @@ export async function importMessageBatch(
   // Tracked for the cancelled case: the operator's re-run has to know exactly
   // which messages already landed, because insert cannot dedup them.
   const insertedIndexes: number[] = [];
+  const withoutLabels: number[] = [];
 
   const insertOne = async (i: number): Promise<void> => {
     const raw = typeof messages[i]?.raw === "string" ? messages[i].raw : "";
@@ -5567,13 +5897,16 @@ export async function importMessageBatch(
       // timeout, or network error is ambiguous — the message may have
       // committed before the response was lost — so we must NOT re-insert, or
       // we'd silently store a duplicate (messages.insert has no dedup key).
+      // A quota refusal (a 429, or Gmail's 403 "rate limit exceeded") is also
+      // a clean rejection, but not of the labels: retrying it without them
+      // would store the message stripped for no reason.
       const status = httpStatusOf(e);
       const cleanlyRejected =
         labelIds.length > 0 &&
         status !== null &&
         status >= 400 &&
         status < 500 &&
-        status !== 429;
+        !isQuotaRefusal(e);
       if (cleanlyRejected) {
         try {
           await withGoogleRetry(
@@ -5590,6 +5923,7 @@ export async function importMessageBatch(
           );
           out.inserted++;
           insertedIndexes.push(i);
+          withoutLabels.push(i);
           return;
         } catch (e2) {
           out.failed++;
@@ -5641,6 +5975,9 @@ export async function importMessageBatch(
     // Sorted so the log and a resumed run read in message order (inserts
     // complete out of order under the worker pool).
     out.insertedIndexes = insertedIndexes.sort((a, b) => a - b);
+  }
+  if (withoutLabels.length > 0) {
+    out.insertedWithoutLabels = withoutLabels.sort((a, b) => a - b);
   }
 
   return out;

@@ -8,11 +8,11 @@ import { TENANT_COLORS, type TenantColor } from "@/lib/tenant-types";
 import {
   isValidEmail,
   validateCredentialsFilePath,
-  ValidationError,
 } from "@/lib/validate";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { audit, boundedParams } from "@/lib/audit";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // Tenant config bodies are tiny — cap aggressively.
 const MAX_BODY_BYTES = 16 * 1024;
@@ -32,7 +32,7 @@ export async function GET() {
     // does res.json() unconditionally and would otherwise choke on the
     // framework's HTML error page.
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }
 
@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
       error: message,
       actor,
     });
-    const status = error instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(error);
     return NextResponse.json({ error: message }, { status });
   }
 }

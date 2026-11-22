@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUser, listOAuthTokens, isNotFoundError } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
-import { requireEmail, ValidationError } from "@/lib/validate";
+import { requireEmail } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Look up a user and surface everything we need to render the offboarding
@@ -52,7 +53,7 @@ export async function GET(request: NextRequest) {
       );
     }
     const message = e instanceof Error ? e.message : "Preflight failed";
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

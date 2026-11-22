@@ -5,6 +5,8 @@ import { readLastScan, saveLastScan } from "@/lib/security-history";
 import { ValidationError } from "@/lib/validate";
 import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
+import { audit } from "@/lib/audit";
+import { actorFromRequest } from "@/lib/session";
 
 /**
  * Security Check: the previous finished scan, for "what's new since last time".
@@ -30,6 +32,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const actor = await actorFromRequest(request);
   const body = await readCappedJson(request, MAX_BODY_BYTES);
   if (body === BODY_TOO_LARGE) {
     return NextResponse.json(
@@ -46,6 +49,16 @@ export async function POST(request: NextRequest) {
     await saveLastScan(tenant?.id ?? null, {
       ...snapshot,
       completedAt: new Date().toISOString(),
+    });
+    // The baseline decides what the next scan calls "new": replacing it is a
+    // change worth a line in the log.
+    audit({
+      action: "security_check.baseline",
+      tenantId: tenant?.id ?? null,
+      tenantName: tenant?.name ?? null,
+      params: { findings: snapshot.keys.length, checksCovered: snapshot.covered?.length ?? null },
+      outcome: "success",
+      actor,
     });
     return NextResponse.json({ success: true });
   } catch (e) {

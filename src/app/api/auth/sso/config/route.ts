@@ -11,6 +11,7 @@ import { ValidationError } from "@/lib/validate";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { audit } from "@/lib/audit";
 import { identityFromRequest, describeActor } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 // Allowlists can hold a few hundred addresses; still tiny.
 const MAX_BODY_BYTES = 64 * 1024;
@@ -25,7 +26,7 @@ export async function GET() {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }
 
@@ -74,7 +75,7 @@ export async function PUT(req: NextRequest) {
       error: message,
       actor,
     });
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }
 
@@ -102,6 +103,6 @@ export async function DELETE(req: NextRequest) {
       error: message,
       actor,
     });
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: errorStatusFor(error) });
   }
 }

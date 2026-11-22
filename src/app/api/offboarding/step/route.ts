@@ -10,6 +10,7 @@ import {
   suspendUser,
   transferDrive,
   getUser,
+  assertNotImpersonatedAdmin,
   isAlreadyExistsError,
   isExternalTarget,
   withGoogleRetry,
@@ -22,6 +23,7 @@ import {
 import { audit } from "@/lib/audit";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
+import { errorStatusFor } from "@/lib/api-errors";
 
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -48,8 +50,12 @@ const SETTINGS_STEPS: ReadonlySet<string> = new Set([
 // Minimal Gmail scopes per operation, mirroring the email-transfer/-delegation
 // routes: creating a forwarding address needs the "sharing" scope, while the
 // vacation responder needs "basic".
+// Creating a forwarding address and turning forwarding on need
+// gmail.settings.sharing; reading the address back to check it is verified
+// needs gmail.settings.basic, which Google does not accept .sharing for.
 const GMAIL_FORWARDING_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.sharing",
+  "https://www.googleapis.com/auth/gmail.settings.basic",
 ];
 const GMAIL_VACATION_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.basic",
@@ -88,15 +94,6 @@ export async function POST(request: NextRequest) {
     tenant = tenantFromRequest(request, body);
     const user = requireEmail(body.user, "user");
 
-    // Suspending, revoking or forwarding the impersonated admin's own account
-    // would cut the domain-wide delegation this tool runs on and lock every
-    // future operation out of the tenant — refuse before anything runs.
-    if (tenant?.adminEmail && user === tenant.adminEmail.toLowerCase()) {
-      throw new ValidationError(
-        `"${user}" is this tenant's domain-wide-delegation admin. Offboarding it would lock Open Admin out of the tenant — move delegation to another admin first.`
-      );
-    }
-
     // Every step here is destructive or hard to undo (suspend, password/token
     // revoke, mail forwarding, Drive transfer, group removal). The browser
     // shows a typed-confirmation dialog, but this route accepts anything
@@ -109,6 +106,16 @@ export async function POST(request: NextRequest) {
         "Type the user's email address into the confirm field to proceed."
       );
     }
+    if (!KNOWN_STEPS.has(step)) {
+      throw new ValidationError(`Unknown step "${step.slice(0, 40)}"`);
+    }
+
+    // Suspending, revoking or forwarding the impersonated admin's own account
+    // would cut the domain-wide delegation this tool runs on and lock every
+    // future operation out of the tenant — refuse before anything runs. By
+    // account, not by text, so one of the admin's aliases is refused too, and
+    // also when the admin comes from the environment rather than a tenant.
+    await assertNotImpersonatedAdmin(tenant, user, "offboard");
 
     // Impersonation stops working the moment an account is suspended, so the
     // settings steps have to run before "suspend". That order lived only in the
@@ -533,7 +540,7 @@ export async function POST(request: NextRequest) {
       error: message,
       actor,
     });
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

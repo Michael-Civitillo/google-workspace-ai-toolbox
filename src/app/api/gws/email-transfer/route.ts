@@ -13,8 +13,12 @@ import { errorResponse } from "@/lib/api-errors";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
 import { actorFromRequest } from "@/lib/session";
 
+// Creating a forwarding address and turning forwarding on need
+// gmail.settings.sharing; reading the address back to check it is verified
+// needs gmail.settings.basic, which Google does not accept .sharing for.
 const GMAIL_SETTINGS_SCOPES = [
   "https://www.googleapis.com/auth/gmail.settings.sharing",
+  "https://www.googleapis.com/auth/gmail.settings.basic",
 ];
 
 const ALLOWED_ACTIONS = new Set(["keep", "archive", "trash", "markRead"]);

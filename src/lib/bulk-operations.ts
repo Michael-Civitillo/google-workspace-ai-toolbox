@@ -134,7 +134,14 @@ export const OPERATIONS: Record<OperationId, OperationDef> = {
     example: "all-staff@yourdomain.com,alice@yourdomain.com",
     toBody: (c) => {
       const role = c[2] ? canonical(c[2], GROUP_ROLES) : null;
-      return { group: c[0], member: c[1], ...(role ? { role } : {}) };
+      return {
+        group: c[0],
+        member: c[1],
+        ...(role ? { role } : {}),
+        // The server asks for the owner's address typed out; the run's own
+        // typed confirmation stands for that here, as for bulk suspend.
+        ...(role === "OWNER" ? { confirm: c[1] } : {}),
+      };
     },
     validateRow: (c) => {
       const base = baselineEmails(c, "group", "member");
@@ -145,7 +152,7 @@ export const OPERATIONS: Record<OperationId, OperationDef> = {
       return null;
     },
     warning:
-      "A row that names a role sets that role even for someone already in the group, so it can demote an owner or manager. Rows without a role never change an existing member.",
+      "A row that names a role sets that role even for someone already in the group, so it can demote an owner or manager. Rows without a role never change an existing member. Rows that add someone outside this tenant's domains are refused by the server (add them on the Groups page, which asks you to confirm the outside address) and will show as failed.",
   },
   group_remove: {
     label: "Remove group member",

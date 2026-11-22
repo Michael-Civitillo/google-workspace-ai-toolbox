@@ -85,6 +85,8 @@ interface RevokeFileOutcome {
   notFound?: boolean;
   permissionsSeen?: number;
   permissionsTargeted?: number;
+  /** Cancelled part-way through this file: it may still be shared. */
+  stoppedEarly?: true;
 }
 
 interface RevokeBatchResult {
@@ -898,7 +900,7 @@ export default function SharingAudit() {
       const revokedCategories = new Set(revokeTarget.categories);
       const cleanOutcomes = new Map(
         mergedResults
-          .filter((r) => r.errors.length === 0)
+          .filter((r) => r.errors.length === 0 && !r.stoppedEarly)
           .map((r) => [r.fileId, r] as const)
       );
       const updateFiles = (files: ExternalFile[]): ExternalFile[] =>

@@ -713,7 +713,10 @@ describe("disableAutoForwarding", () => {
     assert.deepEqual(body, { enabled: false });
     for (const call of google.calls) {
       assert.equal(call.subject, "alice@example.com", "acts as the mailbox owner");
-      assert.deepEqual(call.scopes, [SHARING_SETTINGS]);
+      // Reading the setting first needs gmail.settings.basic: Google does not
+      // accept .sharing for getAutoForwarding, so with .sharing alone the
+      // check-before-write could never run.
+      assert.deepEqual(call.scopes, [BASIC_SETTINGS, SHARING_SETTINGS]);
     }
   });
 

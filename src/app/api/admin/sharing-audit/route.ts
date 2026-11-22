@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { listExternallySharedFiles } from "@/lib/admin-sdk";
 import { tenantFromRequest } from "@/lib/gws";
 import { requireEmail, ValidationError } from "@/lib/validate";
+import { errorStatusFor } from "@/lib/api-errors";
 
 /**
  * Per-user external-sharing audit.
@@ -33,11 +34,15 @@ export async function GET(request: NextRequest) {
       }
       pageToken = rawPageToken;
     }
-    const result = await listExternallySharedFiles(tenant, user, pageToken);
+    // Stop scanning when the page goes away: a tenant-wide audit is hundreds
+    // of these, and nobody reads the answer to a cancelled one.
+    const result = await listExternallySharedFiles(tenant, user, pageToken, {
+      signal: request.signal,
+    });
     return NextResponse.json({ success: true, data: result });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Sharing audit failed";
-    const status = e instanceof ValidationError ? 400 : 500;
+    const status = errorStatusFor(e);
     return NextResponse.json({ success: false, error: message }, { status });
   }
 }

@@ -56,7 +56,9 @@ export async function POST(request: NextRequest) {
       fileIds.push(trimmed);
     }
 
-    const paths = await resolveFilePaths(tenant, user, fileIds);
+    const paths = await resolveFilePaths(tenant, user, fileIds, {
+      signal: request.signal,
+    });
     return NextResponse.json({ success: true, data: { paths } });
   } catch (e) {
     return errorResponse(e, "Path resolve failed");

@@ -716,11 +716,19 @@ const BUNDLE_SSO_FIELDS = [
  * A malformed block throws ValidationError before anything is written.
  */
 export async function importSsoConfig(
-  raw: unknown
+  raw: unknown,
+  opts: {
+    /**
+     * Check the block and work out the result without writing anything, so a
+     * restore can refuse a bad bundle before it changes anything else, and
+     * write single sign-on last.
+     */
+    dryRun?: boolean;
+  } = {}
 ): Promise<{ config: SsoConfig | null; warnings: string[] }> {
   const warnings: string[] = [];
   if (raw === null || raw === undefined) {
-    await deleteSsoConfig();
+    if (!opts.dryRun) await deleteSsoConfig();
     return { config: null, warnings };
   }
   if (typeof raw !== "object" || Array.isArray(raw)) {
@@ -766,7 +774,7 @@ export async function importSsoConfig(
       );
     }
     const next = validateSsoUpdate(body, sameClient ? existing : null);
-    await writeStoreAtomic(next);
+    if (!opts.dryRun) await writeStoreAtomic(next);
     return { config: next, warnings };
   });
 }
