@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sessionRefusal } from "@/lib/route-guard";
-import { validateIssuer } from "@/lib/sso-server";
+import { readSsoConfig, validateIssuer } from "@/lib/sso-server";
 import { checkIssuer, OidcFlowError } from "@/lib/oidc";
 import { ValidationError } from "@/lib/validate";
 import { readCappedJson, BODY_TOO_LARGE } from "@/lib/request-body";
@@ -45,8 +45,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Body too large" }, { status: 413 });
   }
   let issuer: string;
+  // The issuer already saved is checked the way it is used: re-checking a
+  // provider that signs people in today must not report it refused.
+  let inUse = false;
   try {
-    issuer = validateIssuer(body.issuer);
+    const saved = readSsoConfig()?.issuer ?? null;
+    issuer = validateIssuer(body.issuer, { unchangedFrom: saved });
+    inUse = saved !== null && issuer === saved;
   } catch (error) {
     if (error instanceof ValidationError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
@@ -55,7 +60,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid issuer" }, { status: 500 });
   }
   try {
-    const result = await checkIssuer(issuer);
+    const result = await checkIssuer(issuer, { inUse });
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
     // Only text this app composed is shareable: a raw fetch failure would name

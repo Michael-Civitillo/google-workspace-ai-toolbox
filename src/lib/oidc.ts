@@ -2,6 +2,7 @@ import * as client from "openid-client";
 import { isValidEmail } from "./validate-email";
 import {
   hostResolvesPrivate,
+  isPlainlyPrivateHost,
   isPrivateIssuerHost,
   privateIssuerAllowed,
   PRIVATE_ISSUER_REFUSED,
@@ -92,16 +93,35 @@ function unreachable(e: unknown): boolean {
 }
 
 /**
+ * When a destination is being judged: "setup" is an issuer being checked in
+ * the wizard, where the admin sees the refusal and can act on it; "sign-in"
+ * is a saved configuration being used.
+ */
+type CheckMode = "setup" | "sign-in";
+
+/**
  * Refuse a URL the server would fetch if it points into the server's own
- * network: by its text (private literals, single-label and internal names)
- * and by what the name resolves to now. Applied to the issuer before
- * discovery and to every endpoint the discovery document then names, which
- * the server also fetches (the token exchange carries the client secret).
+ * network. Applied to the issuer before discovery and to every endpoint the
+ * discovery document then names, which the server also fetches (the token
+ * exchange carries the client secret).
+ *
+ * At setup the check is the full one: by the URL's text (private literals,
+ * single-label and internal names) and by what the name resolves to now. At
+ * sign-in the saved issuer is held to the long-standing text rule only, and
+ * so are endpoints on the issuer's own host: a provider on the install's own
+ * network that worked before must keep working. An endpoint on some other
+ * host still gets the full text rule, so a discovery document can't simply
+ * name an internal address.
  *
  * A name can still change what it resolves to between this check and the
  * fetch; this closes the plain cases, it is not a full egress firewall.
  */
-async function assertPublicDestination(raw: string, what: string): Promise<void> {
+async function assertPublicDestination(
+  raw: string,
+  what: string,
+  mode: CheckMode,
+  issuerHost?: string
+): Promise<void> {
   if (privateIssuerAllowed()) return;
   let url: URL;
   try {
@@ -109,13 +129,22 @@ async function assertPublicDestination(raw: string, what: string): Promise<void>
   } catch {
     throw new OidcFlowError("discovery_failed", `The provider's ${what} is not a valid URL`);
   }
-  if (isPrivateIssuerHost(url.hostname) || (await hostResolvesPrivate(url.hostname))) {
-    throw new OidcFlowError(
-      "discovery_failed",
+  const host = url.hostname;
+  const refused =
+    mode === "setup"
+      ? isPrivateIssuerHost(host) || (await hostResolvesPrivate(host))
+      : what === "issuer" || host === issuerHost
+        ? isPlainlyPrivateHost(host)
+        : isPrivateIssuerHost(host);
+  if (refused) {
+    const message =
       what === "issuer"
         ? `The ${PRIVATE_ISSUER_REFUSED}`
-        : `The provider's ${what} points at a private or internal address, which the server won't contact. Set APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server for a local development provider.`
-    );
+        : `The provider's ${what} points at a private or internal address, which the server won't contact. Set APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server to use an identity provider on your own network.`;
+    // Said in the log as well: at sign-in the person sees only that single
+    // sign-on failed, and whoever runs the server needs the reason.
+    console.error(`[sso] refused ${what} ${url.origin}: ${message}`);
+    throw new OidcFlowError("discovery_failed", message);
   }
 }
 
@@ -125,10 +154,13 @@ async function assertPublicDestination(raw: string, what: string): Promise<void>
  * otherwise tell the caller which ports answer on the server's own network,
  * so it goes to the service log instead.
  */
-async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
+async function discoverServer(
+  issuer: URL,
+  mode: CheckMode
+): Promise<client.ServerMetadata> {
   // Belt and braces: validateIssuer already refuses these, but a hand-edited
   // sso.json would otherwise have the server dial its own network.
-  await assertPublicDestination(issuer.href, "issuer");
+  await assertPublicDestination(issuer.href, "issuer", mode);
   let probe: client.Configuration;
   try {
     probe = await client.discovery(issuer, "discovery", undefined, client.None(), {
@@ -175,10 +207,16 @@ async function discoverServer(issuer: URL): Promise<client.ServerMetadata> {
     );
   }
   // The server fetches these itself.
-  await assertPublicDestination(server.token_endpoint as string, "token endpoint");
-  await assertPublicDestination(server.jwks_uri as string, "signing keys address (jwks_uri)");
+  const host = issuer.hostname;
+  await assertPublicDestination(server.token_endpoint as string, "token endpoint", mode, host);
+  await assertPublicDestination(
+    server.jwks_uri as string,
+    "signing keys address (jwks_uri)",
+    mode,
+    host
+  );
   if (typeof server.userinfo_endpoint === "string") {
-    await assertPublicDestination(server.userinfo_endpoint, "userinfo endpoint");
+    await assertPublicDestination(server.userinfo_endpoint, "userinfo endpoint", mode, host);
   }
   return server;
 }
@@ -216,7 +254,7 @@ export async function loadOidcClient(
   if (hit && hit.expiresAt > now) return hit.config;
 
   const issuer = new URL(cfg.issuer);
-  const server = await discoverServer(issuer);
+  const server = await discoverServer(issuer, "sign-in");
   const config = new client.Configuration(
     server,
     cfg.clientId,
@@ -246,9 +284,15 @@ export async function loadOidcClient(
  * Fetch discovery for an issuer the admin typed and report what the code
  * flow will rely on, plus soft warnings about anything that commonly bites.
  */
-export async function checkIssuer(issuerRaw: string): Promise<IssuerCheckResult> {
+export async function checkIssuer(
+  issuerRaw: string,
+  opts: {
+    /** This is the issuer already saved, being checked again. */
+    inUse?: boolean;
+  } = {}
+): Promise<IssuerCheckResult> {
   const issuer = new URL(issuerRaw);
-  const server = await discoverServer(issuer);
+  const server = await discoverServer(issuer, opts.inUse ? "sign-in" : "setup");
   const strings = (v: unknown): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 
@@ -450,37 +494,37 @@ function unverifiedEmailAllowed(): boolean {
 /**
  * Pull the identity out of validated ID token claims.
  *
- * Which claim counts, and how much it must be vouched for, depends on the
- * issuer (never on the provider picked in the wizard):
+ * The address is the `email` claim, or failing that `preferred_username`,
+ * then `upn`: the order every release has used, so the address an allowlist
+ * is matched against doesn't change under an existing install.
  *
- *   - Entra ID: the user principal name (`preferred_username`, `upn`) first.
- *     The directory's administrators control it, so it needs no separate
- *     verified flag. The `email` claim comes from a mail attribute that can be
- *     set to any address, so it is only used when Entra marks it verified
- *     (`email_verified` or `xms_edov`).
- *   - Everyone else: `email`, which must come with `email_verified: true`;
- *     `preferred_username` and `upn` only as a fallback and only when the
- *     operator set APP_SSO_TRUST_UNVERIFIED_EMAIL=true.
+ * How much it must be vouched for depends on the issuer (never on the
+ * provider picked in the wizard):
+ *
+ *   - Entra ID workforce tenants: accepted as sent. Entra doesn't issue
+ *     `email_verified`, and the address comes from a directory only its own
+ *     administrators write to. Only a single tenant's issuer can be
+ *     configured (the shared multi-tenant endpoints are refused at
+ *     discovery), which is what makes that directory the trusted one.
+ *   - Everyone else: `email` must come with `email_verified: true`;
+ *     `preferred_username` and `upn` only when the operator set
+ *     APP_SSO_TRUST_UNVERIFIED_EMAIL=true.
+ *
+ * An address the provider marks unverified is refused whoever it is.
  */
 export function extractIdentity(
   claims: client.IDToken,
   family: IssuerFamily = "other"
 ): OidcIdentity {
   const entra = family === "entra";
-  const emailVouched =
-    parseVerified(claims.email_verified) === true ||
-    (entra && parseVerified((claims as Record<string, unknown>).xms_edov) === true);
-  const candidates: Array<[OidcIdentity["emailSource"], unknown]> = entra
-    ? [
-        ["preferred_username", claims.preferred_username],
-        ["upn", claims.upn],
-        ["email", emailVouched ? claims.email : undefined],
-      ]
-    : [
-        ["email", claims.email],
-        ["preferred_username", claims.preferred_username],
-        ["upn", claims.upn],
-      ];
+  // The same order for every provider, and the same one every release has
+  // used: the address checked against the allowlist must not change under
+  // an install whose list names mail addresses.
+  const candidates: Array<[OidcIdentity["emailSource"], unknown]> = [
+    ["email", claims.email],
+    ["preferred_username", claims.preferred_username],
+    ["upn", claims.upn],
+  ];
   let email: string | null = null;
   let emailSource: OidcIdentity["emailSource"] = "email";
   for (const [source, value] of candidates) {
@@ -493,27 +537,27 @@ export function extractIdentity(
   if (!email) {
     throw new OidcFlowError(
       "no_email",
-      entra && typeof claims.email === "string"
-        ? "Entra ID sent an email claim it doesn't mark as verified, and no user principal name. Make sure ID tokens include preferred_username."
-        : "The identity provider did not include a usable email address in the ID token",
+      "The identity provider did not include a usable email address in the ID token",
       `claims present: ${Object.keys(claims).join(", ")}`
     );
   }
 
   const emailVerified =
     emailSource === "email" ? parseVerified(claims.email_verified) : null;
-  if (emailVerified === false && !entra) {
+  if (emailVerified === false) {
     throw new OidcFlowError(
       "email_unverified",
       "The identity provider reports this email address as unverified",
       email
     );
   }
-  // Outside Entra an address must be vouched for by the provider: an absent
-  // claim, or an address taken from preferred_username or upn, is refused
-  // unless the operator says otherwise.
-  const vouched = entra ? true : emailSource === "email" && emailVerified === true;
-  if (!vouched && !unverifiedEmailAllowed()) {
+  // An address must be vouched for by the provider: an absent claim, or an
+  // address taken from preferred_username or upn, is refused unless the
+  // operator says otherwise. Entra ID is the exception, as it always was: it
+  // doesn't issue email_verified, and names people from its own directory.
+  // What decides "this is Entra" is the issuer the token was checked against,
+  // not the provider picked in the menu.
+  if (emailVerified !== true && !entra && !unverifiedEmailAllowed()) {
     throw new OidcFlowError(
       "email_unverified",
       emailSource === "email"

@@ -250,7 +250,7 @@ export function privateIssuerAllowed(): boolean {
 
 /** Refusal text shared with the discovery path; names the opt-in deliberately. */
 export const PRIVATE_ISSUER_REFUSED =
-  "issuer must be a public host: private, loopback and link-local addresses are refused. Set APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server to use a local development provider.";
+  "issuer must be a public host: private, loopback and link-local addresses, and names that exist only on (or point into) a private network, are refused. Set APP_SSO_ALLOW_PRIVATE_ISSUER=true on the server to use an identity provider on your own network.";
 
 /** Dotted-quad octets, or null when the host is not a literal IPv4 address. */
 function ipv4Octets(host: string): number[] | null {
@@ -260,15 +260,29 @@ function ipv4Octets(host: string): number[] | null {
   return octets.every((o) => o <= 255) ? octets : null;
 }
 
-function isPrivateIpv4([a, b]: number[]): boolean {
+/** Loopback, the RFC 1918 blocks, link-local and "this network". */
+function isClassicPrivateIpv4([a, b]: number[]): boolean {
   return (
     a === 0 || // 0.0.0.0/8: "this network", which the stack dials locally
     a === 10 ||
     a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10: carrier-grade NAT, Tailscale
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 169 && b === 254) ||
+    (a === 169 && b === 254)
+  );
+}
+
+/**
+ * The classic ranges plus the ones nobody types by accident. For an address
+ * written out in a URL only: as the answer to a name lookup, 100.64/10 and
+ * 198.18/15 are what a VPN or a "fake IP" proxy resolver hands back for
+ * perfectly public names (Google's included), so a resolved address is
+ * judged by the classic ranges alone.
+ */
+function isPrivateIpv4([a, b]: number[]): boolean {
+  return (
+    isClassicPrivateIpv4([a, b]) ||
+    (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10: carrier-grade NAT, Tailscale
     (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15: benchmarking, often internal
     a >= 224 // multicast and reserved
   );
@@ -311,7 +325,10 @@ function ipv6Bytes(host: string): number[] | null {
   return [...head, ...new Array<number>(gap).fill(0), ...tail];
 }
 
-function isPrivateIpv6(bytes: number[]): boolean {
+function isPrivateIpv6(
+  bytes: number[],
+  v4Rule: (octets: number[]) => boolean = isPrivateIpv4
+): boolean {
   if ((bytes[0] & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
   if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return true; // fe80::/10
   if (!bytes.slice(0, 10).every((x) => x === 0)) return false;
@@ -323,7 +340,7 @@ function isPrivateIpv6(bytes: number[]): boolean {
   const v4 = bytes.slice(12);
   // :: (unspecified) and ::1 (loopback) live in the compatible range too.
   if (compatible && v4[0] === 0 && v4[1] === 0 && v4[2] === 0) return true;
-  return isPrivateIpv4(v4);
+  return v4Rule(v4);
 }
 
 /**
@@ -367,22 +384,67 @@ const INTERNAL_SUFFIXES = [
 ];
 
 /**
- * True when a name resolves, right now, to any private or internal address.
+ * The rule every release has applied, from the URL text alone: localhost, the
+ * .local and .internal endings, and literal loopback, RFC 1918 and link-local
+ * addresses. It is what a configuration already in use is held to, at save
+ * and at sign-in. The wider rule above, and the name lookup below, apply when
+ * an issuer is first set up or changed: applied to every sign-in they would
+ * shut out installs whose provider sits on their own network (a Keycloak at
+ * sso.example.com that resolves to 10.x, say), which worked before and had no
+ * way to know a setting was now needed.
+ */
+export function isPlainlyPrivateHost(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return true;
+  }
+  const v4 = ipv4Octets(host);
+  if (v4) return isClassicPrivateIpv4(v4);
+  const v6 = ipv6Bytes(host);
+  return v6 ? isPrivateIpv6(v6, isClassicPrivateIpv4) : false;
+}
+
+/** A looked-up address that is on this machine or its own network. */
+function resolvedAddressIsPrivate(address: string): boolean {
+  const host = address.toLowerCase();
+  const v4 = ipv4Octets(host);
+  if (v4) return isClassicPrivateIpv4(v4);
+  const v6 = ipv6Bytes(host);
+  return v6 ? isPrivateIpv6(v6, isClassicPrivateIpv4) : false;
+}
+
+type AddressLookup = (hostname: string) => Promise<Array<{ address: string }>>;
+const systemLookup: AddressLookup = (hostname) =>
+  lookup(hostname, { all: true, verbatim: true });
+
+/**
+ * True when a name resolves, right now, to a private or internal address.
  * The text check above can't see that a public-looking name points inside
  * the network. A name that doesn't resolve at all returns false: nothing can
  * be fetched from it either.
  */
-export async function hostResolvesPrivate(hostname: string): Promise<boolean> {
+export async function hostResolvesPrivate(
+  hostname: string,
+  resolve: AddressLookup = systemLookup
+): Promise<boolean> {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (isPrivateIssuerHost(host)) return true;
   if (ipv4Octets(host) || ipv6Bytes(host)) return false;
   let addresses: Array<{ address: string }>;
   try {
-    addresses = await lookup(host, { all: true, verbatim: true });
+    addresses = await resolve(host);
   } catch {
     return false;
   }
-  return addresses.some(({ address }) => isPrivateIssuerHost(address));
+  return addresses.some(({ address }) => resolvedAddressIsPrivate(address));
 }
 
 /**
@@ -391,7 +453,17 @@ export async function hostResolvesPrivate(hostname: string): Promise<boolean> {
  * is typed here. Plain http (loopback only) and private targets need the
  * APP_SSO_ALLOW_PRIVATE_ISSUER opt-in.
  */
-export function validateIssuer(value: unknown): string {
+export function validateIssuer(
+  value: unknown,
+  opts: {
+    /**
+     * The issuer already saved, when there is one. Re-saving it unchanged
+     * (to edit who may sign in, say) holds it to the rule it was saved under,
+     * not to the wider one for new issuers.
+     */
+    unchangedFrom?: string | null;
+  } = {}
+): string {
   const s = requireString(value, "issuer", MAX_URL_CHARS);
   const url = parseUrl(s, "issuer");
   // An issuer containing /.well-known/ makes the OpenID library skip its
@@ -401,8 +473,13 @@ export function validateIssuer(value: unknown): string {
       "issuer must be the provider's issuer URL, not its discovery document address (leave off /.well-known/...)"
     );
   }
+  const normalised = url.pathname !== "/" && s.endsWith("/") ? s.replace(/\/+$/, "") : s;
+  const unchanged = !!opts.unchangedFrom && normalised === opts.unchangedFrom;
   const allowPrivate = privateIssuerAllowed();
-  if (!allowPrivate && isPrivateIssuerHost(url.hostname)) {
+  if (
+    !allowPrivate &&
+    (unchanged ? isPlainlyPrivateHost(url.hostname) : isPrivateIssuerHost(url.hostname))
+  ) {
     throw new ValidationError(PRIVATE_ISSUER_REFUSED);
   }
   const secure =
@@ -418,7 +495,7 @@ export function validateIssuer(value: unknown): string {
   // ".../v2.0", Okta's ".../oauth2/default"), so a pasted trailing slash
   // would fail with an opaque "issuer mismatch" — drop it. An origin-only
   // issuer keeps its root slash, which the URL parser normalises anyway.
-  return url.pathname !== "/" && s.endsWith("/") ? s.replace(/\/+$/, "") : s;
+  return normalised;
 }
 
 /**
@@ -523,7 +600,9 @@ export function validateSsoUpdate(
     ? requireString(body.displayName, "displayName", MAX_DISPLAY_NAME_CHARS)
     : existing?.displayName ?? preset.label;
 
-  let issuer = present("issuer") ? validateIssuer(body.issuer) : existing?.issuer;
+  let issuer = present("issuer")
+    ? validateIssuer(body.issuer, { unchangedFrom: existing?.issuer })
+    : existing?.issuer;
   if (preset.fixedIssuer) issuer = preset.fixedIssuer;
   if (!issuer) throw new ValidationError("issuer is required");
 
@@ -648,6 +727,16 @@ export async function saveSsoConfig(
   return withLock(async () => {
     const existing = readSsoConfig();
     const next = validateSsoUpdate(body, existing);
+    // A new or changed issuer is also looked up: a public-looking name can
+    // point into the server's own network. An issuer already in use is not
+    // (see isPlainlyPrivateHost).
+    if (
+      (!existing || existing.issuer !== next.issuer) &&
+      !privateIssuerAllowed() &&
+      (await hostResolvesPrivate(new URL(next.issuer).hostname))
+    ) {
+      throw new ValidationError(PRIVATE_ISSUER_REFUSED);
+    }
     await writeStoreAtomic(next);
     return next;
   });

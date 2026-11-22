@@ -5,12 +5,14 @@
 import { TEST_DATA_DIR } from "./test-support/isolated-env";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { beforeEach, describe, it } from "node:test";
+import dnsPromises from "node:dns/promises";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type * as client from "openid-client";
-import { evaluateSsoAccess, extractIdentity, OidcFlowError } from "./oidc";
+import { checkIssuer, evaluateSsoAccess, extractIdentity, loadOidcClient, OidcFlowError } from "./oidc";
 import { consumeHandshake } from "./oidc-handshake";
 import {
   hostResolvesPrivate,
+  isPlainlyPrivateHost,
   isPrivateIssuerHost,
   readSsoConfig,
   recordSsoTest,
@@ -31,6 +33,13 @@ describe("issuerFamily", () => {
     assert.equal(issuerFamily(GOOGLE), "google");
     assert.equal(issuerFamily(ENTRA), "entra");
     assert.equal(issuerFamily("https://sts.windows.net/abc/"), "entra");
+    // Microsoft's national clouds are Entra too.
+    for (const host of ["login.microsoftonline.us", "login.partner.microsoftonline.cn", "login.chinacloudapi.cn"]) {
+      assert.equal(issuerFamily(`https://${host}/11111111-2222-3333-4444-555555555555/v2.0`), "entra", host);
+    }
+    // Sign-up directories are not: anyone can make an account there.
+    assert.equal(issuerFamily("https://contoso.b2clogin.com/abc/v2.0/"), "other");
+    assert.equal(issuerFamily("https://login.microsoftonline.us.evil.example/abc/v2.0"), "other");
     assert.equal(issuerFamily(OKTA), "other");
     assert.equal(issuerFamily("https://accounts.google.com.evil.example"), "other");
     assert.equal(issuerFamily("not a url"), "other");
@@ -50,15 +59,19 @@ describe("extractIdentity", () => {
     }
   });
 
-  it("on Entra, prefers the user principal name over an unverified email claim", () => {
-    const id = extractIdentity(claims({ email: "boss@example.com", preferred_username: "jane@example.com" }), "entra");
-    assert.equal(id.email, "jane@example.com");
-    assert.equal(id.emailSource, "preferred_username");
+  it("on Entra, checks the address earlier releases checked: the email claim, then the sign-in name", () => {
+    // An allowlist that names mail addresses must keep working after an
+    // upgrade, also where the sign-in name is on another domain.
+    const id = extractIdentity(claims({ email: "jane.doe@contoso.com", preferred_username: "jdoe@corp.onmicrosoft.com" }), "entra");
+    assert.equal(id.email, "jane.doe@contoso.com");
+    assert.equal(id.emailSource, "email");
+    const noMail = extractIdentity(claims({ preferred_username: "jdoe@corp.onmicrosoft.com" }), "entra");
+    assert.equal(noMail.email, "jdoe@corp.onmicrosoft.com");
+    assert.equal(noMail.emailSource, "preferred_username");
   });
 
-  it("on Entra, uses the email claim only when Entra marks it verified", () => {
-    assert.throws(() => extractIdentity(claims({ email: "boss@example.com" }), "entra"), (e) => e instanceof OidcFlowError && e.code === "no_email");
-    assert.equal(extractIdentity(claims({ email: "jane@example.com", xms_edov: true }), "entra").email, "jane@example.com");
+  it("on Entra too, refuses an address the provider says is unverified", () => {
+    assert.throws(() => extractIdentity(claims({ email: "jane@example.com", email_verified: false }), "entra"), (e) => e instanceof OidcFlowError && e.code === "email_unverified");
   });
 
   it("gives no Entra leniency to an issuer that only calls itself Entra", () => {
@@ -113,6 +126,38 @@ describe("addresses the server would fetch", () => {
   it("checks what a name resolves to", async () => {
     assert.equal(await hostResolvesPrivate("localhost"), true);
     assert.equal(await hostResolvesPrivate("8.8.8.8"), false);
+    const to = (...addresses: string[]) => async () => addresses.map((address) => ({ address }));
+    for (const inside of ["10.0.0.5", "192.168.1.9", "172.20.0.2", "127.0.0.1", "169.254.169.254", "::1", "fd00::1", "::ffff:10.0.0.5"]) {
+      assert.equal(await hostResolvesPrivate("sso.example.com", to("203.0.113.7", inside)), true, inside);
+    }
+    assert.equal(await hostResolvesPrivate("sso.example.com", to("203.0.113.7", "2001:db8::1")), false);
+    assert.equal(await hostResolvesPrivate("sso.example.com", async () => { throw new Error("ENOTFOUND"); }), false);
+  });
+
+  it("does not take a VPN's or a proxy's stand-in addresses for the server's own network", async () => {
+    // "Fake IP" resolvers answer every name, Google's included, from
+    // 198.18.0.0/15; carrier-grade NAT and Tailscale use 100.64.0.0/10.
+    const to = (address: string) => async () => [{ address }];
+    assert.equal(await hostResolvesPrivate("accounts.google.com", to("198.18.0.23")), false);
+    assert.equal(await hostResolvesPrivate("login.microsoftonline.com", to("100.64.3.1")), false);
+    // Written out in a URL they are still refused: nobody's provider lives there by name.
+    assert.equal(isPrivateIssuerHost("198.18.0.23"), true);
+  });
+
+  it("holds an issuer already in use to the long-standing rule only", () => {
+    // New: internal-looking names need the opt-in.
+    assert.throws(() => validateIssuer("https://sso.corp"), /APP_SSO_ALLOW_PRIVATE_ISSUER/);
+    assert.throws(() => validateIssuer("https://keycloak.lan/realms/main"), /APP_SSO_ALLOW_PRIVATE_ISSUER/);
+    // Already saved: re-saving it unchanged must not start failing.
+    assert.equal(validateIssuer("https://keycloak.lan/realms/main", { unchangedFrom: "https://keycloak.lan/realms/main" }), "https://keycloak.lan/realms/main");
+    assert.equal(validateIssuer("https://keycloak.lan/realms/main/", { unchangedFrom: "https://keycloak.lan/realms/main" }), "https://keycloak.lan/realms/main");
+    // What was always refused still is, saved or not.
+    for (const always of ["https://idp.internal", "https://10.0.0.5", "https://localhost"]) {
+      assert.throws(() => validateIssuer(always, { unchangedFrom: always }), /APP_SSO_ALLOW_PRIVATE_ISSUER/, always);
+    }
+    assert.equal(isPlainlyPrivateHost("keycloak.lan"), false);
+    assert.equal(isPlainlyPrivateHost("100.64.1.1"), false);
+    assert.equal(isPlainlyPrivateHost("::ffff:192.168.0.1"), true);
   });
 
   it("refuses a discovery-document address as the issuer", () => {
@@ -173,6 +218,85 @@ describe("saving a configuration", () => {
     assert.equal(await recordSsoTest({ at: "t", ok: true }, saved.updatedAt), true);
     assert.equal(readSsoConfig()?.lastTest?.ok, true);
     fs.rmSync(`${TEST_DATA_DIR}/sso.json`, { force: true });
+  });
+});
+
+describe("a provider on the install's own network", () => {
+  const doc = (issuer: string, over: Record<string, string> = {}) => ({
+    issuer,
+    authorization_endpoint: `${issuer}/auth`,
+    token_endpoint: `${issuer}/token`,
+    jwks_uri: `${issuer}/keys`,
+    response_types_supported: ["code"],
+    ...over,
+  });
+  /** Answer every fetch with this discovery document. */
+  const serve = (document: object) =>
+    mock.method(globalThis, "fetch", async () =>
+      new Response(JSON.stringify(document), { status: 200, headers: { "content-type": "application/json" } })
+    );
+  const resolvesTo = (address: string) =>
+    mock.method(dnsPromises, "lookup", (async () => [{ address, family: 4 }]) as never);
+  const client = (issuer: string, updatedAt: string) => ({ issuer, clientId: "c", clientSecret: "s", updatedAt });
+  afterEach(() => mock.restoreAll());
+
+  it("keeps working at sign-in when it was set up before the stricter check", async () => {
+    // Worked in every earlier release: an internal name, resolving inside.
+    const issuer = "https://keycloak.lan/realms/main";
+    serve(doc(issuer));
+    const lookups = resolvesTo("10.0.0.5");
+    await loadOidcClient(client(issuer, "t1"));
+    assert.equal(lookups.mock.callCount(), 0, "the name is not looked up at sign-in");
+  });
+
+  it("is refused when it is first set up, naming the setting that allows it", async () => {
+    await assert.rejects(checkIssuer("https://keycloak.lan/realms/main"), /APP_SSO_ALLOW_PRIVATE_ISSUER/);
+    // A public-looking name that points inside is caught by looking it up.
+    resolvesTo("10.0.0.5");
+    await assert.rejects(checkIssuer("https://sso.example.com"), /APP_SSO_ALLOW_PRIVATE_ISSUER/);
+  });
+
+  it("at sign-in, still refuses a discovery document that names some other internal host", async () => {
+    const issuer = "https://sso.example.com";
+    serve(doc(issuer, { token_endpoint: "https://tokens.corp/token" }));
+    await assert.rejects(
+      loadOidcClient(client(issuer, "t2")),
+      /token endpoint points at a private or internal address/
+    );
+  });
+
+  it("at sign-in, still refuses what was always refused", async () => {
+    await assert.rejects(loadOidcClient(client("https://10.0.0.5", "t3")), /APP_SSO_ALLOW_PRIVATE_ISSUER/);
+    await assert.rejects(loadOidcClient(client("https://idp.internal", "t4")), /APP_SSO_ALLOW_PRIVATE_ISSUER/);
+  });
+
+  it("is looked up when a configuration with a new issuer is saved, not when one in use is re-saved", async () => {
+    const base = {
+      provider: "okta",
+      issuer: OKTA,
+      clientId: "client-1",
+      clientSecret: "secret-1",
+      redirectUri: "https://admin.example.com/api/auth/oidc/callback",
+      allowedDomains: ["example.com"],
+    };
+    try {
+      const lookups = resolvesTo("203.0.113.7");
+      await saveSsoConfig(base);
+      assert.equal(lookups.mock.callCount(), 1);
+      // From here the name points inside. The saved issuer stays usable...
+      lookups.mock.mockImplementation((async () => [{ address: "10.0.0.5", family: 4 }]) as never);
+      await saveSsoConfig({ allowedDomains: ["example.org"] });
+      assert.equal(lookups.mock.callCount(), 1, "an unchanged issuer is not looked up again");
+      assert.deepEqual(readSsoConfig()?.allowedDomains, ["example.org"]);
+      // ...and a change to another one that points inside is refused, unwritten.
+      await assert.rejects(
+        saveSsoConfig({ issuer: "https://other.okta.com/oauth2/default", clientSecret: "secret-2" }),
+        /APP_SSO_ALLOW_PRIVATE_ISSUER/
+      );
+      assert.equal(readSsoConfig()?.issuer, OKTA);
+    } finally {
+      fs.rmSync(`${TEST_DATA_DIR}/sso.json`, { force: true });
+    }
   });
 });
 
