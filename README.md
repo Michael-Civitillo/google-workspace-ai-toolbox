@@ -240,9 +240,9 @@ open-admin [options]
   --help, -h           show this help
 ```
 
-**Portable mode.** Create an empty file called `portable.txt` next to the executable and it keeps everything beside itself instead of in your user profile — handy for a USB stick or a locked-down machine.
+**Portable mode.** Create an empty file called `portable.txt` next to the executable and it keeps everything beside itself instead of in your user profile — handy for a USB stick or a locked-down machine. The console says when portable mode is on, and every start checks the application files beside the program against the program itself, unpacking a fresh copy if anything was changed or added. Keep that folder somewhere only you can write to.
 
-**Extra settings.** Optional keys like a Gemini API key can go in a `launcher.env` file in the data folder (`KEY=value`, one per line), so you never touch system environment variables. Real environment variables win over that file. This is also where `APP_ALLOWED_ORIGINS` goes if you put the single-file build behind a [Cloudflare Tunnel](docs/DEPLOY-CLOUDFLARE.md).
+**Extra settings.** Optional keys like a Gemini API key can go in a `launcher.env` file in the data folder (`KEY=value`, one per line), so you never touch system environment variables. Real environment variables win over that file. This is also where `APP_ALLOWED_ORIGINS` goes if you put the single-file build behind a [Cloudflare Tunnel](docs/DEPLOY-CLOUDFLARE.md), and where proxy settings (`HTTPS_PROXY`, `NO_PROXY`) can go. Settings that would turn off certificate checks or load other code (`NODE_OPTIONS`, `NODE_TLS_REJECT_UNAUTHORIZED` and the like) are ignored there, with a warning.
 
 **Changing the port** changes the sign-in URL, so update the redirect URI in your identity provider if you use single sign-on.
 

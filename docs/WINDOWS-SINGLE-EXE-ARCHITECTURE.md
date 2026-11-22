@@ -122,30 +122,37 @@ OpenAdmin-win-x64.exe  (= node.exe + injected SEA blob)
 
 %LOCALAPPDATA%\GoogleWorkspaceOpenAdmin\
 ├── app\
+│   ├── open-admin.lock          held while a launch unpacks, repairs or cleans up
 │   └── 0.2.0-1a2b3c4d5e6f\     extracted payload; name = version + 12 hex of payload sha256
 │       ├── .complete           marker: written last, contains ISO timestamp + hash
 │       ├── server.js
 │       ├── .next\ node_modules\ public\
-└── data\                        OPEN_ADMIN_DATA_DIR
+└── data\                        OPEN_ADMIN_DATA_DIR (owner-only on macOS and Linux)
     ├── launcher.json            { version, port, password, sessionSecret, openBrowser }
     ├── launcher.env             optional KEY=VALUE lines merged into the server env
-    ├── launcher.lock            { pid, port, startedAt } while running
+    ├── launcher.lock            { pid, port, host, startedAt, token } while running, owner-only
+    ├── startup.lock             held from "already running?" until the server is up
     ├── logs\launcher.log        rotating copy of console output
     ├── tenants.json  sso.json  app-config.json  audit.log
     └── credentials\             relocated service-account keys (config import)
 ```
 
+The launcher also carries a manifest of every payload file's path, size and
+SHA-256, baked in at build time (`build-payload.mjs` writes it,
+`build-launcher.mjs` embeds it), and checks the unpacked copy against it
+before every start (step 4).
+
 ### 4.2 Runtime sequence
 
-1. **Parse args and env** (`--port`, `--data-dir`, `--no-browser`, …; section 8.2). Resolve `root` and `dataDir`; create `dataDir`.
-2. **Load launcher config** from `data/launcher.json`, then `data/launcher.env`, then process env, then CLI flags (later wins). If no password from any source: if stdin is a TTY, prompt twice with echo off and save; otherwise generate a random one, print it once, save it. Generate and persist `sessionSecret` on first run.
-3. **Single-instance check.** Read `launcher.lock`; if its pid is alive and `GET http://127.0.0.1:<port>/login` answers, print "already running", open the browser (unless `--no-browser`) and exit 0. Otherwise if the port is in use by something else, exit 3 with a message naming `--port`. Doing this before starting Next matters: Next calls `process.exit(1)` on `EADDRINUSE` with `allowRetry: false`.
-4. **Ensure the app is extracted.** Compute `appDir = root/app/<version>-<hash12>`. If `appDir/.complete` exists, done. Else extract the zip (pure JS, `fflate`) into `appDir.tmp-<pid>`, write `.complete`, rename to `appDir`. Retry `EBUSY`/`EPERM` writes and the final rename with backoff (Windows AV). Prune other `root/app/*` directories best-effort after a successful start.
-5. **Set the server environment** (section 4.3) on `process.env`.
-6. **Start Next in-process:** `createRequire(appDir/server.js)(appDir/server.js)`. Next's `startServer` binds `127.0.0.1:<port>`.
-7. **Wait for readiness:** poll `GET /login` until 200 (timeout 60 s, exit 5 on failure). Write `launcher.lock`.
-8. **Announce and open:** print the URL, data dir, and "Press Ctrl+C to stop". Open `http://localhost:<port>` via `cmd /c start "" <url>`.
-9. **Run until signal.** On `SIGINT`/`SIGTERM`: log, remove `launcher.lock`, give Next 2 s to close, then `process.exit(0)`.
+1. **Parse args and env** (`--port`, `--data-dir`, `--no-browser`, …; section 8.2). Resolve `root` and `dataDir`; create `dataDir` owner-only (macOS and Linux). Say when portable mode is on and which file turned it on.
+2. **Load launcher config** from `data/launcher.json`, then `data/launcher.env`, then process env, then CLI flags (later wins). `launcher.env` may not set anything that turns off certificate checks or chooses code to load or run (`NODE_OPTIONS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `LD_*`, …); those are ignored with a warning. If no password from any source: generate one when signing in automatically; otherwise prompt on a TTY, or generate one and say where it is saved (never print it). A password from the environment is used for that run and not saved. Generate and persist `sessionSecret` on first run.
+3. **Single-instance check**, under `startup.lock` (exclusive create; taken over when its process is gone), so a second launch a moment later waits for the first. Read `launcher.lock`; if its pid is alive, `GET /login` answers on its port, and the server there proves it knows the lock's token (`GET /api/auth/launch-ticket?challenge=<64 hex>` → HMAC-SHA256 keyed by the token), print "already running", open the browser (unless `--no-browser`) and exit 0. Anything else on that port is not ours: nothing is sent to it, and the start carries on. If the port is in use (on loopback, also when something listens on the other loopback address), exit 3 when it was asked for with `--port`, else take the next free one. Doing this before starting Next matters: Next calls `process.exit(1)` on `EADDRINUSE` with `allowRetry: false`.
+4. **Ensure the app is extracted**, under `app/open-admin.lock`. Compute `appDir = root/app/<version>-<hash12>`. If `appDir/.complete` exists, check the copy against the manifest: every file present at its size, or, outside the per-user folder (portable mode, `--root`), every file hashed and nothing extra; a copy that fails is moved aside and unpacked again. Else extract the zip (pure JS, `fflate`) into `appDir.tmp-<pid>`, write `.complete`, rename to `appDir`. Retry `EBUSY`/`EPERM` writes (seconds) and the final rename (up to 30 s) with backoff (Windows AV). A marked copy is never deleted in place, and only the launcher's own names are ever deleted.
+5. **Set the server environment** (section 4.3) on `process.env`, including a fresh 32-byte `OPEN_ADMIN_INSTANCE_TOKEN`.
+6. **Start Next in-process:** `createRequire(appDir/server.js)(appDir/server.js)`. Next's `startServer` binds `127.0.0.1:<port>`. If loading fails, unpack again once and retry.
+7. **Wait for readiness:** poll `GET /login` until 200, on loopback when bound to every address (timeout 60 s, exit 5 on failure). Write `launcher.lock` (with the token, owner-only) and release `startup.lock`.
+8. **Announce and open:** print the URL, data dir, and "Press Ctrl+C to stop". Open `http://localhost:<port>` via `cmd /c start "" <url>` (on macOS and Linux, a ticket URL goes into an owner-only redirect page in the data folder instead of onto a command line). The opener gets the environment from before the launcher added its secrets. Then prune other versions of ours in `root/app`, best effort.
+9. **Run until signal.** On `SIGINT`/`SIGTERM` (and console close on Windows): log, remove `launcher.lock` if it is still ours, give Next 2 s to close, then `process.exit(0)`.
 
 ### 4.3 Launcher to app environment contract
 
@@ -429,11 +436,11 @@ Generate once and commit: render `public/logo.svg` to 16/24/32/48/64/128/256 px 
 ### 8.1 Module responsibilities
 
 - `payload.ts`: `loadPayload(): Uint8Array`. If `require("node:sea").isSea()`, return `Buffer.from(sea.getAsset("payload.zip"))`. Else (dev run: `node packaging/dist/launcher.cjs`) read `payload.zip` next to the script. Behind the same interface, a Bun-compiled build would return `Bun.file(embedded).bytes()` (section 8.6).
-- `paths.ts`: `defaultRoot()` = `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin` on Windows (fallback `~\AppData\Local`), `~/Library/Application Support/GoogleWorkspaceOpenAdmin` on macOS, `$XDG_DATA_HOME/GoogleWorkspaceOpenAdmin` or `~/.local/share/...` on Linux. **Portable mode:** if a `data` directory or a `portable.txt` file exists next to the executable, use `<exeDir>/data` and `<exeDir>/app` instead (USB-stick or shared-folder use). `appDirFor(root, version, hash)`.
-- `config.ts`: load and merge (lowest to highest): `launcher.json`, `launcher.env`, `process.env`, CLI flags. Password prompt via `node:readline` with echo suppressed (write `*`), twice, minimum 12 characters. Non-TTY: `crypto.randomBytes(18).toString("base64url")`, printed once with a warning, saved. `--set-password` re-prompts and saves. Writes `launcher.json` atomically (tmp + rename) — the same pattern as `src/lib/json-store.ts`.
-- `extract.ts`: `ensureExtracted(zip, appDir)`. `unzipSync` from `fflate` into `appDir + ".tmp-" + pid`; `writeFileSync` with retry on `EBUSY`/`EPERM`/`EACCES` (5 attempts, 100 ms × 2ⁿ); `.complete` marker written last; `renameSync` with the same retry; on any failure remove the tmp dir and exit 4 with the path and error. `pruneOldVersions(root, keepDir)` best-effort after start. `--reset-app-cache` deletes `root/app` before extraction.
-- `instance.ts`: `readLock()`, `isAlive(pid)` via `process.kill(pid, 0)`, `probe(port)` = `GET /login` with 1 s timeout, `writeLock()`, `removeLock()`.
-- `server.ts`: `applyServerEnv(cfg)` (section 4.3), `startServer(appDir)` = `createRequire(serverJs)(serverJs)`, `waitUntilReady(port, host, 60_000)`, `installShutdown()` for `SIGINT`/`SIGTERM` (2 s grace, then `process.exit`). Also the **execPath compat shim**: if `process.argv[1]` is an existing `.js`/`.cjs`/`.mjs` file, run it via `createRequire`/`import()` and return, so anything that spawns `process.execPath script.js` still works. Not needed today (no child processes observed) but cheap insurance.
+- `paths.ts`: `defaultRoot()` = `%LOCALAPPDATA%\GoogleWorkspaceOpenAdmin` on Windows (fallback `~\AppData\Local`), `~/Library/Application Support/GoogleWorkspaceOpenAdmin` on macOS, `$XDG_DATA_HOME/GoogleWorkspaceOpenAdmin` or `~/.local/share/...` on Linux. **Portable mode:** if a `portable.txt` file, or a `data` folder holding a `launcher.json`, exists next to the executable, use `<exeDir>/data` and `<exeDir>/app` instead (USB-stick or shared-folder use); the file that triggered it is reported. `appDirFor(root, version, hash)`.
+- `config.ts` / `settings.ts`: load and merge (lowest to highest): `launcher.json`, `launcher.env` (minus the refused names), `process.env`, CLI flags. Password prompt with echo suppressed (write `*`), twice, minimum 12 characters. Non-TTY: `crypto.randomBytes(18).toString("base64url")`, saved, and only its location printed. A password from the environment is not saved. `--set-password` re-prompts and saves. Writes `launcher.json` the way `src/lib/json-store.ts` writes its stores (random temporary name created exclusively and owner-only, fsync, rename with retries, temporary removed on failure). A stored port outside 1-65535 is ignored.
+- `extract.ts`: `ensureExtracted(zip, appDir)`. `unzipSync` from `fflate` into `appDir + ".tmp-" + pid`; writes and directory creation retried on `EBUSY`/`EPERM`/`EACCES`; `.complete` marker written last and fsynced; the final rename retried for up to 30 s; on any failure remove the tmp dir and exit 4 with the path and error. `pruneOtherVersions(appRoot, keepDir)` best-effort after the browser opens, and `resetAppCache(appRoot)` for `--reset-app-cache`, delete only the launcher's own names (marked `<version>-<hash12>` folders, `.tmp-<pid>` folders of dead processes, `.del-` folders) and never follow links. `verify.ts` checks a copy against the baked-in manifest.
+- `instance.ts`: `readLock()`, `isProcessAlive(pid)` via `process.kill(pid, 0)`, `probeHttp()` = `GET /login`, `verifyInstance()` (the token proof), `writeLock()` (owner-only), `removeOwnLock()`, `isPortAvailable()` (with the other-loopback check). `lock.ts`: the exclusive start-up and application-folder locks.
+- `server.ts`: `applyServerEnv(cfg)` (section 4.3), `startServer(appDir)` = `createRequire(serverJs)(serverJs)`, `waitUntilReady(host, port, 60_000)` at the reachable address (`address.ts`), `installShutdown()` for `SIGINT`/`SIGTERM`, and `SIGHUP` on Windows (2 s grace, then `process.exit`). Also the **execPath compat shim**: if `process.argv[1]` is an existing `.js`/`.cjs`/`.mjs` file and the environment carries the marker the launcher sets for the server it starts, run it via `createRequire` and return, so anything the server spawns as `process.execPath script.js` still works. Not needed today (no child processes observed) but cheap insurance; without the marker a file dropped onto the executable would run.
 - `browser.ts`: Windows `cmd /c start "" <url>`, macOS `open`, Linux `xdg-open`; detached, stdio ignored, errors logged not thrown.
 - `log.ts`: timestamps, mirrors to `data/logs/launcher.log`, rotate at 1 MB, keep 5.
 - `args.ts`: flags below, `--help`, `--version`, exit codes.
