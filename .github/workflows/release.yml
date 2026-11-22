@@ -7,9 +7,12 @@ name: Release builds
 # Two ways to publish, both of which release the version in package.json:
 #   - Actions tab -> Release builds -> Run workflow, on the default branch, with
 #     "Publish" ticked. No git needed; the v<version> tag is created for you.
-#   - Push a v<version> tag.
-# Everything else (pull requests, a run without the box ticked) builds and tests
-# without publishing.
+#   - Push a v<version> tag, on a commit that is on the default branch.
+# Everything else (pull requests, a run without the box ticked - even one
+# started from a tag) builds and tests without publishing. A version that has
+# already been released is never published again.
+#
+# Third-party actions are pinned by commit, with the release in a comment.
 
 on:
   push:
@@ -19,7 +22,11 @@ on:
       - "packaging/**"
       - "src/**"
       - "public/**"
+      - "scripts/**"
       - "next.config.ts"
+      - "tsconfig.json"
+      - "postcss.config.mjs"
+      - "eslint.config.mjs"
       - "package.json"
       - "package-lock.json"
       - "Dockerfile"
@@ -52,40 +59,84 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: 22
+          # The whole history, so a pushed tag can be checked against the
+          # default branch.
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.5"
           cache: npm
       # The executables carry the package.json version (the Windows one in its
       # file properties), so that is the only version a release can truthfully
-      # be called. Checked here, in the first job, so a mismatch costs seconds
-      # rather than a full build on three operating systems.
-      - name: Work out the release tag
+      # be called. Checked here, in the first job, so a run that must not
+      # publish stops in seconds rather than after a build on three systems.
+      - name: Decide whether this run publishes, and check that it may
         id: version
         env:
-          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          EVENT: ${{ github.event_name }}
+          PUBLISH_TICKED: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="v$(node -p "require('./package.json').version")"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "package.json says this is $tag"
-          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME was pushed, but package.json is $tag. Bump \"version\" in package.json to match before tagging."
-            exit 1
-          fi
-          if [ "$PUBLISH" = "true" ]; then
-            if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+
+          # Exactly two kinds of run publish: a pushed v* tag, and a run from
+          # the Actions tab with Publish ticked.
+          publish=false
+          if [ "$EVENT" = push ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            publish=true
+            if [ "$GITHUB_REF_NAME" != "$tag" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME was pushed, but package.json is $tag. Bump \"version\" in package.json to match before tagging."
+              exit 1
+            fi
+            # Releases are built from the default branch, never from a commit
+            # only a tag points at.
+            git fetch --no-tags --quiet origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+              echo "::error::Tag $GITHUB_REF_NAME is on a commit that is not on $DEFAULT_BRANCH. Merge the change into $DEFAULT_BRANCH and tag a commit there."
+              exit 1
+            fi
+          elif [ "${PUBLISH_TICKED:-false}" = true ]; then
+            publish=true
+            if [ "$GITHUB_REF_TYPE" != branch ] || [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
               echo "::error::Releases are published from $DEFAULT_BRANCH. This run is on $GITHUB_REF_NAME; run it again there, or leave Publish unticked to only build and test."
               exit 1
             fi
-            if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
-              echo "::error::$tag has already been released. Bump \"version\" in package.json, merge that, and run this again."
+            # The tag is created when the release is published: it must not exist yet.
+            # git ls-remote --exit-code: 0 found, 2 not found, anything else failed.
+            found=0
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null || found=$?
+            if [ "$found" -eq 0 ]; then
+              echo "::error::$tag already exists. Bump \"version\" in package.json, merge that, and run this again."
+              exit 1
+            elif [ "$found" -ne 2 ]; then
+              echo "::error::Could not check whether $tag already exists (git ls-remote exited with $found). Run this again."
               exit 1
             fi
           fi
+
+          # Never publish over a release: re-pushing a tag stops here.
+          if [ "$publish" = true ]; then
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")" || true
+            if [ "$status" = 200 ]; then
+              echo "::error::$tag has already been released. Bump \"version\" in package.json, merge that, and release the new version instead."
+              exit 1
+            elif [ "$status" != 404 ]; then
+              echo "::error::Could not check whether $tag has been released (GitHub answered ${status:-nothing}). Run this again."
+              exit 1
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "this run publishes: $publish"
       - run: npm ci
       - run: npm run lint
       - run: npm run test:lib
@@ -93,7 +144,7 @@ jobs:
       - run: npm run package
       - run: npm run package:bin
       - run: npm run package:smoke
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: open-admin-linux-x64
           path: |
@@ -106,16 +157,16 @@ jobs:
     runs-on: macos-latest
     needs: linux
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: "22.23.5"
           cache: npm
       - run: npm ci
       - run: npm run package
       - run: npm run package:bin
       - run: npm run package:smoke
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: open-admin-macos-arm64
           path: |
@@ -128,10 +179,10 @@ jobs:
     runs-on: windows-latest
     needs: linux
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: "22.23.5"
           cache: npm
       - run: npm ci
       - run: npm run package
@@ -150,7 +201,7 @@ jobs:
           if ($sig -eq 'HashMismatch') { throw "executable carries an invalid signature" }
           Write-Host "product version: $((Get-Item $exe).VersionInfo.ProductVersion)"
       - run: npm run package:smoke
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: OpenAdmin-win-x64
           path: |
@@ -163,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: linux
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: docker build -t open-admin:ci .
       - name: Start a container the way the README does and probe it
         run: |
@@ -222,13 +273,57 @@ jobs:
 
   release:
     name: Publish the release
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    # A pushed v* tag, or a run from the Actions tab with Publish ticked - the
+    # event decides, not the ref: a manual run started from a tag with Publish
+    # unticked must not publish - and only once the first job has found that
+    # this version may be published.
+    if: >-
+      needs.linux.outputs.publish == 'true' &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish))
     needs: [linux, macos, windows, docker]
     runs-on: ubuntu-latest
+    # One publish per version at a time, so two runs for the same version
+    # cannot both pass the check below and then overwrite each other.
+    concurrency:
+      group: publish-${{ needs.linux.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      # The first job checked this before the builds; check again now that
+      # this job is the only one publishing this version.
+      - name: Make sure this version is still unpublished
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.linux.outputs.tag }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          status() {
+            curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/$1" || true
+          }
+          release="$(status "releases/tags/$TAG")"
+          if [ "$release" = 200 ]; then
+            echo "::error::$TAG has been released already, by another run. Nothing is published."
+            exit 1
+          elif [ "$release" != 404 ]; then
+            echo "::error::Could not check whether $TAG has been released (GitHub answered ${release:-nothing})."
+            exit 1
+          fi
+          if [ "$EVENT" = workflow_dispatch ]; then
+            tag="$(status "git/ref/tags/$TAG")"
+            if [ "$tag" = 200 ]; then
+              echo "::error::The tag $TAG was created by someone else while this run was building. Nothing is published."
+              exit 1
+            elif [ "$tag" != 404 ]; then
+              echo "::error::Could not check whether the tag $TAG exists (GitHub answered ${tag:-nothing})."
+              exit 1
+            fi
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -256,7 +351,7 @@ jobs:
             echo "**Checking the download:** the SHA-256 of \`OpenAdmin-win-x64.exe\` is \`$(cut -d' ' -f1 dist/OpenAdmin-win-x64.exe.sha256)\`. Every file has a \`.sha256\` beside it."
           } >> notes.md
           cat notes.md
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           # On a tag push this is the tag that was pushed (checked against
           # package.json in the first job). On a run from the Actions tab the
