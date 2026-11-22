@@ -37,6 +37,13 @@ export interface ResolvedPaths {
   appRoot: string;
   dataDir: string;
   portable: boolean;
+  /** The file beside the executable that switched portable mode on. */
+  portableTrigger: string | null;
+  /**
+   * True when the application folder is the per-user one, which only this
+   * user can write to. False in portable mode and with --root.
+   */
+  defaultRoot: boolean;
 }
 
 /** Per-user application-data folder for this OS. */
@@ -71,15 +78,27 @@ export function isPortableLayout(
   exeDir: string,
   exists: (p: string) => boolean
 ): boolean {
-  return (
-    exists(path.join(exeDir, "portable.txt")) ||
-    exists(path.join(exeDir, "data", "launcher.json"))
-  );
+  return portableTrigger(exeDir, exists) !== null;
+}
+
+/** The file that makes this a portable layout, or null when it isn't one. */
+export function portableTrigger(
+  exeDir: string,
+  exists: (p: string) => boolean
+): string | null {
+  for (const candidate of [
+    path.join(exeDir, "portable.txt"),
+    path.join(exeDir, "data", "launcher.json"),
+  ]) {
+    if (exists(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function resolvePaths(input: PathInputs): ResolvedPaths {
   const exists = input.exists ?? ((p: string) => fs.existsSync(p));
-  const portable = !input.rootFlag && isPortableLayout(input.exeDir, exists);
+  const trigger = input.rootFlag ? null : portableTrigger(input.exeDir, exists);
+  const portable = trigger !== null;
 
   const root = input.rootFlag
     ? path.resolve(input.rootFlag)
@@ -93,7 +112,14 @@ export function resolvePaths(input: PathInputs): ResolvedPaths {
     ? path.resolve(input.env.OPEN_ADMIN_DATA_DIR.trim())
     : path.join(root, "data");
 
-  return { root, appRoot: path.join(root, "app"), dataDir, portable };
+  return {
+    root,
+    appRoot: path.join(root, "app"),
+    dataDir,
+    portable,
+    portableTrigger: trigger,
+    defaultRoot: !input.rootFlag && !portable,
+  };
 }
 
 /** Directory name for one payload: version plus a short content hash. */

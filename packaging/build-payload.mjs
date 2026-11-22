@@ -179,6 +179,9 @@ function main() {
     );
   }
   const entries = {};
+  // Every file's size and SHA-256, baked into the launcher (build-launcher.mjs)
+  // so the unpacked copy can be checked before it is run: [path, size, sha256].
+  const manifest = [];
   let rawBytes = 0;
   const needles = roots.flatMap(spellings).map((s) => Buffer.from(s, "utf-8"));
   const stillNamed = [];
@@ -186,6 +189,7 @@ function main() {
     const bytes = fs.readFileSync(path.join(stageDir, relative));
     rawBytes += bytes.length;
     entries[relative] = new Uint8Array(bytes);
+    manifest.push([relative, bytes.length, createHash("sha256").update(bytes).digest("hex")]);
     if (needles.some((needle) => bytes.includes(needle))) stillNamed.push(relative);
   }
   if (stillNamed.length > 0) {
@@ -225,6 +229,12 @@ function main() {
       null,
       2
     )}\n`
+  );
+  // Tied to this exact archive: build-launcher.mjs refuses a manifest whose
+  // sha256 is not the payload's.
+  fs.writeFileSync(
+    path.join(distDir, "payload-manifest.json"),
+    `${JSON.stringify({ sha256, files: manifest })}\n`
   );
 
   const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`;

@@ -45,11 +45,28 @@ import {
 } from "./server.ts";
 import { error, info, initLogFile, logFile, plain, warn } from "./log.ts";
 import { isLoopbackHost, requestLaunchTicket, signInUrl } from "./signin.ts";
+import {
+  checkAppDir,
+  clearFullCheckRequest,
+  fullCheckRequested,
+  parseManifest,
+  requestFullCheck,
+  type CheckMode,
+  type ManifestEntry,
+} from "./verify.ts";
 import { shouldHoldWindow, waitForKey } from "./window.ts";
 
 /** Replaced at build time by packaging/build-launcher.mjs. */
 declare const __APP_VERSION__: string;
 declare const __PAYLOAD_SHA256__: string;
+/** JSON: [path, size, sha256] for every file in the payload. */
+declare const __PAYLOAD_MANIFEST__: string;
+
+let manifestEntries: ManifestEntry[] | null = null;
+function manifest(): ManifestEntry[] {
+  manifestEntries ??= parseManifest(__PAYLOAD_MANIFEST__);
+  return manifestEntries;
+}
 
 /**
  * Load the embedded archive, check it is the one this launcher was built
@@ -232,15 +249,6 @@ async function withAppLock<T>(
   }
 }
 
-/**
- * Why the unpacked copy in `appDir` can't be used as it is, or null when it
- * can. A missing server.js is what antivirus quarantine or a half-finished
- * clean-up leaves behind, and it used to stop every start with "Fatal".
- */
-function appDirProblem(appDir: string): string | null {
-  return fs.existsSync(path.join(appDir, "server.js")) ? null : "server.js is missing";
-}
-
 /** Unpack a fresh copy into `appDir` and say so. */
 function unpackFresh(appDir: string): string {
   const result = extractVerifiedPayload(appDir);
@@ -254,21 +262,40 @@ function unpackFresh(appDir: string): string {
 }
 
 /**
- * Make sure a usable copy of this version is unpacked, repairing a damaged
- * one. The app directory is keyed by the payload hash baked in at build time,
- * so a launch that finds it already extracted never touches the embedded
- * archive: no copy out of the executable, no hashing, nothing resident
- * afterwards. Called with the application folder's lock held.
+ * Make sure a usable copy of this version is unpacked, repairing a damaged or
+ * altered one. The app directory is keyed by the payload hash baked in at
+ * build time, so a launch that finds it already extracted never touches the
+ * embedded archive: no copy out of the executable, no hashing of it, nothing
+ * resident afterwards. What is in the folder is checked against the manifest
+ * baked in beside that hash instead (verify.ts): every file read and hashed
+ * when `mode` is "full", present at the right size otherwise. A missing file
+ * is what antivirus quarantine or a half-finished clean-up leaves behind, and
+ * it used to stop every start with "Fatal". Called with the application
+ * folder's lock held.
  */
-function prepareAppDir(appDir: string, appRoot: string, reset: boolean): string {
+function prepareAppDir(appDir: string, appRoot: string, reset: boolean, mode: CheckMode): string {
   if (reset) {
     info("Clearing extracted application files (--reset-app-cache).");
     resetAppCache(appRoot);
   }
   if (isExtracted(appDir)) {
-    const problem = appDirProblem(appDir);
-    if (!problem) return appDir;
-    warn(`The unpacked application in ${appDir} is damaged (${problem}). Unpacking a fresh copy ...`);
+    const thorough = mode === "full" || fullCheckRequested(appDir);
+    const startedAt = Date.now();
+    const problem = checkAppDir(appDir, manifest(), thorough ? "full" : "quick");
+    if (!problem) {
+      if (thorough) {
+        info(
+          `Checked ${manifest().length.toLocaleString("en-US")} application files against ` +
+            `this program in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`
+        );
+        clearFullCheckRequest(appDir);
+      }
+      return appDir;
+    }
+    warn(
+      `The unpacked application in ${appDir} is damaged or has been changed ` +
+        `(${problem}). Unpacking a fresh copy ...`
+    );
     if (!discardDir(appDir)) {
       throw new Error(`the damaged copy in ${appDir} could not be removed`);
     }
@@ -380,10 +407,13 @@ async function startUnderLock(
   }
 
   const wantedAppDir = appDirFor(paths.appRoot, __APP_VERSION__, __PAYLOAD_SHA256__);
+  // Outside the per-user folder (portable mode, --root) other people may be
+  // able to write where the application is unpacked: check every file.
+  const checkMode: CheckMode = paths.defaultRoot ? "quick" : "full";
   let appDir: string;
   try {
     appDir = await withAppLock(paths.appRoot, () =>
-      prepareAppDir(wantedAppDir, paths.appRoot, args.resetAppCache)
+      prepareAppDir(wantedAppDir, paths.appRoot, args.resetAppCache, checkMode)
     );
   } catch (e) {
     if (e instanceof LockTimeoutError) {
@@ -446,12 +476,22 @@ async function startUnderLock(
     }
   }
 
+  // The server loads most of itself asynchronously, and exits the process if
+  // that fails. If this process ends before the server is ready, the next
+  // start reads and hashes every file rather than only counting them.
+  let ready = false;
+  const startedFrom = appDir;
+  process.on("exit", (code) => {
+    if (!ready && code !== 0) requestFullCheck(startedFrom);
+  });
+
   try {
     await waitUntilReady(host, port, READY_TIMEOUT_MS);
   } catch (e) {
     error(`The server didn't finish starting: ${describe(e)}`);
     return EXIT_NOT_READY;
   }
+  ready = true;
 
   writeLock(lockFile, {
     pid: process.pid,
@@ -490,9 +530,27 @@ async function run(userArgs: string[]): Promise<number | null> {
   plain("");
   plain(`${APP_TITLE} ${__APP_VERSION__}  (Node ${process.version})`);
   info(`Data folder: ${paths.dataDir}${paths.portable ? "  (portable mode)" : ""}`);
+  if (paths.portableTrigger) {
+    const byMarker = path.basename(paths.portableTrigger) === "portable.txt";
+    info(
+      `Portable mode is on because ${paths.portableTrigger} exists: the application ` +
+        `and its data are kept beside this program, in ${paths.root}.` +
+        (byMarker ? " Delete portable.txt to keep them in your user profile instead." : "")
+    );
+  }
 
-  const applied = applyEnvFile(path.join(paths.dataDir, "launcher.env"));
-  if (applied.length > 0) info(`Loaded from launcher.env: ${applied.join(", ")}`);
+  const envFile = path.join(paths.dataDir, "launcher.env");
+  const fromEnvFile = applyEnvFile(envFile);
+  if (fromEnvFile.applied.length > 0) {
+    info(`Loaded from launcher.env: ${fromEnvFile.applied.join(", ")}`);
+  }
+  if (fromEnvFile.refused.length > 0) {
+    warn(
+      `Ignored in launcher.env: ${fromEnvFile.refused.join(", ")}. Settings that turn off ` +
+        `certificate checks or choose code to load or run are not accepted from that ` +
+        `file; set them in the environment instead if you really need them.`
+    );
+  }
 
   const host = args.host ?? DEFAULT_HOST;
   // Signing the browser in automatically is for the person at this machine.

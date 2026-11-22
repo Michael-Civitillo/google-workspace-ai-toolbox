@@ -92,6 +92,32 @@ describe("resolvePaths", () => {
     assert.equal(paths.root, "/srv/openadmin");
     assert.equal(paths.dataDir, "/srv/openadmin/data");
     assert.equal(paths.portable, false);
+    assert.equal(paths.portableTrigger, null);
+  });
+
+  it("says which file switched portable mode on", () => {
+    const byMarker = resolvePaths({
+      ...base,
+      exists: (p: string) => p === path.join("/downloads", "portable.txt"),
+    });
+    assert.equal(byMarker.portableTrigger, path.join("/downloads", "portable.txt"));
+    const byData = resolvePaths({
+      ...base,
+      exists: (p: string) => p === path.join("/downloads", "data", "launcher.json"),
+    });
+    assert.equal(byData.portableTrigger, path.join("/downloads", "data", "launcher.json"));
+    assert.equal(resolvePaths(base).portableTrigger, null);
+  });
+
+  it("marks only the per-user folder as the default root", () => {
+    assert.equal(resolvePaths(base).defaultRoot, true);
+    assert.equal(resolvePaths({ ...base, rootFlag: "/srv/openadmin" }).defaultRoot, false);
+    assert.equal(
+      resolvePaths({ ...base, exists: (p: string) => p.endsWith("portable.txt") }).defaultRoot,
+      false
+    );
+    // Moving only the data folder leaves the application in the per-user folder.
+    assert.equal(resolvePaths({ ...base, dataDirFlag: "/elsewhere" }).defaultRoot, true);
   });
 
   it("lets --data-dir move only the data, not the app cache", () => {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import {
   applyEnvFile,
+  isRefusedEnvName,
   generatePassword,
   generateSessionSecret,
   MIN_PASSWORD_LENGTH,
@@ -102,7 +103,7 @@ describe("applyEnvFile", () => {
     const file = tmpFile("one.env");
     fs.writeFileSync(file, "SMOKE_TEST_FRESH=applied\n");
     delete process.env.SMOKE_TEST_FRESH;
-    const applied = applyEnvFile(file);
+    const { applied } = applyEnvFile(file);
     assert.deepEqual(applied, ["SMOKE_TEST_FRESH"]);
     assert.equal(process.env.SMOKE_TEST_FRESH, "applied");
     delete process.env.SMOKE_TEST_FRESH;
@@ -112,13 +113,60 @@ describe("applyEnvFile", () => {
     const file = tmpFile("two.env");
     fs.writeFileSync(file, "SMOKE_TEST_EXISTING=from-file\n");
     process.env.SMOKE_TEST_EXISTING = "from-environment";
-    assert.deepEqual(applyEnvFile(file), []);
+    assert.deepEqual(applyEnvFile(file), { applied: [], refused: [] });
     assert.equal(process.env.SMOKE_TEST_EXISTING, "from-environment");
     delete process.env.SMOKE_TEST_EXISTING;
   });
 
   it("is a no-op when the file is absent", () => {
-    assert.deepEqual(applyEnvFile(tmpFile("absent.env")), []);
+    assert.deepEqual(applyEnvFile(tmpFile("absent.env")), { applied: [], refused: [] });
+  });
+
+  it("refuses settings that turn off certificate checks or load code, in any letter case", () => {
+    const file = tmpFile("hostile.env");
+    fs.writeFileSync(
+      file,
+      [
+        "NODE_TLS_REJECT_UNAUTHORIZED=0",
+        "node_options=--require ./evil.js",
+        "NODE_EXTRA_CA_CERTS=/tmp/ca.pem",
+        "LD_PRELOAD=/tmp/evil.so",
+        "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib",
+        "GWS_BIN=/tmp/evil",
+        "GEMINI_MODEL=gemini-2.5-flash",
+      ].join("\n")
+    );
+    const env: NodeJS.ProcessEnv = {};
+    const result = applyEnvFile(file, env);
+    assert.deepEqual(result.applied, ["GEMINI_MODEL"]);
+    assert.deepEqual(result.refused, [
+      "NODE_TLS_REJECT_UNAUTHORIZED",
+      "node_options",
+      "NODE_EXTRA_CA_CERTS",
+      "LD_PRELOAD",
+      "DYLD_INSERT_LIBRARIES",
+      "GWS_BIN",
+    ]);
+    assert.deepEqual(Object.keys(env), ["GEMINI_MODEL"]);
+  });
+
+  it("still accepts proxy settings", () => {
+    const file = tmpFile("proxy.env");
+    fs.writeFileSync(file, "HTTPS_PROXY=http://proxy:8080\nhttp_proxy=http://proxy:8080\nNO_PROXY=localhost\n");
+    const env: NodeJS.ProcessEnv = {};
+    assert.deepEqual(applyEnvFile(file, env), {
+      applied: ["HTTPS_PROXY", "http_proxy", "NO_PROXY"],
+      refused: [],
+    });
+  });
+
+  it("names the refused settings", () => {
+    for (const name of ["NODE_OPTIONS", "Path", "ComSpec", "SSL_CERT_FILE", "OPENSSL_CONF", "LD_LIBRARY_PATH"]) {
+      assert.equal(isRefusedEnvName(name), true, name);
+    }
+    for (const name of ["HTTPS_PROXY", "NO_PROXY", "APP_ALLOWED_ORIGINS", "GEMINI_MODEL", "NODE_ENV"]) {
+      assert.equal(isRefusedEnvName(name), false, name);
+    }
   });
 });
 

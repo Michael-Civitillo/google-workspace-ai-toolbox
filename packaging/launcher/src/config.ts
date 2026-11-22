@@ -89,25 +89,72 @@ export function parseEnvFile(text: string): Record<string, string> {
 }
 
 /**
+ * Settings launcher.env may not make. The file sits in the data folder, which
+ * in portable mode is beside the executable and can be somewhere other people
+ * write to; a line there must not be able to turn off certificate checking or
+ * choose code for this program, the server, or the programs it starts to load
+ * or run. Anyone who really needs one of these sets it in the environment
+ * instead, where it applies only to what they start. Proxy settings
+ * (HTTPS_PROXY, NO_PROXY, ...) remain allowed.
+ */
+const REFUSED_ENV_NAMES: ReadonlySet<string> = new Set([
+  // Turn off, or widen, certificate checks.
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  // Load code into Node, or into programs started with this environment.
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "NODE_COMPILE_CACHE",
+  "OPENSSL_CONF",
+  "OPENSSL_MODULES",
+  "OPENSSL_ENGINES",
+  // Choose which program runs.
+  "PATH",
+  "PATHEXT",
+  "COMSPEC",
+  "GWS_BIN",
+]);
+const REFUSED_ENV_PREFIXES = ["LD_", "DYLD_"];
+
+/** True for a name launcher.env may not set (case-insensitive, as on Windows). */
+export function isRefusedEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return REFUSED_ENV_NAMES.has(upper) || REFUSED_ENV_PREFIXES.some((p) => upper.startsWith(p));
+}
+
+export interface EnvFileResult {
+  /** Names set from the file. */
+  applied: string[];
+  /** Names in the file that were ignored because the file may not set them. */
+  refused: string[];
+}
+
+/**
  * Apply a launcher.env file to the process environment. Real environment
  * variables win: the file is a convenience for people who would rather not
  * touch Windows' system settings, not an override of what they typed.
  */
-export function applyEnvFile(file: string): string[] {
+export function applyEnvFile(file: string, env: NodeJS.ProcessEnv = process.env): EnvFileResult {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf-8");
   } catch {
-    return [];
+    return { applied: [], refused: [] };
   }
   const applied: string[] = [];
+  const refused: string[] = [];
   for (const [key, value] of Object.entries(parseEnvFile(text))) {
-    if (process.env[key] === undefined) {
-      process.env[key] = value;
+    if (isRefusedEnvName(key)) {
+      refused.push(key);
+    } else if (env[key] === undefined) {
+      env[key] = value;
       applied.push(key);
     }
   }
-  return applied;
+  return { applied, refused };
 }
 
 export function generateSessionSecret(): string {
