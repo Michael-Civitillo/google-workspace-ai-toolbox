@@ -13,7 +13,7 @@ import { POST as createUser } from "@/app/api/admin/user/create/route";
 
 const BASE = "http://localhost:3000";
 
-const request = (path: string, cookie?: string, init: RequestInit = {}) =>
+const request = (path: string, cookie?: string, init: { method?: string; body?: string } = {}) =>
   new NextRequest(`${BASE}${path}`, {
     ...init,
     headers: {
