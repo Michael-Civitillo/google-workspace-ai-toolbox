@@ -168,7 +168,7 @@ before every start (step 4).
 | `SSO_CONFIG_PATH` | `data/sso.json` | existing override |
 | `OPEN_ADMIN_PACKAGED` | `1` | UI shows desktop-build copy, `gws` marked optional (C3) |
 | `NEXT_TELEMETRY_DISABLED` | `1` | no telemetry from a desktop tool |
-| pass-through | `GOOGLE_WORKSPACE_ADMIN_EMAIL`, `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL`, `GWS_CREDENTIALS_DIR`, `APP_SSO_DISABLED`, `TRUSTED_PROXY`, `GWS_BIN` | existing app knobs; `launcher.env` is the friendly way to set them |
+| pass-through | `GOOGLE_WORKSPACE_ADMIN_EMAIL`, `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL`, `GWS_CREDENTIALS_DIR`, `APP_SSO_DISABLED`, `TRUSTED_PROXY`, `GWS_BIN` | existing app knobs; `launcher.env` is the friendly way to set them (all but `GWS_BIN`, which names a program to run and so is only taken from the real environment) |
 
 Never set `GWS_CREDENTIALS_DIR` by default: it changes credential-path validation semantics (`src/lib/validate.ts:validateCredentialsFilePath`) and would reject keys stored elsewhere.
 
