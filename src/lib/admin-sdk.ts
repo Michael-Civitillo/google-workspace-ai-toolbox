@@ -65,7 +65,9 @@ const ADMIN_API_TIMEOUT_MS = 30_000;
 // only retry layer: with both, one failing call made 24 requests, a stalled
 // connection took about nine minutes to report, and writes the code marks
 // "never retry after a server error" (a primary-email rename, removing a
-// calendar share) were re-sent anyway.
+// calendar share) were re-sent anyway. What the client's retry did that ours
+// didn't, trying again when a call got no answer at all, withGoogleRetry
+// now does itself (see NO_RESPONSE_RETRIES).
 const CLIENT_DEFAULTS = { timeout: ADMIN_API_TIMEOUT_MS, retry: false } as const;
 
 export function buildGmailClient(tenant: Tenant | null, impersonateEmail: string, scopes: string[]) {
@@ -5235,20 +5237,7 @@ const EXHAUSTED_QUOTA_REASONS = new Set([
   "storagequotaexceeded",
 ]);
 
-/**
- * Decide whether a failed Google API call (Gmail, Drive, or Admin SDK) is worth
- * retrying.
- *
- * 429 (rate limit) is safe — the request was rejected before any work.
- * Google also signals per-user rate limits as 403 with a rate/quota reason
- * (Drive's `userRateLimitExceeded`, Gmail's `rateLimitExceeded`, the Admin
- * SDK's per-minute quotas), so we honour those. Daily-quota and storage-quota
- * exhaustion look similar but cannot clear within a backoff window, so they are
- * never retried. 5xx backend blips and bare network errors are retriable only
- * for idempotent operations (`retryServerErrors`), never for non-idempotent
- * writes like message inserts, where a 5xx might have committed and a blind
- * retry would duplicate.
- */
+/** Whether Google's refusal is about rate or quota, and which kind. */
 function quotaState(e: unknown): { rateLimited: boolean; exhausted: boolean; msg: string } {
   const msg =
     typeof e === "object" && e && "message" in e
@@ -5277,29 +5266,100 @@ function isQuotaRefusal(e: unknown): boolean {
   return rateLimited || exhausted;
 }
 
-function isRetriableGoogleError(
-  e: unknown,
-  opts: { retryServerErrors: boolean }
-): boolean {
+/**
+ * The system error code of a call that got no answer at all, from wherever
+ * the HTTP client left it: on the error itself, or down its chain of causes
+ * (Node's "fetch failed" carries the real reason one or two levels down).
+ */
+function networkErrorCode(e: unknown): string | null {
+  let cur: unknown = e;
+  for (let depth = 0; depth < 5 && typeof cur === "object" && cur !== null; depth++) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]+$/.test(code)) return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+// Nothing left this machine: the name didn't resolve, or nothing accepted the
+// connection. Sending again can't repeat anything, so even a write may retry.
+const NEVER_SENT_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+// The connection failed somewhere along the way. The request may have
+// arrived, so only a call that is safe to repeat retries these.
+const DROPPED_CONNECTION_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ECONNABORTED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EHOSTDOWN",
+  "ENETDOWN",
+  "UND_ERR_SOCKET",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+/**
+ * How many times a call that got no answer is tried again. Few and soon, as
+ * the Google client's own (now switched off) retry did: a blip in name
+ * resolution or a reset connection clears at once or not at all, and a
+ * machine that is offline should say so in a second, not sit out the long
+ * back-off meant for "Google asked us to slow down".
+ */
+const NO_RESPONSE_RETRIES = 2;
+
+type RetryKind = "no" | "backoff" | "no-response";
+
+/**
+ * Decide whether a failed Google API call (Gmail, Drive, or Admin SDK) is worth
+ * retrying, and on which schedule.
+ *
+ * 429 (rate limit) is safe — the request was rejected before any work.
+ * Google also signals per-user rate limits as 403 with a rate/quota reason
+ * (Drive's `userRateLimitExceeded`, Gmail's `rateLimitExceeded`, the Admin
+ * SDK's per-minute quotas), so we honour those. Daily-quota and storage-quota
+ * exhaustion look similar but cannot clear within a backoff window, so they are
+ * never retried. 5xx backend blips and dropped connections are retriable only
+ * for idempotent operations (`retryServerErrors`), never for non-idempotent
+ * writes like message inserts, where the request might have committed and a
+ * blind retry would duplicate. A call that provably never left this machine
+ * (the name didn't resolve, the connection was refused) is safe to send again
+ * whatever it was.
+ */
+function retryKindOf(e: unknown, opts: { retryServerErrors: boolean }): RetryKind {
   const status = httpStatusOf(e);
   const { rateLimited, exhausted, msg } = quotaState(e);
-  if (exhausted) return false;
-  if (status === 429) return true;
-  if (status === 403 && rateLimited) return true;
-  if (opts.retryServerErrors) {
-    if (status !== null && status >= 500 && status <= 599) return true;
-    if (
-      status === null &&
-      (msg.includes("econnreset") ||
-        msg.includes("etimedout") ||
-        msg.includes("socket hang up") ||
-        msg.includes("network") ||
-        msg.includes("timeout"))
-    ) {
-      return true;
-    }
+  if (exhausted) return "no";
+  if (status === 429) return "backoff";
+  if (status === 403 && rateLimited) return "backoff";
+  if (status !== null) {
+    return opts.retryServerErrors && status >= 500 && status <= 599 ? "backoff" : "no";
   }
-  return false;
+  // No HTTP answer at all.
+  const code = networkErrorCode(e);
+  if (code && NEVER_SENT_CODES.has(code)) return "no-response";
+  if (!opts.retryServerErrors) return "no";
+  if (
+    (code && DROPPED_CONNECTION_CODES.has(code)) ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("socket hang up") ||
+    msg.includes("network") ||
+    msg.includes("timeout") ||
+    // What Node's fetch, and the older node-fetch, say for any failed
+    // connection whose reason they tuck away in the cause.
+    msg.includes("fetch failed") ||
+    /^request to .* failed/.test(msg)
+  ) {
+    return "no-response";
+  }
+  return "no";
 }
 
 /**
@@ -5350,6 +5410,7 @@ export async function withGoogleRetry<T>(
 ): Promise<T> {
   const retries = opts.retries ?? 5;
   let attempt = 0;
+  let unanswered = 0;
   while (true) {
     // Before every attempt, not just the first: once the operator has cancelled
     // (or a proxy has timed out) another call only spends the tenant's API quota
@@ -5363,7 +5424,9 @@ export async function withGoogleRetry<T>(
       if (opts.signal?.aborted) throw new RequestAbortedError();
       if (isAbortError(e)) throw e;
       attempt++;
-      if (attempt > retries || !isRetriableGoogleError(e, opts)) throw e;
+      const kind = retryKindOf(e, opts);
+      if (attempt > retries || kind === "no") throw e;
+      if (kind === "no-response" && ++unanswered > NO_RESPONSE_RETRIES) throw e;
       const backoff = Math.min(8000, 300 * 2 ** (attempt - 1));
       const jitter = Math.floor(Math.random() * 300);
       await new Promise((r) => setTimeout(r, backoff + jitter));

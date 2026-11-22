@@ -146,7 +146,7 @@ before every start (step 4).
 
 1. **Parse args and env** (`--port`, `--data-dir`, `--no-browser`, …; section 8.2). Resolve `root` and `dataDir`; create `dataDir` owner-only (macOS and Linux). Say when portable mode is on and which file turned it on.
 2. **Load launcher config** from `data/launcher.json`, then `data/launcher.env`, then process env, then CLI flags (later wins). `launcher.env` may not set anything that turns off certificate checks or chooses code to load or run (`NODE_OPTIONS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `LD_*`, …); those are ignored with a warning. If no password from any source: generate one when signing in automatically; otherwise prompt on a TTY, or generate one and say where it is saved (never print it). A password from the environment is used for that run and not saved. Generate and persist `sessionSecret` on first run.
-3. **Single-instance check**, under `startup.lock` (exclusive create; taken over when its process is gone), so a second launch a moment later waits for the first. Read `launcher.lock`; if its pid is alive, `GET /login` answers on its port, and the server there proves it knows the lock's token (`GET /api/auth/launch-ticket?challenge=<64 hex>` → HMAC-SHA256 keyed by the token), print "already running", open the browser (unless `--no-browser`) and exit 0. Anything else on that port is not ours: nothing is sent to it, and the start carries on. If the port is in use (on loopback, also when something listens on the other loopback address), exit 3 when it was asked for with `--port`, else take the next free one. Doing this before starting Next matters: Next calls `process.exit(1)` on `EADDRINUSE` with `allowRetry: false`.
+3. **Single-instance check**, under `startup.lock` (exclusive create; taken over when its process is gone), so a second launch a moment later waits for the first. Read `launcher.lock`; if its pid is alive, `GET /login` answers on its port, and the server there proves it knows the lock's token (`GET /api/auth/launch-ticket?challenge=<64 hex>` → HMAC-SHA256 keyed by the token), print "already running", open the browser (unless `--no-browser`) and exit 0. A lock with no token whose port answers with Open Admin's sign-in page is a copy from 0.2.0 or earlier that is still open: say so and exit 7, since two servers must not share one data folder (and the old one deletes `launcher.lock` when it closes). Anything else on that port is not ours: nothing is sent to it, and the start carries on. If the port is in use (on loopback, also when something listens on the other loopback address), exit 3 when it was asked for with `--port`, else take the next free one. Doing this before starting Next matters: Next calls `process.exit(1)` on `EADDRINUSE` with `allowRetry: false`.
 4. **Ensure the app is extracted**, under `app/open-admin.lock`. Compute `appDir = root/app/<version>-<hash12>`. If `appDir/.complete` exists, check the copy against the manifest: every file present at its size, or, outside the per-user folder (portable mode, `--root`), every file hashed and nothing extra; a copy that fails is moved aside and unpacked again. Else extract the zip (pure JS, `fflate`) into `appDir.tmp-<pid>`, write `.complete`, rename to `appDir`. Retry `EBUSY`/`EPERM` writes (seconds) and the final rename (up to 30 s) with backoff (Windows AV). A marked copy is never deleted in place, and only the launcher's own names are ever deleted.
 5. **Set the server environment** (section 4.3) on `process.env`, including a fresh 32-byte `OPEN_ADMIN_INSTANCE_TOKEN`.
 6. **Start Next in-process:** `createRequire(appDir/server.js)(appDir/server.js)`. Next's `startServer` binds `127.0.0.1:<port>`. If loading fails, unpack again once and retry.
@@ -168,7 +168,7 @@ before every start (step 4).
 | `SSO_CONFIG_PATH` | `data/sso.json` | existing override |
 | `OPEN_ADMIN_PACKAGED` | `1` | UI shows desktop-build copy, `gws` marked optional (C3) |
 | `NEXT_TELEMETRY_DISABLED` | `1` | no telemetry from a desktop tool |
-| pass-through | `GOOGLE_WORKSPACE_ADMIN_EMAIL`, `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL`, `GWS_CREDENTIALS_DIR`, `APP_SSO_DISABLED`, `TRUSTED_PROXY`, `GWS_BIN` | existing app knobs; `launcher.env` is the friendly way to set them |
+| pass-through | `GOOGLE_WORKSPACE_ADMIN_EMAIL`, `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_MODEL`, `GWS_CREDENTIALS_DIR`, `APP_SSO_DISABLED`, `TRUSTED_PROXY`, `GWS_BIN` | existing app knobs; `launcher.env` is the friendly way to set them (all but `GWS_BIN`, which names a program to run and so is only taken from the real environment) |
 
 Never set `GWS_CREDENTIALS_DIR` by default: it changes credential-path validation semantics (`src/lib/validate.ts:validateCredentialsFilePath`) and would reject keys stored elsewhere.
 
@@ -463,7 +463,7 @@ OpenAdmin-win-x64.exe [options]
   --help
 ```
 
-Exit codes: `0` ok or already running; `2` usage; `3` port in use by another program; `4` extraction failed; `5` server did not become ready; `130` interrupted.
+Exit codes: `0` ok or already running; `2` usage; `3` port in use by another program; `4` extraction failed; `5` server did not become ready; `6` another copy is still starting; `7` an older version is still running on the same data folder; `130` interrupted.
 
 ### 8.3 launcher.json
 

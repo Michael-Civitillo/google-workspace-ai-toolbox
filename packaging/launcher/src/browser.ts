@@ -20,7 +20,11 @@ import { writeAllSync } from "./fsutil.ts";
  *    the URL and is deleted a couple of minutes later. Windows does not show
  *    one user's command lines to another, and there a local .html file may be
  *    set to open in an editor rather than the browser, so the URL is passed as
- *    before.
+ *    before. The same can be true on Linux, so there the page is used only
+ *    when .html files are known to open in the default browser; otherwise
+ *    the URL is passed, as in earlier versions. macOS offers no cheap way to
+ *    ask: someone who has pointed .html files at another program gets that
+ *    program, and the address printed in the console to open by hand.
  *  - The launcher's secrets. By the time the browser is opened the launcher's
  *    environment holds the password, the session secret and the instance
  *    token for the server. The opener (and so the browser) is started with a
@@ -115,6 +119,25 @@ export function isInHiddenFolder(dir: string, home: string = os.homedir()): bool
   return relative.split(path.sep).some((part) => part.startsWith("."));
 }
 
+/** What an xdg tool prints, trimmed; "" when it is missing, fails or says nothing. */
+function xdgAnswer(run: typeof spawnSync, command: string, args: string[]): string {
+  try {
+    const result = run(command, args, {
+      encoding: "utf8",
+      timeout: 1500,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return String(result.stdout ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** The default browser's desktop id on Linux ("firefox.desktop"), or "". */
+function defaultBrowserId(run: typeof spawnSync): string {
+  return xdgAnswer(run, "xdg-settings", ["get", "default-web-browser"]);
+}
+
 /**
  * True when the default browser is a snap package. Snaps cannot read files in
  * hidden folders of the home folder, which is where the data folder normally
@@ -122,17 +145,18 @@ export function isInHiddenFolder(dir: string, home: string = os.homedir()): bool
  * Snap desktop ids have the form "<snap>_<app>.desktop".
  */
 export function defaultBrowserIsSnap(run: typeof spawnSync = spawnSync): boolean {
-  try {
-    const result = run("xdg-settings", ["get", "default-web-browser"], {
-      encoding: "utf8",
-      timeout: 1500,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const id = String(result.stdout ?? "").trim();
-    return /^[a-z0-9][a-z0-9-]*_[A-Za-z0-9._-]+\.desktop$/.test(id);
-  } catch {
-    return false;
-  }
+  return /^[a-z0-9][a-z0-9-]*_[A-Za-z0-9._-]+\.desktop$/.test(defaultBrowserId(run));
+}
+
+/**
+ * True when a local .html file opens in the default browser on this Linux
+ * desktop: the program registered for text/html is the default browser.
+ * Where it is an editor, or can't be told, a sign-in page would open in the
+ * wrong program (or nowhere) while the launcher says the browser is opening.
+ */
+export function htmlFilesOpenInBrowser(run: typeof spawnSync = spawnSync): boolean {
+  const browser = defaultBrowserId(run);
+  return browser !== "" && xdgAnswer(run, "xdg-mime", ["query", "default", "text/html"]) === browser;
 }
 
 export interface OpenOptions {
@@ -149,9 +173,9 @@ export interface OpenOptions {
   pageIsReadable?: (dir: string) => boolean;
 }
 
-/** Whether the default browser can open a page written in `dir` (Linux). */
+/** Whether a page written in `dir` would open, in the default browser (Linux). */
 function linuxBrowserCanRead(dir: string): boolean {
-  return !(isInHiddenFolder(dir) && defaultBrowserIsSnap());
+  return htmlFilesOpenInBrowser() && !(isInHiddenFolder(dir) && defaultBrowserIsSnap());
 }
 
 /**

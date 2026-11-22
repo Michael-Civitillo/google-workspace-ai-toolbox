@@ -231,9 +231,9 @@ export const SSO_ERROR_MESSAGES: Record<string, string> = {
 /**
  * Which provider an issuer really is, judged from its host and never from the
  * provider chosen in the wizard's menu. Rules that depend on a provider's
- * behaviour (Google's hosted-domain claim, Entra's administrator-controlled
- * user principal name) follow this, so a mislabelled configuration can't
- * borrow another provider's leniency.
+ * behaviour (Google's hosted-domain claim, Entra's directory-managed
+ * addresses) follow this, so a mislabelled configuration can't borrow
+ * another provider's leniency.
  */
 export type IssuerFamily = "google" | "entra" | "other";
 
@@ -245,9 +245,25 @@ export function issuerFamily(issuer: string): IssuerFamily {
     return "other";
   }
   if (host === "accounts.google.com") return "google";
-  if (host === "login.microsoftonline.com" || host === "sts.windows.net") return "entra";
+  if (ENTRA_ISSUER_HOSTS.has(host)) return "entra";
   return "other";
 }
+
+/**
+ * Where Entra ID workforce tenants are issued from: the worldwide cloud and
+ * Microsoft's national ones (US Government, and China operated by 21Vianet),
+ * in both token versions. Exact names, all Microsoft's own. Not the
+ * customer-identity services (b2clogin.com, ciamlogin.com): anyone can sign
+ * up to those, so their addresses get no benefit of the doubt.
+ */
+const ENTRA_ISSUER_HOSTS = new Set([
+  "login.microsoftonline.com",
+  "sts.windows.net",
+  "login.microsoftonline.us",
+  "login.partner.microsoftonline.cn",
+  "login.chinacloudapi.cn",
+  "sts.chinacloudapi.cn",
+]);
 
 /** What the page asks people to type, and the server checks, before password sign-in goes off. */
 export const SSO_ONLY_CONFIRM_PHRASE = "ENABLE SSO";

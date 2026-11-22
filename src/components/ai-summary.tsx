@@ -68,8 +68,16 @@ export function AiSummary({ text }: { text: string }) {
     if (kind) {
       if (bullets.length > 0 && kind !== listKind) flushBullets(`list-${i}-switch`);
       listKind = kind;
+      // A numbered step keeps the number the model wrote. The steps often
+      // come with blank lines or sub-points between them, each of which ends
+      // one list and starts another, and every one would begin again at "1.".
+      const written = kind === "ol" ? Number.parseInt(line, 10) : NaN;
       bullets.push(
-        <li key={i} className="text-sm">
+        <li
+          key={i}
+          className="text-sm"
+          {...(Number.isInteger(written) && written >= 0 ? { value: written } : {})}
+        >
           {renderInline(line.replace(kind === "ul" ? BULLET : NUMBERED, ""))}
         </li>
       );

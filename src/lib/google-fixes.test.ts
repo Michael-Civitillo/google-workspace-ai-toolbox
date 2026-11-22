@@ -10,6 +10,7 @@ import {
   assertNotImpersonatedAdmin,
   buildInitialTransferCursor,
   changePrimaryDomain,
+  getUser,
   importMessageBatch,
   isAlreadyExistsError,
   listExternallySharedDriveFiles,
@@ -19,6 +20,7 @@ import {
   revokeAllOAuthTokens,
   revokeExternalPermissions,
   transferDriveFoldersOwnership,
+  withGoogleRetry,
 } from "./admin-sdk";
 import { ValidationError } from "./validate";
 import type { Tenant } from "./tenant-types";
@@ -424,6 +426,67 @@ describe("mailbox import", () => {
     assert.deepEqual(result.map, { Label_a: "Label_1", Label_b: "Label_new", INBOX: "INBOX" });
     assert.equal(result.unmappedCount, 2);
     assert.deepEqual(result.unmapped.map((u) => u.id).sort(), ["Label_c", "Label_d"]);
+  });
+});
+
+describe("a call that gets no answer", () => {
+  // The shapes Node's fetch gives a failed connection: "fetch failed", with
+  // the real reason a level down.
+  const failed = (code: string, reason: string) =>
+    Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error(reason), { code }),
+    });
+  const dnsBlip = () => failed("EAI_AGAIN", "getaddrinfo EAI_AGAIN admin.googleapis.com");
+  const reset = () => failed("ECONNRESET", "read ECONNRESET");
+  const aliceLookup = (call: Call) =>
+    call.method === "GET" && decodeURIComponent(call.url.pathname) === `${USERS_PATH}/alice@example.com`;
+
+  it("is tried again, through the real client, and succeeds once the blip has passed", async () => {
+    let tries = 0;
+    google.reset((call) => {
+      if (!aliceLookup(call)) return undefined;
+      if (++tries === 1) throw dnsBlip();
+      return json({ id: "2", primaryEmail: "alice@example.com", name: { fullName: "Alice" } });
+    });
+    const user = await getUser(tenant, "alice@example.com");
+    assert.equal(user.primaryEmail, "alice@example.com");
+    assert.equal(tries, 2);
+  });
+
+  it("is given up on after three tries, so being offline is said quickly", async () => {
+    let tries = 0;
+    google.reset((call) => {
+      if (!aliceLookup(call)) return undefined;
+      tries++;
+      throw dnsBlip();
+    });
+    const started = Date.now();
+    await assert.rejects(getUser(tenant, "alice@example.com"), /fetch failed/);
+    assert.equal(tries, 3);
+    assert.ok(Date.now() - started < 4000, "not the long back-off kept for 'slow down'");
+  });
+
+  it("re-sends a write only when nothing can have been sent", async () => {
+    const count = async (make: () => Error, retryServerErrors: boolean) => {
+      let tries = 0;
+      await assert.rejects(
+        withGoogleRetry(
+          async () => {
+            tries++;
+            throw make();
+          },
+          { retryServerErrors }
+        )
+      );
+      return tries;
+    };
+    // A connection that dropped part-way may have delivered the request.
+    assert.equal(await count(reset, false), 1, "a write is not repeated after a reset");
+    assert.equal(await count(reset, true), 3, "a read is");
+    // The name never resolved: nothing left this machine.
+    assert.equal(await count(dnsBlip, false), 3, "safe to send again, even a write");
+    // An error of our own making is not a connection problem.
+    assert.equal(await count(() => new Error("userEmail must be a valid email address"), true), 1);
   });
 });
 

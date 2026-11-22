@@ -104,6 +104,7 @@ const EXIT_PORT_BUSY = 3;
 const EXIT_EXTRACT_FAILED = 4;
 const EXIT_NOT_READY = 5;
 const EXIT_STARTING_ELSEWHERE = 6;
+const EXIT_OLDER_COPY_RUNNING = 7;
 
 /** How the browser is started: see browser.ts. */
 interface BrowserContext {
@@ -276,12 +277,22 @@ async function startUnderLock(
     }
     return EXIT_OK;
   }
+  if (running.kind === "older") {
+    // Not a second server beside it: both would read and write the same
+    // settings, sign-in configuration and audit log, and the old copy removes
+    // the lock file when it closes, whoever's it is by then.
+    error(
+      `An older version of ${APP_TITLE} is still running (process ${running.pid}, at ` +
+        `${browsableUrl(running.host, running.port)}).`
+    );
+    plain("Close its window, then start this one again.");
+    return EXIT_OLDER_COPY_RUNNING;
+  }
   if (running.kind === "unverified") {
     warn(
       `launcher.lock names process ${running.pid} on port ${running.port}, but what ` +
-        `answers there could not prove it is the copy of Open Admin that wrote it (it ` +
-        `may be another program, or an older version). Nothing is sent to it; ` +
-        `starting a new copy instead.`
+        `answers there is not the copy of Open Admin that wrote it (another program ` +
+        `has the port). Nothing is sent to it; starting a new copy instead.`
     );
   }
 
@@ -577,6 +588,15 @@ async function run(userArgs: string[]): Promise<number | null> {
       ? "Sign in with the password given in APP_PASSWORD."
       : `Sign in with the password saved in ${started.configFile}.`
   );
+  if (signedIn) {
+    // The opener can fail quietly (no desktop, or .html files set to open in
+    // something that isn't a browser), and nothing reports back.
+    plain(
+      started.passwordSource === "environment"
+        ? `If no window appears, open ${url} and sign in with the password given in APP_PASSWORD.`
+        : `If no window appears, open ${url} and sign in with the password saved in ${started.configFile}.`
+    );
+  }
   plain("Keep this window open while you work. Closing it, or Ctrl+C, stops Open Admin.");
   plain("");
 

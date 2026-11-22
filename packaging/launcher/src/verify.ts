@@ -48,6 +48,25 @@ export function parseManifest(json: string): ManifestEntry[] {
   return parsed as ManifestEntry[];
 }
 
+/**
+ * Files an operating system drops into a folder by itself when someone looks
+ * inside: Finder's .DS_Store, the "._name" companions macOS writes on drives
+ * that can't hold its metadata, Explorer's thumbnail cache and folder
+ * settings. They are not part of the application, and one appearing must not
+ * cost a fresh unpack of two thousand files on every start. They are deleted
+ * rather than ignored: a file left in place under such a name could still be
+ * served or loaded, and the folder must hold exactly what the build put there.
+ */
+function isOsClutter(relative: string): boolean {
+  const name = relative.slice(relative.lastIndexOf("/") + 1);
+  return (
+    name === ".DS_Store" ||
+    name.startsWith("._") ||
+    /^(thumbs|ehthumbs)\.db$/i.test(name) ||
+    /^desktop\.ini$/i.test(name)
+  );
+}
+
 function fullPath(appDir: string, relative: string): string {
   return path.join(appDir, ...relative.split("/"));
 }
@@ -97,7 +116,16 @@ export function checkAppDir(
   if (odd.length > 0) return `${odd[0]} is a link or device, not a file`;
   const expected = new Map(manifest.map(([relative, size, hash]) => [relative, { size, hash }]));
   for (const relative of files) {
-    if (!expected.has(relative) && !LAUNCHER_FILES.has(relative)) return `${relative} was added`;
+    if (expected.has(relative) || LAUNCHER_FILES.has(relative)) continue;
+    if (isOsClutter(relative)) {
+      try {
+        fs.rmSync(fullPath(appDir, relative), { force: true });
+        continue;
+      } catch {
+        // Can't be removed (a read-only drive): then it counts as added.
+      }
+    }
+    return `${relative} was added`;
   }
   const present = new Set(files);
   for (const [relative, size, hash] of manifest) {

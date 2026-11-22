@@ -25,6 +25,12 @@ COPY . .
 # inlines them, so the build needs network access; the running container never
 # does anything but talk to Google's APIs.
 RUN npm run build
+# What the runtime stage copies from here stays owned by root, and the server
+# runs as "node": make sure that user can read it. The build's own output
+# already is, but public/ and the health check come from the checkout with
+# whatever modes it has, and a strict umask (027, 077) leaves them closed to
+# everyone but their owner.
+RUN chmod -R a+rX .next/standalone .next/static public deploy/docker
 
 FROM node:22.23.5-alpine AS runtime
 WORKDIR /app
@@ -51,7 +57,7 @@ RUN mkdir -p /data && chown node:node /data
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
-COPY deploy/docker/healthcheck.mjs /usr/local/lib/open-admin/healthcheck.mjs
+COPY --from=build /app/deploy/docker/healthcheck.mjs /usr/local/lib/open-admin/healthcheck.mjs
 USER node
 VOLUME ["/data"]
 EXPOSE 3000
