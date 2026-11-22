@@ -215,7 +215,14 @@ jobs:
     needs: linux
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: docker build -t open-admin:ci .
+      - name: Build from a checkout made under a strict umask
+        # Someone building their own image may have umask 077, which leaves
+        # every file in the checkout closed to all but its owner. The image
+        # must still work: its code is owned by root and run by "node". The
+        # probes below (the public file, the health check) fail if it doesn't.
+        run: |
+          chmod -R go-rwx .
+          docker build -t open-admin:ci .
       - name: Start a container the way the README does and probe it
         run: |
           set -euo pipefail
@@ -230,6 +237,8 @@ jobs:
           echo "login, localhost:  $(post -H 'origin: http://localhost:3000') (expect 200: 0.0.0.0 bind, loopback origin)"
           echo "login, foreign:    $(post -H 'origin: https://evil.example') (expect 403)"
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/login)" = 200 ]
+          echo "public file:       $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/logo.svg) (expect 200: readable by the server's user)"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/logo.svg)" = 200 ]
           [ "$(post -H 'origin: http://localhost:3000')" = 200 ]
           [ "$(post -H 'origin: https://evil.example')" = 403 ]
           echo "runs as: $(docker exec oa id -un) (expect node)"
