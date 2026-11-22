@@ -22,12 +22,11 @@ import {
 } from "./extract.ts";
 import {
   findFreePort,
-  isPortFree,
-  isProcessAlive,
+  findRunningInstance,
+  generateInstanceToken,
+  isPortAvailable,
   PORT_FALLBACK_SPAN,
-  probeHttp,
-  readLock,
-  removeLock,
+  removeOwnLock,
   writeLock,
 } from "./instance.ts";
 import { appDirFor, resolvePathsForProcess } from "./paths.ts";
@@ -195,24 +194,6 @@ async function resolveSettings(
   return { config, dirty };
 }
 
-/**
- * Is one of our servers already up? The lock file names the port it took,
- * which is what we hand back - a second launch should open the window the
- * first one is serving, whatever port that turned out to be.
- *
- * Both halves are needed: a stale lock file (crash, power loss, recycled pid)
- * must not stop a legitimate start, so a live pid alone isn't enough.
- */
-async function findRunningInstance(
-  lockFile: string
-): Promise<{ host: string; port: number } | null> {
-  const lock = readLock(lockFile);
-  if (!lock || !isProcessAlive(lock.pid)) return null;
-  const status = await probeHttp(lock.host, lock.port, "/login", 2000);
-  if (status === null) return null;
-  return { host: lock.host, port: lock.port };
-}
-
 async function run(userArgs: string[]): Promise<number | null> {
   const parsed = parseArgs(userArgs);
   if (parsed.error || !parsed.args) {
@@ -262,8 +243,10 @@ async function run(userArgs: string[]): Promise<number | null> {
   const stored = readConfigFile(configFile);
 
   // Someone already started it: hand them the window rather than a port clash.
+  // "Ours" means the server proved it knows the token in the lock file; only
+  // then is the saved password sent anywhere.
   const running = await findRunningInstance(lockFile);
-  if (running) {
+  if (running.kind === "ours") {
     const url = browsableUrl(running.host, running.port);
     info(`Already running at ${url} - opening it.`);
     if (!args.noBrowser) {
@@ -278,7 +261,14 @@ async function run(userArgs: string[]): Promise<number | null> {
     }
     return EXIT_OK;
   }
-  removeLock(lockFile);
+  if (running.kind === "unverified") {
+    warn(
+      `launcher.lock names process ${running.pid} on port ${running.port}, but what ` +
+        `answers there could not prove it is the copy of Open Admin that wrote it (it ` +
+        `may be another program, or an older version). Nothing is sent to it; ` +
+        `starting a new copy instead.`
+    );
+  }
 
   // Before anything that could ask a question: nobody should be made to choose
   // a password only to be told afterwards that the port was taken.
@@ -290,7 +280,7 @@ async function run(userArgs: string[]): Promise<number | null> {
   // The move is not saved, so the usual address comes back once it is free.
   const preferredPort = args.port ?? stored.port ?? DEFAULT_PORT;
   let port = preferredPort;
-  if (!(await isPortFree(host, preferredPort))) {
+  if (!(await isPortAvailable(host, preferredPort))) {
     if (args.port !== null) {
       error(
         `Port ${preferredPort} on ${host} is already in use by another program. ` +
@@ -359,8 +349,12 @@ async function run(userArgs: string[]): Promise<number | null> {
     return EXIT_EXTRACT_FAILED;
   }
 
+  // A new secret for every start: the server proves it knows it before a later
+  // launch will send it the password (see findRunningInstance).
+  const instanceToken = generateInstanceToken();
+
   // Register cleanup before the server can install handlers of its own.
-  installShutdown(() => removeLock(lockFile));
+  installShutdown(() => removeOwnLock(lockFile, instanceToken));
 
   applyServerEnv({
     appDir: extractedAppDir,
@@ -369,6 +363,7 @@ async function run(userArgs: string[]): Promise<number | null> {
     port,
     password: config.password,
     sessionSecret: config.sessionSecret,
+    instanceToken,
   });
 
   const url = browsableUrl(host, port);
@@ -387,10 +382,15 @@ async function run(userArgs: string[]): Promise<number | null> {
     port,
     host,
     startedAt: new Date().toISOString(),
+    token: instanceToken,
   });
 
-  const pruned = pruneOtherVersions(paths.appRoot, extractedAppDir);
-  if (pruned.length > 0) info(`Removed ${pruned.length} older application copies.`);
+  // A copy that could not prove itself may be an older version still running
+  // from its own application folder; leave the old folders until next time.
+  if (running.kind !== "unverified") {
+    const pruned = pruneOtherVersions(paths.appRoot, extractedAppDir);
+    if (pruned.length > 0) info(`Removed ${pruned.length} older application copies.`);
+  }
 
   plain("");
   info(`Ready: ${url}`);

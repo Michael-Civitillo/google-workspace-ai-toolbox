@@ -15,6 +15,12 @@ export interface ServerEnvOptions {
   port: number;
   password: string;
   sessionSecret: string;
+  /**
+   * A secret generated for this start, also kept in launcher.lock. The server
+   * proves it knows it (GET /api/auth/launch-ticket?challenge=...), which is
+   * how a later launch tells this server from another program on its port.
+   */
+  instanceToken: string;
 }
 
 /**
@@ -33,18 +39,21 @@ export interface ServerEnvOptions {
  *
  * AUDIT_LOG_PATH and SSO_CONFIG_PATH are set only when the operator has not,
  * since those are long-standing app-level overrides someone may rely on.
+ * OPEN_ADMIN_INSTANCE_TOKEN is always this launcher's own: a value inherited
+ * from the environment would let whoever chose it pass for this server.
  */
-export function applyServerEnv(options: ServerEnvOptions): void {
-  process.env.NODE_ENV = "production";
-  process.env.PORT = String(options.port);
-  process.env.HOSTNAME = options.host;
-  process.env.APP_PASSWORD = options.password;
-  process.env.APP_SESSION_SECRET ??= options.sessionSecret;
-  process.env.OPEN_ADMIN_DATA_DIR = options.dataDir;
-  process.env.AUDIT_LOG_PATH ??= path.join(options.dataDir, "audit.log");
-  process.env.SSO_CONFIG_PATH ??= path.join(options.dataDir, "sso.json");
-  process.env.OPEN_ADMIN_PACKAGED = "1";
-  process.env.NEXT_TELEMETRY_DISABLED = "1";
+export function applyServerEnv(options: ServerEnvOptions, env: NodeJS.ProcessEnv = process.env): void {
+  env.NODE_ENV = "production";
+  env.PORT = String(options.port);
+  env.HOSTNAME = options.host;
+  env.APP_PASSWORD = options.password;
+  env.APP_SESSION_SECRET ??= options.sessionSecret;
+  env.OPEN_ADMIN_DATA_DIR = options.dataDir;
+  env.AUDIT_LOG_PATH ??= path.join(options.dataDir, "audit.log");
+  env.SSO_CONFIG_PATH ??= path.join(options.dataDir, "sso.json");
+  env.OPEN_ADMIN_PACKAGED = "1";
+  env.OPEN_ADMIN_INSTANCE_TOKEN = options.instanceToken;
+  env.NEXT_TELEMETRY_DISABLED = "1";
 }
 
 /**
