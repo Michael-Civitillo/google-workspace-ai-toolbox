@@ -148,8 +148,12 @@ function browserStub(dir) {
     fs.writeFileSync(path.join(dir, name), opener);
     fs.chmodSync(path.join(dir, name), 0o755);
   }
-  fs.writeFileSync(path.join(dir, "xdg-settings"), "#!/bin/sh\necho firefox.desktop\n");
-  fs.chmodSync(path.join(dir, "xdg-settings"), 0o755);
+  // A desktop where the default browser also opens .html files; only there
+  // does the launcher hand over a page instead of the URL.
+  for (const name of ["xdg-settings", "xdg-mime"]) {
+    fs.writeFileSync(path.join(dir, name), "#!/bin/sh\necho firefox.desktop\n");
+    fs.chmodSync(path.join(dir, name), 0o755);
+  }
   return {
     env: { PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}` },
     opened: () =>
@@ -644,6 +648,54 @@ async function main() {
       await stop(stale.child, 5000);
     } finally {
       await new Promise((resolve) => foreign.close(resolve));
+    }
+
+    // Someone downloads this version while 0.2.0 is still open. Its lock has
+    // no token, so it can't prove itself; starting a second server beside it
+    // would put two on one data folder.
+    console.log("\nAn older version still running");
+    const olderPort = PORT + 65;
+    const olderSeen = [];
+    const older = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        olderSeen.push({ method: req.method, url: req.url, body });
+        res.writeHead(req.url === "/login" ? 200 : 404, { "content-type": "text/html" });
+        res.end("<html><head><title>Google Workspace Open Admin</title></head><body>Enter the Open Admin password to continue.</body></html>");
+      });
+    });
+    await new Promise((resolve) => older.listen(olderPort, "127.0.0.1", resolve));
+    try {
+      const olderData = path.join(root, "data-older");
+      fs.mkdirSync(olderData, { recursive: true });
+      fs.writeFileSync(
+        path.join(olderData, "launcher.json"),
+        JSON.stringify({ version: 1, port: olderPort, password: PASSWORD, sessionSecret: "older".repeat(13), openBrowser: true })
+      );
+      // What 0.2.0 wrote: no token.
+      fs.writeFileSync(
+        path.join(olderData, "launcher.lock"),
+        JSON.stringify({ pid: process.pid, port: olderPort, host: "127.0.0.1", startedAt: new Date().toISOString() })
+      );
+      const second = launch(["--root", root, "--data-dir", olderData]);
+      const code = await exitOf(second, 60_000);
+      check(
+        "says an older version is running and stops, instead of starting beside it",
+        code === 7 && /older version of .* is still running/i.test(second.output()) && /Close its window/.test(second.output()),
+        `exit ${code}: ${lastLine(second)}`
+      );
+      check(
+        "sends the older copy nothing but reads",
+        olderSeen.length > 0 && olderSeen.every((r) => r.method === "GET" && !r.body.includes(PASSWORD)),
+        olderSeen.map((r) => `${r.method} ${r.url}`).join(", ")
+      );
+      check(
+        "leaves the older copy's lock file alone",
+        JSON.parse(fs.readFileSync(path.join(olderData, "launcher.lock"), "utf-8")).port === olderPort
+      );
+    } finally {
+      await new Promise((resolve) => older.close(resolve));
     }
 
     // Windows refuses connections to 0.0.0.0, so a launcher that waited for

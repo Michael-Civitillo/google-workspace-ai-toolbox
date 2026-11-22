@@ -234,9 +234,39 @@ describe("findRunningInstance", () => {
       ...ok,
       isAlive: () => true,
       verify: async () => (verified = true),
+      recognise: async () => false,
     });
     assert.deepEqual(found, { kind: "unverified", pid: 1234, host: "127.0.0.1", port: 3000 });
     assert.equal(verified, false, "a lock without a token must not even be checked");
+  });
+
+  it("tells an older copy that is still running from some other program", async () => {
+    // A lock from before tokens, its process alive, and Open Admin's own
+    // sign-in page on its port: an older version, still open.
+    const seen: string[] = [];
+    const oldCopy = await listen((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      res.writeHead(req.url === "/login" ? 200 : 404, { "content-type": "text/html" });
+      res.end("<html><head><title>Google Workspace Open Admin</title></head><body>Sign in</body></html>");
+    });
+    const other = await listen((req, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<html><title>Some other dev server</title></html>");
+    });
+    try {
+      const lock = (port: number) => lockAt(`older-${port}.lock`, { pid: process.pid, port, host: "127.0.0.1" });
+      assert.deepEqual(await findRunningInstance(lock(oldCopy.port)), {
+        kind: "older",
+        pid: process.pid,
+        host: "127.0.0.1",
+        port: oldCopy.port,
+      });
+      assert.ok(seen.every((s) => s.startsWith("GET ")), `sent more than reads: ${seen.join(", ")}`);
+      assert.equal((await findRunningInstance(lock(other.port))).kind, "unverified");
+    } finally {
+      await oldCopy.close();
+      await other.close();
+    }
   });
 
   it("with a stale lock naming a live process, never takes another program for itself", async () => {

@@ -103,19 +103,20 @@ export function probeHttp(
 
 const MAX_ANSWER_BYTES = 8192;
 
-/** GET a path and read at most a few kilobytes of the answer. Null on any failure. */
+/** GET a path and read at most `maxBytes` of the answer. Null on any failure. */
 function getText(
   host: string,
   port: number,
   pathname: string,
-  timeoutMs: number
+  timeoutMs: number,
+  maxBytes = MAX_ANSWER_BYTES
 ): Promise<{ status: number; body: string } | null> {
   return new Promise((resolve) => {
     const req = http.get({ host, port, path: pathname, timeout: timeoutMs }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk: string) => {
-        if (body.length < MAX_ANSWER_BYTES) body += chunk;
+        if (body.length < maxBytes) body += chunk;
       });
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
       res.on("error", () => resolve(null));
@@ -176,17 +177,40 @@ export type RunningInstance =
   /** Our own server: safe to send the password to. */
   | { kind: "ours"; host: string; port: number }
   /**
+   * A copy from before instance tokens (0.2.0 and earlier) that is still
+   * running: its lock has no token, its process is alive, and its port
+   * answers with Open Admin's sign-in page. It can't be handed anything, and
+   * a second server must not be started beside it: the two would share one
+   * data folder, and the old one deletes the lock file when it closes.
+   */
+  | { kind: "older"; pid: number; host: string; port: number }
+  /**
    * The lock names a live process and something answers on its port, but it
-   * could not prove it is the server this lock was written for: another
-   * program, or a copy of Open Admin too old to answer the proof.
+   * is not the server this lock was written for: another program.
    */
   | { kind: "unverified"; pid: number; host: string; port: number }
   | { kind: "none" };
+
+/**
+ * Does host:port answer with Open Admin's sign-in page? Every version's page
+ * names the application. Used only to tell an older copy from some other
+ * program; nothing is ever sent on the strength of it.
+ */
+export async function looksLikeOpenAdmin(
+  host: string,
+  port: number,
+  timeoutMs = 2000
+): Promise<boolean> {
+  const answer = await getText(host, port, "/login", timeoutMs, 512 * 1024);
+  return answer !== null && answer.status === 200 && answer.body.includes("Open Admin");
+}
 
 export interface FindDeps {
   isAlive?: (pid: number) => boolean;
   probe?: (host: string, port: number) => Promise<number | null>;
   verify?: (host: string, port: number, token: string) => Promise<boolean>;
+  /** Is what answers there Open Admin's sign-in page? */
+  recognise?: (host: string, port: number) => Promise<boolean>;
   /** Where to reach a server bound to `host` (see address.ts). */
   reach?: (host: string) => string;
 }
@@ -203,16 +227,24 @@ export async function findRunningInstance(
   const isAlive = deps.isAlive ?? isProcessAlive;
   const probe = deps.probe ?? ((h: string, p: number) => probeHttp(h, p, "/login", 2000));
   const verify = deps.verify ?? ((h: string, p: number, t: string) => verifyInstance(h, p, t));
+  const recognise = deps.recognise ?? ((h: string, p: number) => looksLikeOpenAdmin(h, p));
   const reach = deps.reach ?? ((h: string) => h);
 
   const lock = readLock(lockFile);
   if (!lock || !isAlive(lock.pid)) return { kind: "none" };
   const host = reach(lock.host);
   if ((await probe(host, lock.port)) === null) return { kind: "none" };
-  if (lock.token && (await verify(host, lock.port, lock.token))) {
-    return { kind: "ours", host: lock.host, port: lock.port };
+  const where = { pid: lock.pid, host: lock.host, port: lock.port };
+  if (lock.token) {
+    return (await verify(host, lock.port, lock.token))
+      ? { kind: "ours", host: lock.host, port: lock.port }
+      : { kind: "unverified", ...where };
   }
-  return { kind: "unverified", pid: lock.pid, host: lock.host, port: lock.port };
+  // No token: the lock was written by a version from before tokens. If its
+  // server is still there, that is an older copy still running.
+  return (await recognise(host, lock.port))
+    ? { kind: "older", ...where }
+    : { kind: "unverified", ...where };
 }
 
 /**

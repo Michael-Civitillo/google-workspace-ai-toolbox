@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import {
   defaultBrowserIsSnap,
+  htmlFilesOpenInBrowser,
   isInHiddenFolder,
   openBrowser,
   openerEnvironment,
@@ -165,5 +166,31 @@ describe("Linux browsers in a snap", () => {
     assert.equal(defaultBrowserIsSnap(answer("firefox.desktop")), false);
     assert.equal(defaultBrowserIsSnap(answer("org.mozilla.firefox.desktop")), false);
     assert.equal(defaultBrowserIsSnap(answer("")), false);
+  });
+});
+
+describe("Linux: where .html files open", () => {
+  /** xdg tools answering from a table, keyed by the tool's name. */
+  const tools = (answers: Record<string, string | Error>) =>
+    ((command: string) => {
+      const answer = answers[command];
+      if (answer instanceof Error) throw answer;
+      return { stdout: answer ?? "" };
+    }) as unknown as typeof import("node:child_process").spawnSync;
+
+  it("uses the page when the default browser is what opens .html files", () => {
+    assert.equal(
+      htmlFilesOpenInBrowser(tools({ "xdg-settings": "firefox.desktop\n", "xdg-mime": "firefox.desktop\n" })),
+      true
+    );
+  });
+
+  it("passes the URL instead when an editor opens them, or it can't be told", () => {
+    // An editor registered for text/html: the page would open as markup.
+    assert.equal(htmlFilesOpenInBrowser(tools({ "xdg-settings": "firefox.desktop", "xdg-mime": "code.desktop" })), false);
+    // Nothing registered, or the tools are missing.
+    assert.equal(htmlFilesOpenInBrowser(tools({ "xdg-settings": "firefox.desktop", "xdg-mime": "" })), false);
+    assert.equal(htmlFilesOpenInBrowser(tools({ "xdg-settings": "", "xdg-mime": "" })), false);
+    assert.equal(htmlFilesOpenInBrowser(tools({ "xdg-settings": new Error("ENOENT"), "xdg-mime": "firefox.desktop" })), false);
   });
 });

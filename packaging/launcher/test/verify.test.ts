@@ -80,6 +80,17 @@ describe("checkAppDir", () => {
     assert.match(checkAppDir(appDir, MANIFEST, "full") ?? "", /node_modules\/evil\/index\.js was added/);
   });
 
+  it("in full mode, clears away what an operating system leaves behind instead of unpacking again", () => {
+    const appDir = unpacked();
+    const clutter = [".DS_Store", "node_modules/.DS_Store", "._server.js", ".next/Thumbs.db", "node_modules/next/desktop.ini"];
+    for (const name of clutter) fs.writeFileSync(at(appDir, name), "junk");
+    assert.equal(checkAppDir(appDir, MANIFEST, "full"), null);
+    for (const name of clutter) assert.equal(fs.existsSync(at(appDir, name)), false, `${name} is removed, not left in place`);
+    // Only those names: anything else added is still a changed copy.
+    fs.writeFileSync(at(appDir, "node_modules/DS_Store.js"), "module.exports = 1");
+    assert.match(checkAppDir(appDir, MANIFEST, "full") ?? "", /DS_Store\.js was added/);
+  });
+
   it("in full mode, refuses a link in place of a file", { skip: process.platform === "win32" }, () => {
     const appDir = unpacked();
     const elsewhere = path.join(tmpRoot, "elsewhere.js");

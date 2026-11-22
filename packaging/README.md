@@ -119,15 +119,22 @@ copy, which is also how someone gets back in after a session expires.
   and sends the password only if the answer is the HMAC of that challenge
   under the token. Anything else listening on the lock's port (a lock left
   behind by a closed window, a reused process id) gets nothing, and the
-  launch starts a copy of its own on the next free port instead.
+  launch starts a copy of its own on the next free port instead. The one
+  exception is a copy from 0.2.0 or earlier that is still open (its lock has
+  no token, and its port answers with Open Admin's sign-in page): the launch
+  says so and stops, because two servers must not share one data folder.
 - The ticket is 32 random bytes, works once, and dies after a minute, so the
   URL left in the browser's history is worthless.
 - On macOS and Linux, where any local user can read other processes' command
   lines, the ticket URL is not passed to the browser opener: it goes into a
   small page in the data folder, readable by its owner only, that forwards the
   browser and is deleted two minutes later. (Not on Windows, which doesn't
-  show one user's command lines to another, and not on Linux when the default
-  browser is a snap, which can't read the hidden folder the page would be in.)
+  show one user's command lines to another. On Linux, only when `.html` files
+  open in the default browser, and not when that browser is a snap, which
+  can't read the hidden folder the page would be in; otherwise the URL is
+  passed as before. On macOS, someone who has set `.html` files to open in
+  another program gets that program: the console says which address to open
+  by hand.)
   The opener and browser are started without the launcher's secrets in their
   environment.
 - Getting a ticket is the login route with a different reward: same password
@@ -246,7 +253,9 @@ against a real single-executable build. Don't "fix" `slice(2)` to `slice(1)`.
 | `log.ts` | Console plus a rotating file in the data folder |
 
 Exit codes: 2 bad arguments, 3 port taken, 4 unpacking failed, 5 the server
-did not start, 6 another copy has been starting for more than three minutes.
+did not start, 6 another copy has been starting for more than three minutes,
+7 an older version (0.2.0 or earlier) is still running on the same data
+folder: close its window first.
 
 ## Code signing
 
