@@ -54,6 +54,7 @@ export function applyServerEnv(options: ServerEnvOptions, env: NodeJS.ProcessEnv
   env.SSO_CONFIG_PATH ??= path.join(options.dataDir, "sso.json");
   env.OPEN_ADMIN_PACKAGED = "1";
   env.OPEN_ADMIN_INSTANCE_TOKEN = options.instanceToken;
+  env[RUN_AS_NODE_MARKER] = "1";
   env.NEXT_TELEMETRY_DISABLED = "1";
 }
 
@@ -119,15 +120,26 @@ export function installShutdown(onShutdown: () => void): void {
 }
 
 /**
+ * Set by the launcher in its own environment before the server starts, so
+ * only processes the server starts carry it. See maybeRunAsNode.
+ */
+export const RUN_AS_NODE_MARKER = "OPEN_ADMIN_RUN_AS_NODE";
+
+/**
  * Compatibility shim: behave like plain `node script.js` when something
  * re-executes this binary with a script path. Nothing in the production Next
  * server does that today, but in a single-file build `process.execPath` is
  * this executable, so any future dependency that shells out to Node would
  * otherwise get a web server instead of its script.
  *
+ * Only for processes the server itself starts, which inherit the launcher's
+ * marker. Without that check, a .js file dragged onto the executable in
+ * Explorer or Finder (which passes its path as the first argument) would run.
+ *
  * Takes the user arguments (argv minus the two leading path slots).
  */
-export function maybeRunAsNode(userArgs: string[]): boolean {
+export function maybeRunAsNode(userArgs: string[], env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env[RUN_AS_NODE_MARKER] !== "1") return false;
   const candidate = userArgs[0];
   if (!candidate || !/\.[cm]?js$/.test(candidate)) return false;
   if (!fs.existsSync(candidate)) return false;

@@ -68,6 +68,49 @@ describe("launcher.json", () => {
     );
     assert.deepEqual(readConfigFile(file), {});
   });
+
+  it("drops a port nothing can listen on", () => {
+    const file = tmpFile("ports.json");
+    for (const port of [0, -1, 65536, 70000, 3000.5]) {
+      fs.writeFileSync(file, JSON.stringify({ port }));
+      assert.equal(readConfigFile(file).port, undefined, `kept port ${port}`);
+    }
+    for (const port of [1, 3000, 65535]) {
+      fs.writeFileSync(file, JSON.stringify({ port }));
+      assert.equal(readConfigFile(file).port, port);
+    }
+  });
+
+  it("is readable by its owner only, even replacing a file that was not", {
+    skip: process.platform === "win32",
+  }, () => {
+    const file = tmpFile("private.json");
+    fs.writeFileSync(file, "{}", { mode: 0o644 });
+    fs.chmodSync(file, 0o644);
+    assert.equal(
+      writeConfigFile(file, { version: 1, port: 3000, password: "x".repeat(12), sessionSecret: "s", openBrowser: true }),
+      true
+    );
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  });
+
+  it("leaves no temporary copy of the password behind when the write fails", () => {
+    // A folder where launcher.json should be: the final rename cannot succeed.
+    const dir = tmpFile("blocked");
+    const file = path.join(dir, "launcher.json");
+    fs.mkdirSync(file, { recursive: true });
+    fs.writeFileSync(path.join(file, "keep"), "");
+    assert.throws(() =>
+      writeConfigFile(file, { version: 1, port: 3000, password: "secret-password", sessionSecret: "s", openBrowser: true })
+    );
+    assert.deepEqual(fs.readdirSync(dir), ["launcher.json"]);
+  });
+
+  it("can save settings without a password", () => {
+    const file = tmpFile("no-password.json");
+    writeConfigFile(file, { version: 1, port: 3000, sessionSecret: "s", openBrowser: true });
+    assert.deepEqual(readConfigFile(file), { version: 1, port: 3000, sessionSecret: "s", openBrowser: true });
+  });
 });
 
 describe("parseEnvFile", () => {

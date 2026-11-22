@@ -6,14 +6,13 @@ import { parseArgs, usage, type ParsedArgs } from "./args.ts";
 import {
   applyEnvFile,
   DEFAULT_PORT,
-  CONFIG_VERSION,
-  generatePassword,
-  generateSessionSecret,
   promptForPassword,
   readConfigFile,
   writeConfigFile,
   type LauncherConfig,
 } from "./config.ts";
+import { prepareDataDir } from "./datadir.ts";
+import { resolveSettings, type PasswordSource } from "./settings.ts";
 import {
   discardDir,
   ensureExtracted,
@@ -36,7 +35,7 @@ import {
 import { acquireLock, LockTimeoutError, type HeldLock, type LockOptions } from "./lock.ts";
 import { appDirFor, resolvePathsForProcess, type ResolvedPaths } from "./paths.ts";
 import { isSea, loadPayload } from "./payload.ts";
-import { openBrowser } from "./browser.ts";
+import { openBrowser, openerEnvironment, sweepSignInPages } from "./browser.ts";
 import {
   applyServerEnv,
   installShutdown,
@@ -105,6 +104,14 @@ const EXIT_EXTRACT_FAILED = 4;
 const EXIT_NOT_READY = 5;
 const EXIT_STARTING_ELSEWHERE = 6;
 
+/** How the browser is started: see browser.ts. */
+interface BrowserContext {
+  /** The environment from before the launcher added its secrets to its own. */
+  env: NodeJS.ProcessEnv;
+  /** Where a page carrying the sign-in ticket may be written. */
+  dataDir: string;
+}
+
 /**
  * Open the browser, signed in when that is possible.
  *
@@ -118,13 +125,17 @@ async function openSignedIn(
   host: string,
   port: number,
   password: string,
-  autoSignIn: boolean
+  autoSignIn: boolean,
+  browser: BrowserContext
 ): Promise<boolean> {
   const url = browsableUrl(host, port);
   const ticket = autoSignIn
     ? await requestLaunchTicket(reachableHost(host), port, password, url)
     : null;
-  openBrowser(signInUrl(url, ticket));
+  openBrowser(signInUrl(url, ticket), {
+    env: browser.env,
+    pageDir: ticket ? browser.dataDir : null,
+  });
   return ticket !== null;
 }
 
@@ -133,82 +144,6 @@ function printVersion(): void {
   plain(`  application payload  ${__PAYLOAD_SHA256__.slice(0, 16)}`);
   plain(`  node runtime         ${process.version}`);
   plain(`  packaged executable  ${isSea() ? "yes" : "no"}`);
-}
-
-interface ResolvedSettings {
-  config: LauncherConfig;
-  /** True when launcher.json needs writing back. */
-  dirty: boolean;
-}
-
-/**
- * Merge, lowest priority first: stored config, launcher.env, the real
- * environment, then command-line flags. Prompt only when that leaves no
- * password at all.
- */
-async function resolveSettings(
-  args: ParsedArgs,
-  stored: Partial<LauncherConfig>,
-  port: number,
-  autoSignIn: boolean
-): Promise<ResolvedSettings> {
-  let dirty = args.port !== null && args.port !== stored.port;
-
-  let sessionSecret = stored.sessionSecret ?? "";
-  if (!sessionSecret) {
-    sessionSecret = generateSessionSecret();
-    dirty = true;
-  }
-
-  let password = args.password ?? process.env.APP_PASSWORD ?? stored.password ?? "";
-
-  if (!password && autoSignIn && !args.setPassword) {
-    // Nobody is going to type this: the launcher signs the browser in itself.
-    // It still has to exist, because it is what the launcher proves itself
-    // with and what any other browser would need.
-    password = generatePassword();
-    dirty = true;
-    info(
-      "A sign-in password was generated and saved in launcher.json in the data " +
-        "folder. You only need it to sign in from another browser: run with " +
-        "--set-password to choose your own."
-    );
-  } else if (args.setPassword || !password) {
-    if (args.setPassword) {
-      plain("");
-      plain("Choose the password you'll use to sign in to the web interface.");
-    } else {
-      plain("");
-      plain(`First run. Choose the password you'll use to sign in (12+ characters).`);
-    }
-    const result = await promptForPassword(plain).catch(() => ({
-      password: generatePassword(),
-      generated: true,
-    }));
-    password = result.password;
-    dirty = true;
-    if (result.generated) {
-      plain("");
-      warn("No terminal to prompt on, so a password was generated for you:");
-      plain(`    ${password}`);
-      plain("  Write it down - it is stored in launcher.json and shown only once.");
-      plain("");
-    } else {
-      plain("Saved. Change it any time with --set-password.");
-    }
-  }
-
-  const config: LauncherConfig = {
-    version: CONFIG_VERSION,
-    port,
-    password,
-    sessionSecret,
-    // --no-browser is a choice about this run, not a setting to remember.
-    openBrowser: stored.openBrowser ?? true,
-  };
-  if (stored.password !== password || stored.version !== CONFIG_VERSION) dirty = true;
-
-  return { config, dirty };
 }
 
 /**
@@ -298,6 +233,8 @@ interface StartedServer {
   host: string;
   port: number;
   config: LauncherConfig;
+  passwordSource: PasswordSource;
+  configFile: string;
   appDir: string;
   running: RunningInstance;
 }
@@ -311,7 +248,8 @@ async function startUnderLock(
   args: ParsedArgs,
   paths: ResolvedPaths,
   host: string,
-  autoSignIn: boolean
+  autoSignIn: boolean,
+  browser: BrowserContext
 ): Promise<StartedServer | number> {
   const configFile = path.join(paths.dataDir, "launcher.json");
   const lockFile = path.join(paths.dataDir, "launcher.lock");
@@ -331,7 +269,8 @@ async function startUnderLock(
         running.host,
         running.port,
         args.password ?? process.env.APP_PASSWORD ?? stored.password ?? "",
-        autoSignIn && isLoopbackHost(running.host)
+        autoSignIn && isLoopbackHost(running.host),
+        browser
       );
     }
     return EXIT_OK;
@@ -385,10 +324,28 @@ async function startUnderLock(
     port = fallback;
   }
 
-  const { config, dirty } = await resolveSettings(args, stored, preferredPort, autoSignIn);
-  if (dirty) {
+  const settings = await resolveSettings(
+    {
+      portFlag: args.port,
+      passwordFlag: args.password,
+      setPassword: args.setPassword,
+      envPassword: process.env.APP_PASSWORD,
+      stored,
+      port: preferredPort,
+      autoSignIn,
+      configFile,
+    },
+    { info, warn, plain, prompt: () => promptForPassword(plain) }
+  );
+  const { config } = settings;
+  if (settings.toSave) {
     try {
-      writeConfigFile(configFile, config);
+      if (!writeConfigFile(configFile, settings.toSave)) {
+        warn(
+          `${configFile} could not be made private: this drive has no file permissions, ` +
+            `so other users of this computer may be able to read the sign-in password in it.`
+        );
+      }
     } catch (e) {
       warn(`Could not save settings to ${configFile}: ${describe(e)}`);
     }
@@ -489,7 +446,15 @@ async function startUnderLock(
     token: instanceToken,
   });
 
-  return { host, port, config, appDir, running };
+  return {
+    host,
+    port,
+    config,
+    passwordSource: settings.passwordSource,
+    configFile,
+    appDir,
+    running,
+  };
 }
 
 async function run(userArgs: string[]): Promise<number | null> {
@@ -502,6 +467,11 @@ async function run(userArgs: string[]): Promise<number | null> {
   }
   const args = parsed.args;
 
+  // The browser is started with the environment as it is now, before
+  // launcher.env and the server's settings (the password among them) are
+  // added to this process's own.
+  const browserEnv = openerEnvironment(process.env);
+
   if (args.help) {
     plain(usage(path.basename(process.execPath)));
     return EXIT_OK;
@@ -512,12 +482,16 @@ async function run(userArgs: string[]): Promise<number | null> {
   }
 
   const paths = resolvePathsForProcess(args.root, args.dataDir);
-  fs.mkdirSync(paths.dataDir, { recursive: true });
+  const dataDir = prepareDataDir(paths.dataDir);
   initLogFile(path.join(paths.dataDir, "logs"));
 
   plain("");
   plain(`${APP_TITLE} ${__APP_VERSION__}  (Node ${process.version})`);
   info(`Data folder: ${paths.dataDir}${paths.portable ? "  (portable mode)" : ""}`);
+  for (const note of dataDir.info) info(note);
+  for (const note of dataDir.warnings) warn(note);
+  sweepSignInPages(paths.dataDir);
+  const browser: BrowserContext = { env: browserEnv, dataDir: paths.dataDir };
   if (paths.portableTrigger) {
     const byMarker = path.basename(paths.portableTrigger) === "portable.txt";
     info(
@@ -578,7 +552,7 @@ async function run(userArgs: string[]): Promise<number | null> {
   }
   let started: StartedServer | number;
   try {
-    started = await startUnderLock(args, paths, host, autoSignIn);
+    started = await startUnderLock(args, paths, host, autoSignIn, browser);
   } finally {
     startup.release();
   }
@@ -590,15 +564,20 @@ async function run(userArgs: string[]): Promise<number | null> {
   info(`Ready: ${url}`);
   const opening = config.openBrowser && !args.noBrowser;
   const signedIn = opening
-    ? await openSignedIn(host, port, config.password, autoSignIn)
+    ? await openSignedIn(host, port, config.password, autoSignIn, browser)
     : false;
   plain(
     signedIn
       ? "Your browser is opening, already signed in."
-      : "Sign in with the password you set."
+      : started.passwordSource === "environment"
+      ? "Sign in with the password given in APP_PASSWORD."
+      : `Sign in with the password saved in ${started.configFile}.`
   );
   plain("Keep this window open while you work. Closing it, or Ctrl+C, stops Open Admin.");
   plain("");
+
+  // Sign-in pages left by later launches (which exit at once) go too.
+  setInterval(() => sweepSignInPages(paths.dataDir), 60_000).unref();
 
   // Clean up older versions last, once the person has their window: it is
   // the slowest part of an upgrade and nothing waits on it. Skipped when

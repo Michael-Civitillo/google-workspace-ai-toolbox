@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
+import { writeFileAtomicSync } from "./fsutil.ts";
 
 /**
  * The launcher's own settings: the admin password for the web UI, the session
@@ -25,6 +25,16 @@ export interface LauncherConfig {
   openBrowser: boolean;
 }
 
+/**
+ * What launcher.json holds. The password is absent when the only one known
+ * came from the environment for a single run, which is not saved.
+ */
+export type StoredConfig = Omit<LauncherConfig, "password"> & { password?: string };
+
+export function isValidPort(port: unknown): port is number {
+  return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 export function readConfigFile(file: string): Partial<LauncherConfig> {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
@@ -34,7 +44,10 @@ export function readConfigFile(file: string): Partial<LauncherConfig> {
     if (typeof raw.version === "number" && Number.isInteger(raw.version)) {
       out.version = raw.version;
     }
-    if (typeof raw.port === "number" && Number.isInteger(raw.port)) out.port = raw.port;
+    // A port nothing can listen on (0, 70000, -1) would stop every start, or
+    // in the case of 0 have Next pick its own while the launcher waits on
+    // another: dropped like any other bad field, so the default applies.
+    if (isValidPort(raw.port)) out.port = raw.port;
     if (typeof raw.password === "string" && raw.password) out.password = raw.password;
     if (typeof raw.sessionSecret === "string" && raw.sessionSecret) {
       out.sessionSecret = raw.sessionSecret;
@@ -47,20 +60,16 @@ export function readConfigFile(file: string): Partial<LauncherConfig> {
   }
 }
 
-/** Atomic write, same tmp-then-rename discipline as the app's own JSON stores. */
-export function writeConfigFile(file: string, config: LauncherConfig): void {
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
-  fs.renameSync(tmp, file);
-  try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // Windows ignores POSIX modes; the folder ACL is what protects it there.
-  }
+/**
+ * Save launcher.json the way the app saves its own stores
+ * (src/lib/json-store.ts): an unpredictable temporary name created
+ * exclusively, owner-only from the start, fully written and flushed, renamed
+ * into place with retries for Windows, and removed if anything fails, since it
+ * holds the password. Returns false when the file could not be made private
+ * because the drive has no POSIX permissions (see writeFileAtomicSync).
+ */
+export function writeConfigFile(file: string, config: StoredConfig): boolean {
+  return writeFileAtomicSync(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
 /**
