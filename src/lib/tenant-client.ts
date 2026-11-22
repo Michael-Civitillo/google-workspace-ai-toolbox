@@ -149,6 +149,11 @@ function sameTenantDetails(a: Tenant, b: Tenant | null): boolean {
   );
 }
 
+/** Whether the tenant list has loaded, for code outside components. */
+export function tenantListStatus(): TenantListStatus {
+  return _list.status;
+}
+
 /** The tenant list and whether it has loaded, for components. */
 export function useTenantList(): TenantListSnapshot {
   return useSyncExternalStore(
@@ -173,6 +178,8 @@ export function useTenantList(): TenantListSnapshot {
 export function tenantPinProblem(tenantId: string | null): string | null {
   if (tenantId) return null;
   if (_list.status !== "loaded") {
+    // And ask for it, so "in a moment" is true.
+    void loadTenantList();
     return "The tenant list is still loading — try again in a moment.";
   }
   return _list.tenants.length === 0

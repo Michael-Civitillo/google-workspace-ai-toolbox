@@ -23,6 +23,12 @@ export function TenantSwitcher() {
   const [switching, setSwitching] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
 
+  // The sidebar appears once signed in; if the list hasn't loaded by then
+  // (the first try was on the sign-in page), ask now.
+  useEffect(() => {
+    if (status === "loading") void loadTenantList();
+  }, [status]);
+
   useEffect(() => {
     // Re-fetch the whole list when tenants are added/deleted/renamed elsewhere.
     // This component lives in the persistent layout and never remounts on
