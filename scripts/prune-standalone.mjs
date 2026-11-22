@@ -1,25 +1,29 @@
 /**
  * Post-build cleanup of `.next/standalone`, run automatically by `npm run build`.
  *
- * Next's file tracer copies the whole project into the standalone output (see
- * scripts/local-state.mjs for why it can't do better), which on a machine that
- * has run the app means tenants.json, sso.json, the audit log, the session
- * secret and every imported service-account key end up beside server.js — and
- * from there in a Docker image, an archive, or a backup.
+ * Next's file tracer copies the whole project folder into the standalone
+ * output (see scripts/local-state.mjs for why it can't do better). Whatever is
+ * in that folder goes along: on a machine that has run the app, tenants.json,
+ * sso.json, the audit log, the session secret and imported service-account
+ * keys; on anyone's machine, a key file kept beside the code under any name.
+ * From there it ends up in a Docker image, an archive or the desktop build.
  *
- * `outputFileTracingExcludes` in next.config.ts is meant to prevent exactly
- * that, but a Turbopack build (the default since Next 16) ignores it: a build
- * with dummy state in the working directory copies all of it regardless. So the
- * output is pruned here instead, and the script fails the build if anything it
- * was supposed to remove is still there.
- *
- * Only local state and developer tooling are removed. Everything the server
- * needs to answer a request — .next, node_modules, public, package.json,
- * server.js, next.config.ts — is left alone.
+ * `outputFileTracingExcludes` in next.config.ts is meant to prevent that, but a
+ * Turbopack build (the default since Next 16) ignores it. So the output is
+ * reduced here to the five things the server runs from (server.js,
+ * package.json, .next, node_modules, public) and everything else at its top is
+ * deleted, whatever it is called. The build fails if anything else is left, if
+ * server.js is not at the top (a nested output, which a top-level check would
+ * pass over), or if a known local-state file survives anywhere it is looked for.
  */
 import fs from "node:fs";
 import path from "node:path";
-import { pruneLocalState, collectFiles, findLocalState } from "./local-state.mjs";
+import {
+  assertStandaloneShape,
+  collectFiles,
+  findLocalState,
+  pruneToAllowList,
+} from "./local-state.mjs";
 
 const standaloneDir = path.resolve("./.next/standalone");
 
@@ -29,58 +33,51 @@ if (!fs.existsSync(standaloneDir)) {
   process.exit(0);
 }
 
-/**
- * Source and tooling the compiled server never reads. Removing it keeps a
- * Docker image and the packaged executable from carrying a second copy of the
- * repository, and shrinks what has to be scanned or shipped.
- */
-const DEV_ONLY = [
-  "src",
-  "docs",
-  "scripts",
-  "packaging",
-  ".git",
-  "tsconfig.json",
-  "tsconfig.tsbuildinfo",
-  "components.json",
-  "eslint.config.mjs",
-  "postcss.config.mjs",
-  "package-lock.json",
-  // Pulled in by the screenshot tooling, never by a request.
-  "node_modules/sharp",
-  "node_modules/@img",
-];
-
-const removedState = pruneLocalState(standaloneDir);
-
-const removedDev = [];
-for (const relative of DEV_ONLY) {
-  const target = path.join(standaloneDir, relative);
-  if (fs.existsSync(target)) {
-    fs.rmSync(target, { recursive: true, force: true });
-    removedDev.push(relative);
-  }
-}
-
-if (removedState.length > 0) {
-  console.log(
-    `prune-standalone: removed local state from the build output: ${removedState.join(", ")}`
-  );
-}
-if (removedDev.length > 0) {
-  console.log(`prune-standalone: removed ${removedDev.length} dev-only paths`);
-}
-
-// Backstop: prove it. A rename or a new store file would otherwise slip through
-// the list above silently.
-const leaked = findLocalState(collectFiles(standaloneDir));
-if (leaked.length > 0) {
-  console.error(
-    `prune-standalone: local state is still in the build output: ${leaked.join(", ")}\n` +
-      "                 It came from the working directory via Next's file tracer. " +
-      "Add it to scripts/local-state.mjs."
-  );
+function fail(message) {
+  console.error(`prune-standalone: ${message}`);
   process.exit(1);
 }
 
-console.log("prune-standalone: .next/standalone carries no local state");
+// Before deleting anything: a nested output has no server.js at the top, and
+// pruning it to the allow-list would only hide where the copy went.
+if (!fs.existsSync(path.join(standaloneDir, "server.js"))) {
+  try {
+    assertStandaloneShape(standaloneDir);
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
+const removed = pruneToAllowList(standaloneDir);
+
+/** Inside node_modules: pulled in by the screenshot tooling, never by a request. */
+const UNUSED_MODULES = ["node_modules/sharp", "node_modules/@img"];
+for (const relative of UNUSED_MODULES) {
+  fs.rmSync(path.join(standaloneDir, relative), { recursive: true, force: true });
+}
+
+if (removed.length > 0) {
+  console.log(
+    `prune-standalone: removed ${removed.length} entries the server does not run from: ` +
+      removed.join(", ")
+  );
+}
+
+// Backstop: prove it.
+try {
+  assertStandaloneShape(standaloneDir);
+} catch (e) {
+  fail(e.message);
+}
+const leaked = findLocalState(collectFiles(standaloneDir));
+if (leaked.length > 0) {
+  fail(
+    `local state is still in the build output: ${leaked.join(", ")}\n` +
+      "                 It came from the working directory via Next's file tracer."
+  );
+}
+
+console.log(
+  `prune-standalone: .next/standalone holds only what the server runs from ` +
+    `(${fs.readdirSync(standaloneDir).sort().join(", ")})`
+);

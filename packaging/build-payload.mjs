@@ -14,9 +14,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { zipSync } from "fflate";
 import {
-  pruneLocalState,
+  assertStandaloneShape,
   collectFiles,
   findLocalState,
+  pruneLocalState,
+  pruneToAllowList,
 } from "../scripts/local-state.mjs";
 
 const packagingDir = path.dirname(fileURLToPath(import.meta.url));
@@ -24,24 +26,11 @@ const repoRoot = path.resolve(packagingDir, "..");
 const distDir = path.join(packagingDir, "dist");
 const standaloneDir = path.join(repoRoot, ".next", "standalone");
 
-/** Never useful at runtime; some of it is source we would rather not ship. */
-const PRUNE_RELATIVE = [
-  "node_modules/sharp",
-  "node_modules/@img",
-  "src",
-  "docs",
-  "scripts",
-  "packaging",
-  ".git",
-  "package-lock.json",
-  "tsconfig.json",
-  "tsconfig.tsbuildinfo",
-  "components.json",
-  "eslint.config.mjs",
-  "postcss.config.mjs",
-  "README.md",
-  "next.config.ts",
-];
+/**
+ * Inside node_modules: never used at runtime. Everything outside the five
+ * top-level names the server runs from is removed by pruneToAllowList.
+ */
+const PRUNE_RELATIVE = ["node_modules/sharp", "node_modules/@img"];
 
 /** Guard against the payload silently regaining tens of megabytes. */
 const MAX_ZIP_BYTES = 40 * 1024 * 1024;
@@ -61,6 +50,65 @@ function copyTree(from, to) {
   });
 }
 
+
+/**
+ * The absolute folders Next recorded for this build: where it ran, and the
+ * roots it traced and bundled from. Longest first, so a root inside another is
+ * replaced before the folder that contains it.
+ */
+function buildRoots(stageDir) {
+  const file = path.join(stageDir, ".next", "required-server-files.json");
+  let recorded;
+  try {
+    recorded = JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch (e) {
+    fail(`cannot read ${file}: ${e.message}`);
+  }
+  const candidates = [
+    recorded.appDir,
+    recorded.config?.outputFileTracingRoot,
+    recorded.config?.turbopack?.root,
+    recorded.config?.repoRoot,
+    repoRoot,
+  ];
+  return [...new Set(candidates)]
+    .filter((p) => typeof p === "string" && path.isAbsolute(p) && p !== path.parse(p).root)
+    .sort((a, b) => b.length - a.length);
+}
+
+/** How a path appears in the files: as itself, and escaped inside a JSON string. */
+function spellings(root) {
+  return [...new Set([root, JSON.stringify(root).slice(1, -1)])];
+}
+
+/**
+ * Next writes the absolute path of the folder it built in into two files the
+ * server ships with: server.js (the inlined config: outputFileTracingRoot,
+ * turbopack.root, repoRoot) and .next/required-server-files.json (the same
+ * config, plus appDir). Nothing reads those at runtime - they steer the build
+ * and the dev server - but they put the builder's folder, and usually their
+ * user name, into every copy of the executable, and make the payload hash
+ * depend on where it was built. Each becomes ".", which is what it means once
+ * the files sit in the app folder. Returns the files changed.
+ */
+function scrubBuildPaths(stageDir, roots) {
+  const changed = [];
+  for (const relative of ["server.js", path.join(".next", "required-server-files.json")]) {
+    const file = path.join(stageDir, relative);
+    const before = fs.readFileSync(file, "utf-8");
+    let after = before;
+    for (const root of roots) {
+      for (const spelled of spellings(root)) {
+        after = after.split(`"${spelled}"`).join('"."');
+      }
+    }
+    if (after !== before) {
+      fs.writeFileSync(file, after);
+      changed.push(relative.split(path.sep).join("/"));
+    }
+  }
+  return changed;
+}
 
 function main() {
   const [major] = process.versions.node.split(".").map(Number);
@@ -88,18 +136,36 @@ function main() {
   const publicSrc = path.join(repoRoot, "public");
   if (fs.existsSync(publicSrc)) copyTree(publicSrc, path.join(stageDir, "public"));
 
+  // Whatever the file tracer copied from the project folder. `npm run build`
+  // already reduces the standalone output to the same allow-list
+  // (scripts/prune-standalone.mjs); this repeats it on the staged copy, so
+  // `npm run package:payload` on an unpruned build can't ship it either.
+  const outside = pruneToAllowList(stageDir);
+  if (outside.length > 0) {
+    console.log(
+      `build-payload: removed from the staged copy (not something the server runs from): ` +
+        outside.join(", ")
+    );
+  }
   for (const relative of PRUNE_RELATIVE) {
     fs.rmSync(path.join(stageDir, relative), { recursive: true, force: true });
   }
-  // Local state the file tracer swept up from the working directory. `npm run
-  // build` already prunes the standalone output itself (scripts/prune-standalone.mjs);
-  // this repeats it on the staged copy so `npm run package:payload` on an
-  // unpruned build can't ship it either.
   const prunedState = pruneLocalState(stageDir);
   if (prunedState.length > 0) {
     console.log(
       `build-payload: removed local state from the staged copy: ${prunedState.join(", ")}`
     );
+  }
+  try {
+    assertStandaloneShape(stageDir);
+  } catch (e) {
+    fail(e.message);
+  }
+
+  const roots = buildRoots(stageDir);
+  const scrubbed = scrubBuildPaths(stageDir, roots);
+  if (scrubbed.length > 0) {
+    console.log(`build-payload: removed the build folder's path from ${scrubbed.join(", ")}`);
   }
 
   console.log("build-payload: compressing ...");
@@ -113,11 +179,25 @@ function main() {
     );
   }
   const entries = {};
+  // Every file's size and SHA-256, baked into the launcher (build-launcher.mjs)
+  // so the unpacked copy can be checked before it is run: [path, size, sha256].
+  const manifest = [];
   let rawBytes = 0;
+  const needles = roots.flatMap(spellings).map((s) => Buffer.from(s, "utf-8"));
+  const stillNamed = [];
   for (const relative of relativePaths) {
     const bytes = fs.readFileSync(path.join(stageDir, relative));
     rawBytes += bytes.length;
     entries[relative] = new Uint8Array(bytes);
+    manifest.push([relative, bytes.length, createHash("sha256").update(bytes).digest("hex")]);
+    if (needles.some((needle) => bytes.includes(needle))) stillNamed.push(relative);
+  }
+  if (stillNamed.length > 0) {
+    // Not fatal: every build shipped like this before the check existed.
+    console.warn(
+      `build-payload: warning: the build folder's path is still in ${stillNamed.length} ` +
+        `file(s): ${stillNamed.slice(0, 5).join(", ")}${stillNamed.length > 5 ? ", ..." : ""}`
+    );
   }
 
   const startedAt = Date.now();
@@ -149,6 +229,12 @@ function main() {
       null,
       2
     )}\n`
+  );
+  // Tied to this exact archive: build-launcher.mjs refuses a manifest whose
+  // sha256 is not the payload's.
+  fs.writeFileSync(
+    path.join(distDir, "payload-manifest.json"),
+    `${JSON.stringify({ sha256, files: manifest })}\n`
   );
 
   const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`;

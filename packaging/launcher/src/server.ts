@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { urlHost } from "./address.ts";
 import { probeHttp } from "./instance.ts";
 
 /**
@@ -15,6 +16,12 @@ export interface ServerEnvOptions {
   port: number;
   password: string;
   sessionSecret: string;
+  /**
+   * A secret generated for this start, also kept in launcher.lock. The server
+   * proves it knows it (GET /api/auth/launch-ticket?challenge=...), which is
+   * how a later launch tells this server from another program on its port.
+   */
+  instanceToken: string;
 }
 
 /**
@@ -33,18 +40,22 @@ export interface ServerEnvOptions {
  *
  * AUDIT_LOG_PATH and SSO_CONFIG_PATH are set only when the operator has not,
  * since those are long-standing app-level overrides someone may rely on.
+ * OPEN_ADMIN_INSTANCE_TOKEN is always this launcher's own: a value inherited
+ * from the environment would let whoever chose it pass for this server.
  */
-export function applyServerEnv(options: ServerEnvOptions): void {
-  process.env.NODE_ENV = "production";
-  process.env.PORT = String(options.port);
-  process.env.HOSTNAME = options.host;
-  process.env.APP_PASSWORD = options.password;
-  process.env.APP_SESSION_SECRET ??= options.sessionSecret;
-  process.env.OPEN_ADMIN_DATA_DIR = options.dataDir;
-  process.env.AUDIT_LOG_PATH ??= path.join(options.dataDir, "audit.log");
-  process.env.SSO_CONFIG_PATH ??= path.join(options.dataDir, "sso.json");
-  process.env.OPEN_ADMIN_PACKAGED = "1";
-  process.env.NEXT_TELEMETRY_DISABLED = "1";
+export function applyServerEnv(options: ServerEnvOptions, env: NodeJS.ProcessEnv = process.env): void {
+  env.NODE_ENV = "production";
+  env.PORT = String(options.port);
+  env.HOSTNAME = options.host;
+  env.APP_PASSWORD = options.password;
+  env.APP_SESSION_SECRET ??= options.sessionSecret;
+  env.OPEN_ADMIN_DATA_DIR = options.dataDir;
+  env.AUDIT_LOG_PATH ??= path.join(options.dataDir, "audit.log");
+  env.SSO_CONFIG_PATH ??= path.join(options.dataDir, "sso.json");
+  env.OPEN_ADMIN_PACKAGED = "1";
+  env.OPEN_ADMIN_INSTANCE_TOKEN = options.instanceToken;
+  env[RUN_AS_NODE_MARKER] = "1";
+  env.NEXT_TELEMETRY_DISABLED = "1";
 }
 
 /**
@@ -60,7 +71,11 @@ export function startEmbeddedServer(appDir: string): void {
   createRequire(serverJs)(serverJs);
 }
 
-/** Poll the login page until the server answers, or give up. */
+/**
+ * Poll the login page until the server answers, or give up. `host` is where
+ * this machine reaches the server (address.ts reachableHost), which for a
+ * server bound to every address is loopback, not the bind address.
+ */
 export async function waitUntilReady(
   host: string,
   port: number,
@@ -71,7 +86,7 @@ export async function waitUntilReady(
     const status = await probeHttp(host, port, "/login", 2000);
     if (status !== null) return status;
     if (Date.now() > deadline) {
-      throw new Error(`server did not answer on ${host}:${port} within ${timeoutMs} ms`);
+      throw new Error(`server did not answer on ${urlHost(host)}:${port} within ${timeoutMs} ms`);
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -95,9 +110,20 @@ export function installShutdown(onShutdown: () => void): void {
   };
   process.on("SIGINT", () => handle("SIGINT"));
   process.on("SIGTERM", () => handle("SIGTERM"));
+  // Closing the console window on Windows arrives as SIGHUP, a few seconds
+  // before Windows ends the process regardless: enough to remove the lock
+  // file. Elsewhere SIGHUP is left alone, so a run started with nohup keeps
+  // running when its terminal closes.
+  if (process.platform === "win32") process.on("SIGHUP", () => handle("SIGHUP"));
   // Backstop for every other way out, including Next's own process.exit().
   process.on("exit", () => onShutdown());
 }
+
+/**
+ * Set by the launcher in its own environment before the server starts, so
+ * only processes the server starts carry it. See maybeRunAsNode.
+ */
+export const RUN_AS_NODE_MARKER = "OPEN_ADMIN_RUN_AS_NODE";
 
 /**
  * Compatibility shim: behave like plain `node script.js` when something
@@ -106,9 +132,14 @@ export function installShutdown(onShutdown: () => void): void {
  * this executable, so any future dependency that shells out to Node would
  * otherwise get a web server instead of its script.
  *
+ * Only for processes the server itself starts, which inherit the launcher's
+ * marker. Without that check, a .js file dragged onto the executable in
+ * Explorer or Finder (which passes its path as the first argument) would run.
+ *
  * Takes the user arguments (argv minus the two leading path slots).
  */
-export function maybeRunAsNode(userArgs: string[]): boolean {
+export function maybeRunAsNode(userArgs: string[], env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env[RUN_AS_NODE_MARKER] !== "1") return false;
   const candidate = userArgs[0];
   if (!candidate || !/\.[cm]?js$/.test(candidate)) return false;
   if (!fs.existsSync(candidate)) return false;

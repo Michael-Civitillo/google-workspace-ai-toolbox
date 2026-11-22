@@ -31,6 +31,20 @@ echo "build-bin: copying the node runtime"
 cp "$(command -v node)" "$out"
 chmod u+w "$out"
 
+# Node's Linux release binary carries its full symbol table and some debug
+# information, about 13 MB that nobody running Open Admin uses. Stripped
+# before the blob is injected; the dynamic symbols native addons link
+# against are kept. (The macOS runtime is left alone: it is signed, and
+# re-signed ad hoc below.)
+if [ "$platform" = "linux" ]; then
+  if command -v strip > /dev/null; then
+    echo "build-bin: stripping symbols from the runtime"
+    strip --strip-all "$out"
+  else
+    echo "build-bin: strip not found; the runtime keeps its symbols" >&2
+  fi
+fi
+
 # The runtime's signature can't survive a new section being appended, and an
 # invalid signature is worse than none.
 if [ "$platform" = "macos" ]; then

@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import {
   applyEnvFile,
+  isRefusedEnvName,
   generatePassword,
   generateSessionSecret,
   MIN_PASSWORD_LENGTH,
@@ -67,6 +68,49 @@ describe("launcher.json", () => {
     );
     assert.deepEqual(readConfigFile(file), {});
   });
+
+  it("drops a port nothing can listen on", () => {
+    const file = tmpFile("ports.json");
+    for (const port of [0, -1, 65536, 70000, 3000.5]) {
+      fs.writeFileSync(file, JSON.stringify({ port }));
+      assert.equal(readConfigFile(file).port, undefined, `kept port ${port}`);
+    }
+    for (const port of [1, 3000, 65535]) {
+      fs.writeFileSync(file, JSON.stringify({ port }));
+      assert.equal(readConfigFile(file).port, port);
+    }
+  });
+
+  it("is readable by its owner only, even replacing a file that was not", {
+    skip: process.platform === "win32",
+  }, () => {
+    const file = tmpFile("private.json");
+    fs.writeFileSync(file, "{}", { mode: 0o644 });
+    fs.chmodSync(file, 0o644);
+    assert.equal(
+      writeConfigFile(file, { version: 1, port: 3000, password: "x".repeat(12), sessionSecret: "s", openBrowser: true }),
+      true
+    );
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  });
+
+  it("leaves no temporary copy of the password behind when the write fails", () => {
+    // A folder where launcher.json should be: the final rename cannot succeed.
+    const dir = tmpFile("blocked");
+    const file = path.join(dir, "launcher.json");
+    fs.mkdirSync(file, { recursive: true });
+    fs.writeFileSync(path.join(file, "keep"), "");
+    assert.throws(() =>
+      writeConfigFile(file, { version: 1, port: 3000, password: "secret-password", sessionSecret: "s", openBrowser: true })
+    );
+    assert.deepEqual(fs.readdirSync(dir), ["launcher.json"]);
+  });
+
+  it("can save settings without a password", () => {
+    const file = tmpFile("no-password.json");
+    writeConfigFile(file, { version: 1, port: 3000, sessionSecret: "s", openBrowser: true });
+    assert.deepEqual(readConfigFile(file), { version: 1, port: 3000, sessionSecret: "s", openBrowser: true });
+  });
 });
 
 describe("parseEnvFile", () => {
@@ -102,7 +146,7 @@ describe("applyEnvFile", () => {
     const file = tmpFile("one.env");
     fs.writeFileSync(file, "SMOKE_TEST_FRESH=applied\n");
     delete process.env.SMOKE_TEST_FRESH;
-    const applied = applyEnvFile(file);
+    const { applied } = applyEnvFile(file);
     assert.deepEqual(applied, ["SMOKE_TEST_FRESH"]);
     assert.equal(process.env.SMOKE_TEST_FRESH, "applied");
     delete process.env.SMOKE_TEST_FRESH;
@@ -112,13 +156,60 @@ describe("applyEnvFile", () => {
     const file = tmpFile("two.env");
     fs.writeFileSync(file, "SMOKE_TEST_EXISTING=from-file\n");
     process.env.SMOKE_TEST_EXISTING = "from-environment";
-    assert.deepEqual(applyEnvFile(file), []);
+    assert.deepEqual(applyEnvFile(file), { applied: [], refused: [] });
     assert.equal(process.env.SMOKE_TEST_EXISTING, "from-environment");
     delete process.env.SMOKE_TEST_EXISTING;
   });
 
   it("is a no-op when the file is absent", () => {
-    assert.deepEqual(applyEnvFile(tmpFile("absent.env")), []);
+    assert.deepEqual(applyEnvFile(tmpFile("absent.env")), { applied: [], refused: [] });
+  });
+
+  it("refuses settings that turn off certificate checks or load code, in any letter case", () => {
+    const file = tmpFile("hostile.env");
+    fs.writeFileSync(
+      file,
+      [
+        "NODE_TLS_REJECT_UNAUTHORIZED=0",
+        "node_options=--require ./evil.js",
+        "NODE_EXTRA_CA_CERTS=/tmp/ca.pem",
+        "LD_PRELOAD=/tmp/evil.so",
+        "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib",
+        "GWS_BIN=/tmp/evil",
+        "GEMINI_MODEL=gemini-2.5-flash",
+      ].join("\n")
+    );
+    const env: NodeJS.ProcessEnv = {};
+    const result = applyEnvFile(file, env);
+    assert.deepEqual(result.applied, ["GEMINI_MODEL"]);
+    assert.deepEqual(result.refused, [
+      "NODE_TLS_REJECT_UNAUTHORIZED",
+      "node_options",
+      "NODE_EXTRA_CA_CERTS",
+      "LD_PRELOAD",
+      "DYLD_INSERT_LIBRARIES",
+      "GWS_BIN",
+    ]);
+    assert.deepEqual(Object.keys(env), ["GEMINI_MODEL"]);
+  });
+
+  it("still accepts proxy settings", () => {
+    const file = tmpFile("proxy.env");
+    fs.writeFileSync(file, "HTTPS_PROXY=http://proxy:8080\nhttp_proxy=http://proxy:8080\nNO_PROXY=localhost\n");
+    const env: NodeJS.ProcessEnv = {};
+    assert.deepEqual(applyEnvFile(file, env), {
+      applied: ["HTTPS_PROXY", "http_proxy", "NO_PROXY"],
+      refused: [],
+    });
+  });
+
+  it("names the refused settings", () => {
+    for (const name of ["NODE_OPTIONS", "Path", "ComSpec", "SSL_CERT_FILE", "OPENSSL_CONF", "LD_LIBRARY_PATH"]) {
+      assert.equal(isRefusedEnvName(name), true, name);
+    }
+    for (const name of ["HTTPS_PROXY", "NO_PROXY", "APP_ALLOWED_ORIGINS", "GEMINI_MODEL", "NODE_ENV"]) {
+      assert.equal(isRefusedEnvName(name), false, name);
+    }
   });
 });
 
