@@ -238,11 +238,15 @@ export function parseCsv(text: string): string[][] {
   let cell = "";
   let quoted = false;
   let cellWasQuoted = false;
+  // Just past a closing quote: spaces before the next comma are padding
+  // (`"a@x.com" , b@x.com`), not part of the cell.
+  let afterQuote = false;
 
   const endCell = () => {
     row.push(cellWasQuoted ? cell : cell.trim());
     cell = "";
     cellWasQuoted = false;
+    afterQuote = false;
   };
   const endRow = () => {
     endCell();
@@ -259,12 +263,14 @@ export function parseCsv(text: string): string[][] {
           i++;
         } else {
           quoted = false;
+          afterQuote = true;
         }
       } else {
         cell += ch;
       }
       continue;
     }
+    if (afterQuote && (ch === " " || ch === "\t")) continue;
     if (ch === '"' && cell.trim() === "") {
       quoted = true;
       cellWasQuoted = true;
@@ -284,6 +290,7 @@ export function parseCsv(text: string): string[][] {
       endRow();
       continue;
     }
+    afterQuote = false;
     cell += ch;
   }
   if (cell !== "" || row.length > 0) endRow();

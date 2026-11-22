@@ -33,7 +33,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant, tenantPinProblem } from "@/lib/tenant-client";
 import {
   compareApps,
   delegationNeedsReview,
@@ -206,11 +206,15 @@ function toCsv(
   forwarding: ForwardingFinding[],
   apps: AppGrant[],
   delegated: DelegatedClient[],
-  domains: DomainEmailAuth[]
+  domains: DomainEmailAuth[],
+  /** Why these results don't cover the whole tenant, when they don't. */
+  incomplete: string | null = null
 ): string {
   const rows: string[][] = [
     ["check", "account", "name", "administrator", "finding", "target", "detail"],
   ];
+  // First, so a file passed on later can't be read as a full picture.
+  if (incomplete) rows.push(["INCOMPLETE", "", "", "", incomplete, "", ""]);
   for (const f of twoStep) {
     rows.push([
       "No 2-Step Verification",
@@ -461,6 +465,14 @@ export default function SecurityCheck() {
   }, []);
 
   const runCheck = async () => {
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setMessage({ type: "error", text: pinProblem });
+      return;
+    }
+
     cancelRef.current = false;
     abortRef.current?.abort();
     const ac = new AbortController();
@@ -513,6 +525,7 @@ export default function SecurityCheck() {
     );
 
     const allApps = new Map<string, AppGrant>();
+    const sortedApps = () => [...allApps.values()].map((a) => ({ ...a })).sort(compareApps);
     let pageToken: string | null = null;
     let pages = 0;
 
@@ -593,7 +606,9 @@ export default function SecurityCheck() {
         }
         if (page.apps.length > 0) {
           mergeAppGrants(allApps, page.apps);
-          setApps([...allApps.values()].map((a) => ({ ...a })).sort(compareApps));
+          // In the order found while the scan runs; sorted once it stops.
+          // Sorting every page made a large tenant's scan stutter.
+          setApps([...allApps.values()].map((a) => ({ ...a })));
         }
         if (page.mailboxErrors.length > 0) {
           setMailboxErrors((prev) =>
@@ -609,10 +624,12 @@ export default function SecurityCheck() {
         pageToken = page.nextPageToken;
         if (cancelRef.current || !pageToken) break;
       }
+      setApps(sortedApps());
       if (cancelRef.current) setStopped("cancelled");
       setDone(true);
     } catch {
       if (tenantIdRef.current !== pinnedTenantId) return;
+      setApps(sortedApps());
       if (ac.signal.aborted) {
         if (cancelRef.current) {
           setStopped("cancelled");
@@ -843,7 +860,12 @@ export default function SecurityCheck() {
       domains: domainsAll,
     });
     if (keys.length > SNAPSHOT_MAX_KEYS) return;
-    const covered: CheckName[] = ["twoStep", "inactive", "forwarding", "apps"];
+    const covered: CheckName[] = ["twoStep", "inactive"];
+    // A check with accounts it couldn't read has no baseline for them: what
+    // it finds there next time, it may have missed this time, so it must not
+    // be marked "new".
+    if ((totals?.mailboxErrors ?? 0) === 0) covered.push("forwarding");
+    if ((totals?.appErrors ?? 0) === 0) covered.push("apps");
     if (delegation) covered.push("delegation");
     // Only a run where every lookup was answered is a baseline: a record
     // that could not be looked up then must not look new when it can be.
@@ -873,6 +895,7 @@ export default function SecurityCheck() {
     inactive,
     forwarding,
     apps,
+    totals,
     tenantId,
   ]);
 
@@ -998,9 +1021,32 @@ export default function SecurityCheck() {
   };
 
   const exportCsv = () => {
+    const gaps = [
+      stopped === "cancelled"
+        ? "The scan was cancelled, so it covers only part of the tenant."
+        : stopped === "failed"
+          ? "The scan stopped early, so it covers only part of the tenant."
+          : scanning
+            ? "Exported while the scan was still running."
+            : "",
+      (totals?.mailboxErrors ?? 0) > 0
+        ? `${plural(totals?.mailboxErrors ?? 0, "mailbox", "mailboxes")} could not be read.`
+        : "",
+      (totals?.appErrors ?? 0) > 0
+        ? `The app lists of ${plural(totals?.appErrors ?? 0, "account")} could not be read.`
+        : "",
+    ].filter(Boolean);
     downloadCsv(
       `security-check-${new Date().toISOString().slice(0, 10)}.csv`,
-      toCsv(twoStepSorted, inactiveShown, forwarding, apps, delegatedAll, domainsAll)
+      toCsv(
+        twoStepSorted,
+        inactiveShown,
+        forwarding,
+        apps,
+        delegatedAll,
+        domainsAll,
+        gaps.length > 0 ? gaps.join(" ") : null
+      )
     );
   };
 
@@ -1020,16 +1066,24 @@ export default function SecurityCheck() {
       </Button>
     ) : null;
 
-  const emptyText = (clean: string) =>
-    !hasResults
-      ? "Run the check to see results."
-      : onlyNew
-        ? "Nothing new here since the last scan."
-        : scanning
-        ? "Nothing found yet…"
-        : partial
-          ? "Nothing found in the part of the tenant that was checked."
-          : clean;
+  // "Nothing found" is only the clean result when everything was read. A
+  // panel whose accounts could not all be read says so instead, however the
+  // scan ended.
+  // The app lists do not cover the whole tenant: a scan cut short, or
+  // accounts whose apps could not be read.
+  const appsIncomplete = partial || (totals?.appErrors ?? 0) > 0;
+
+  const emptyText = (clean: string, unread?: { count: number; what: string }) => {
+    if (!hasResults) return "Run the check to see results.";
+    if (scanning) return "Nothing found yet…";
+    const notRead =
+      unread && unread.count > 0
+        ? ` ${unread.what} could not be read, so this is not a clean result: see "Some accounts couldn't be read" below.`
+        : "";
+    if (onlyNew) return `Nothing new here since the last scan.${notRead}`;
+    if (partial) return `Nothing found in the part of the tenant that was checked.${notRead}`;
+    return notRead ? `Nothing found in what could be read.${notRead}` : clean;
+  };
 
   const anythingFound =
     twoStep.length +
@@ -1391,7 +1445,12 @@ export default function SecurityCheck() {
             </CardHeader>
             <CardContent className="space-y-3">
               {forwardingList.length === 0 ? (
-                <Empty>{emptyText("No mailbox forwards mail outside the organisation.")}</Empty>
+                <Empty>
+                  {emptyText("No mailbox forwards mail outside the organisation.", {
+                    count: totals?.mailboxErrors ?? 0,
+                    what: plural(totals?.mailboxErrors ?? 0, "mailbox", "mailboxes"),
+                  })}
+                </Empty>
               ) : (
                 <>
                   {limited(forwardingList).map((f, i) => (
@@ -1462,7 +1521,12 @@ export default function SecurityCheck() {
             </CardHeader>
             <CardContent className="space-y-3">
               {appList.length === 0 ? (
-                <Empty>{emptyText("Nobody has connected an outside app.")}</Empty>
+                <Empty>
+                  {emptyText("Nobody has connected an outside app.", {
+                    count: totals?.appErrors ?? 0,
+                    what: `The app lists of ${plural(totals?.appErrors ?? 0, "account")}`,
+                  })}
+                </Empty>
               ) : (
                 <>
                   {limited(appList).map(({ app, access }) => {
@@ -1520,7 +1584,9 @@ export default function SecurityCheck() {
                                 >
                                   {app.users.length === 1
                                     ? "Revoke access…"
-                                    : `Revoke for all ${app.users.length.toLocaleString()}…`}
+                                    : appsIncomplete
+                                      ? `Revoke for the ${app.users.length.toLocaleString()} found…`
+                                      : `Revoke for all ${app.users.length.toLocaleString()}…`}
                                 </Button>
                               </div>
                               <ul className="mt-1 text-muted-foreground">
@@ -2034,10 +2100,20 @@ export default function SecurityCheck() {
                   "They can connect the app again unless it is blocked in the Google Admin console (Security → Access and data control → API controls).",
               }
             : {
-                title: "Revoke app access for everyone",
-                summary: `${fix?.app.name || "This app"} will lose its access to every account that granted it.`,
+                // After a scan that didn't read every account, "everyone"
+                // would be wrong: only the accounts it found are revoked.
+                title: appsIncomplete
+                  ? "Revoke app access for the accounts found"
+                  : "Revoke app access for everyone",
+                summary: appsIncomplete
+                  ? `${fix?.app.name || "This app"} will lose its access to the accounts this scan found. The scan did not read every account, so others may still have it connected.`
+                  : `${fix?.app.name || "This app"} will lose its access to every account that granted it.`,
                 confirmPhrase: "REVOKE",
-                confirmLabel: fixError ? "Try again" : "Revoke for everyone",
+                confirmLabel: fixError
+                  ? "Try again"
+                  : appsIncomplete
+                    ? "Revoke for these accounts"
+                    : "Revoke for everyone",
                 changes: [
                   {
                     label: "App",

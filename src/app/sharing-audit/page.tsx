@@ -30,7 +30,8 @@ import {
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant, tenantPinProblem } from "@/lib/tenant-client";
+import { googleLink } from "@/lib/google-links";
 import { SharedDrivesAudit } from "./shared-drives";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 
@@ -51,12 +52,39 @@ interface ExternalFile {
   external: ExternalPermission[];
 }
 
+interface UnreadFile {
+  id: string;
+  name: string;
+  error: string;
+}
+
 interface AuditResult {
   user: string;
   scannedFiles: number;
   truncated: boolean;
   nextPageToken?: string | null;
   files: ExternalFile[];
+  /** Files whose sharing could not be read in full: not checked, not clean. */
+  unreadable?: UnreadFile[];
+  unreadableCount?: number;
+  /** Permissions with no address or domain to judge by. */
+  unidentifiedPermissions?: number;
+}
+
+/** How many unread files a result keeps by name, across pages. */
+const UNREAD_KEEP = 50;
+
+/** Users with nothing found shown before the rest are folded away. */
+const CLEAN_ROWS_SHOWN = 50;
+
+/** Scanned, with nothing flagged and nothing left unread or cut short. */
+function isCleanOutcome(p: PerUserOutcome): boolean {
+  return (
+    p.status === "done" &&
+    (p.files?.length ?? 0) === 0 &&
+    (p.unreadableCount ?? 0) === 0 &&
+    !p.truncated
+  );
 }
 
 interface UserListItem {
@@ -73,6 +101,8 @@ interface PerUserOutcome {
   scannedFiles?: number;
   truncated?: boolean;
   files?: ExternalFile[];
+  unreadable?: UnreadFile[];
+  unreadableCount?: number;
   error?: string;
 }
 
@@ -183,7 +213,9 @@ function permissionLabel(p: ExternalPermission): string {
  */
 function toCsv(
   results: AuditResult[],
-  pathsByUser?: Record<string, Record<string, string>>
+  pathsByUser?: Record<string, Record<string, string>>,
+  /** Why the results don't cover everything they look like they cover. */
+  incomplete: string[] = []
 ): string {
   const header = [
     "owner",
@@ -198,8 +230,17 @@ function toCsv(
     "anyone_with_link_indexable",
   ];
   const rows: string[][] = [header];
+  // First, so a file passed on later can't be read as a full picture.
+  for (const note of incomplete) {
+    rows.push(["INCOMPLETE", "", note, "", "", "", "", "", "", ""]);
+  }
   for (const r of results) {
     const paths = pathsByUser?.[r.user] ?? {};
+    // Files whose sharing could not be read: listed, so their absence below
+    // isn't taken for "not shared".
+    for (const u of r.unreadable ?? []) {
+      rows.push([r.user, paths[u.id] ?? "", u.name, u.id, "", "", "(not read)", u.error, "", ""]);
+    }
     for (const f of r.files) {
       const path = paths[f.id] ?? "";
       for (const p of f.external) {
@@ -221,6 +262,24 @@ function toCsv(
   return rows
     .map((r) => r.map((c) => `"${csvCell(c)}"`).join(","))
     .join("\n");
+}
+
+/** What an export of these results does not cover, as lines for its top. */
+function incompleteNotes(results: AuditResult[], extra: string[] = []): string[] {
+  const notes = [...extra];
+  const capped = results.filter((r) => r.truncated).length;
+  if (capped > 0) {
+    notes.push(
+      results.length === 1
+        ? "The scan stopped before the end of this Drive: later files were not checked."
+        : `${capped.toLocaleString()} users' scans stopped at the file cap: their later files were not checked.`
+    );
+  }
+  const unread = results.reduce((n, r) => n + (r.unreadableCount ?? 0), 0);
+  if (unread > 0) {
+    notes.push(`${unread.toLocaleString()} files could not be read, so their sharing is not known (listed as "(not read)").`);
+  }
+  return notes;
 }
 
 /**
@@ -311,6 +370,23 @@ async function fetchPathsForResults(
   return out;
 }
 
+/** Unread files and odd permissions, added up across the pages of one scan. */
+function unreadAccumulator(start?: AuditResult) {
+  const list: UnreadFile[] = [...(start?.unreadable ?? [])];
+  let count = start?.unreadableCount ?? 0;
+  let unidentified = start?.unidentifiedPermissions ?? 0;
+  return {
+    add(page: AuditResult) {
+      for (const u of page.unreadable ?? []) if (list.length < UNREAD_KEEP) list.push(u);
+      count += page.unreadableCount ?? 0;
+      unidentified += page.unidentifiedPermissions ?? 0;
+    },
+    snapshot(): Pick<AuditResult, "unreadable" | "unreadableCount" | "unidentifiedPermissions"> {
+      return { unreadable: list.slice(), unreadableCount: count, unidentifiedPermissions: unidentified };
+    },
+  };
+}
+
 function downloadCsv(filename: string, content: string) {
   const blob = new Blob([content], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -338,6 +414,11 @@ export default function SharingAudit() {
   const [tenantLoading, setTenantLoading] = useState(false);
   const [perUser, setPerUser] = useState<PerUserOutcome[]>([]);
   const [tenantUserCount, setTenantUserCount] = useState<number | null>(null);
+  // Said when a tenant-wide scan had nobody to scan.
+  const [tenantNote, setTenantNote] = useState<string | null>(null);
+  // Users with nothing found are folded away on a large tenant: thousands of
+  // "0 flagged" rows made the page slow and the findings hard to see.
+  const [showClean, setShowClean] = useState(false);
   // Per-user-result selection map keyed by userIndex — kept sparse so a switch
   // back to a tenant-wide scan after a single audit doesn't leak old picks.
   const [tenantSelected, setTenantSelected] = useState<
@@ -444,7 +525,11 @@ export default function SharingAudit() {
   // Cancel next to it that aborts the resolution (no file is produced then).
   const [exportBusy, setExportBusy] = useState(false);
 
-  async function exportCsvWithPaths(results: AuditResult[], filename: string) {
+  async function exportCsvWithPaths(
+    results: AuditResult[],
+    filename: string,
+    extraNotes: string[] = []
+  ) {
     if (results.length === 0) return;
     exportAbortRef.current?.abort();
     const ac = new AbortController();
@@ -455,7 +540,7 @@ export default function SharingAudit() {
       // Cancelled, tenant switched, or page left: don't drop a half-resolved
       // file on the operator.
       if (ac.signal.aborted) return;
-      downloadCsv(filename, toCsv(results, paths));
+      downloadCsv(filename, toCsv(results, paths, incompleteNotes(results, extraNotes)));
     } finally {
       if (exportAbortRef.current === ac) setExportBusy(false);
     }
@@ -469,9 +554,13 @@ export default function SharingAudit() {
   }
 
   function exportTenantCsv(aggregated: AuditResult[]) {
+    const notScanned = perUser.filter((p) => p.status !== "done").length;
     return exportCsvWithPaths(
       aggregated,
-      `tenant-external-sharing-${new Date().toISOString().slice(0, 10)}.csv`
+      `tenant-external-sharing-${new Date().toISOString().slice(0, 10)}.csv`,
+      notScanned > 0
+        ? [`${notScanned.toLocaleString()} of ${perUser.length.toLocaleString()} users were not scanned (cancelled, still queued, or failed).`]
+        : []
     );
   }
 
@@ -488,6 +577,14 @@ export default function SharingAudit() {
 
   const runSingle = async () => {
     if (!user.trim()) return;
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setError(pinProblem);
+      return;
+    }
+
     setSingleLoading(true);
     setError(null);
     setSingleResult(null);
@@ -509,6 +606,7 @@ export default function SharingAudit() {
       let pageToken: string | undefined;
       let totalScanned = 0;
       const accumulated: ExternalFile[] = [];
+      const unread = unreadAccumulator();
       let pagesFetched = 0;
       // We populate singleResult progressively so the operator sees flagged
       // files appear while the rest of the Drive is still being walked.
@@ -526,6 +624,7 @@ export default function SharingAudit() {
         const page: AuditResult = data.data;
         totalScanned += page.scannedFiles;
         accumulated.push(...page.files);
+        unread.add(page);
         pagesFetched++;
         // Surface progress every page so the operator isn't staring at a
         // dead spinner during a long Drive walk.
@@ -535,6 +634,7 @@ export default function SharingAudit() {
           truncated: !!page.nextPageToken,
           nextPageToken: page.nextPageToken,
           files: accumulated.slice(),
+          ...unread.snapshot(),
         });
         if (!page.nextPageToken) break;
         if (pagesFetched >= SINGLE_USER_PAGE_CAP) break;
@@ -570,6 +670,7 @@ export default function SharingAudit() {
       let pageToken: string | undefined = singleResult.nextPageToken;
       let totalScanned = singleResult.scannedFiles;
       const accumulated: ExternalFile[] = singleResult.files.slice();
+      const unread = unreadAccumulator(singleResult);
       let pagesFetched = 0;
       while (true) {
         if (singleCancelRef.current) break;
@@ -585,6 +686,7 @@ export default function SharingAudit() {
         const page: AuditResult = data.data;
         totalScanned += page.scannedFiles;
         accumulated.push(...page.files);
+        unread.add(page);
         pagesFetched++;
         setSingleResult({
           user: page.user,
@@ -592,6 +694,7 @@ export default function SharingAudit() {
           truncated: !!page.nextPageToken,
           nextPageToken: page.nextPageToken,
           files: accumulated.slice(),
+          ...unread.snapshot(),
         });
         if (!page.nextPageToken) break;
         if (pagesFetched >= SINGLE_USER_PAGE_CAP) break;
@@ -610,7 +713,13 @@ export default function SharingAudit() {
   // -------------------------------------------------------------------------
 
   const runTenantWide = async (mode: "all" | "suspended-only" = "all") => {
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setError(pinProblem);
+      return;
+    }
     setError(null);
+    setTenantNote(null);
     setSingleResult(null);
     setSingleSelected(new Set());
     setPerUser([]);
@@ -648,6 +757,14 @@ export default function SharingAudit() {
       const targets = allUsers.filter((u) =>
         mode === "suspended-only" ? u.suspended : includeSuspended || !u.suspended
       );
+      if (targets.length === 0 && !cancelRef.current) {
+        // Without this the scan ended with nothing on screen at all.
+        setTenantNote(
+          mode === "suspended-only"
+            ? "This tenant has no suspended users, so there was nobody to scan."
+            : "No users matched, so there was nobody to scan."
+        );
+      }
 
       const seeded: PerUserOutcome[] = targets.map((u) => ({
         user: u.primaryEmail,
@@ -684,6 +801,8 @@ export default function SharingAudit() {
                       scannedFiles: r.scannedFiles,
                       truncated: r.truncated,
                       files: r.files,
+                      unreadable: r.unreadable ?? [],
+                      unreadableCount: r.unreadableCount ?? 0,
                     }
                   : p
               )
@@ -692,7 +811,17 @@ export default function SharingAudit() {
             setPerUser((prev) =>
               prev.map((p, idx) =>
                 idx === i
-                  ? { ...p, status: "error", error: data.error || "Audit failed" }
+                  ? {
+                      ...p,
+                      status: "error",
+                      error:
+                        (data.error || "Audit failed") +
+                        // Google may refuse to act as a suspended account at
+                        // all, which its error doesn't say.
+                        (target.suspended
+                          ? " (This account is suspended, and Google may not let Open Admin act as a suspended account.)"
+                          : ""),
+                    }
                   : p
               )
             );
@@ -1041,6 +1170,8 @@ export default function SharingAudit() {
   // Derived
   // -------------------------------------------------------------------------
 
+  const cleanCount = perUser.filter(isCleanOutcome).length;
+
   const tenantSummary = (() => {
     if (perUser.length === 0) return null;
     const done = perUser.filter((p) => p.status === "done").length;
@@ -1052,7 +1183,8 @@ export default function SharingAudit() {
       (p) => (p.files?.length ?? 0) > 0
     ).length;
     const truncatedUsers = perUser.filter((p) => p.truncated).length;
-    return { done, errored, flaggedFiles, flaggedUsers, truncatedUsers };
+    const unreadFiles = perUser.reduce((n, p) => n + (p.unreadableCount ?? 0), 0);
+    return { done, errored, flaggedFiles, flaggedUsers, truncatedUsers, unreadFiles };
   })();
 
   // Collapse state is keyed by user index and can hold stale entries after a
@@ -1252,10 +1384,15 @@ export default function SharingAudit() {
                         scannedFiles: p.scannedFiles ?? 0,
                         truncated: p.truncated ?? false,
                         files: p.files ?? [],
+                        unreadable: p.unreadable ?? [],
+                        unreadableCount: p.unreadableCount ?? 0,
                       }));
                     void exportTenantCsv(aggregated);
                   }}
-                  disabled={tenantSummary.flaggedFiles === 0 || exportBusy}
+                  disabled={
+                    (tenantSummary.flaggedFiles === 0 && tenantSummary.unreadFiles === 0) ||
+                    exportBusy
+                  }
                 >
                   {exportBusy ? (
                     <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
@@ -1276,6 +1413,12 @@ export default function SharingAudit() {
 
         {/* Shared drives: files nobody owns, which the audits above can't see. */}
         <SharedDrivesAudit tenantId={tenantId} />
+
+        {tenantNote && !tenantLoading && perUser.length === 0 && (
+          <Alert>
+            <AlertDescription>{tenantNote}</AlertDescription>
+          </Alert>
+        )}
 
         {/* Tenant-wide progress + results */}
         {(tenantLoading || perUser.length > 0) && (
@@ -1300,6 +1443,8 @@ export default function SharingAudit() {
                   {tenantSummary.flaggedUsers === 1 ? "" : "s"}
                   {tenantSummary.truncatedUsers > 0 &&
                     ` · ${tenantSummary.truncatedUsers} user${tenantSummary.truncatedUsers === 1 ? "" : "s"} hit the 1,000-file cap`}
+                  {tenantSummary.unreadFiles > 0 &&
+                    ` · ${tenantSummary.unreadFiles.toLocaleString()} file${tenantSummary.unreadFiles === 1 ? "" : "s"} could not be read, so their sharing is not known`}
                 </CardDescription>
               )}
             </CardHeader>
@@ -1342,6 +1487,9 @@ export default function SharingAudit() {
                 {perUser.map((p, idx) => {
                   const isCollapsible =
                     p.status === "done" && (p.files?.length ?? 0) > 0;
+                  if (!showClean && isCleanOutcome(p) && cleanCount > CLEAN_ROWS_SHOWN) {
+                    return null;
+                  }
                   return (
                     <TenantUserCard
                       key={p.user}
@@ -1356,6 +1504,18 @@ export default function SharingAudit() {
                     />
                   );
                 })}
+                {cleanCount > CLEAN_ROWS_SHOWN && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => setShowClean((v) => !v)}
+                  >
+                    {showClean
+                      ? "Hide the users with nothing found"
+                      : `Show the ${cleanCount.toLocaleString()} users with nothing found`}
+                  </Button>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -1379,7 +1539,7 @@ export default function SharingAudit() {
                       : ""}
                   </CardDescription>
                 </div>
-                {singleResult.files.length > 0 && (
+                {(singleResult.files.length > 0 || (singleResult.unreadableCount ?? 0) > 0) && (
                   <div className="flex items-center gap-2">
                     <Button
                       variant="outline"
@@ -1404,6 +1564,41 @@ export default function SharingAudit() {
               </div>
             </CardHeader>
             <CardContent>
+              {(singleResult.unreadableCount ?? 0) > 0 && (
+                <Alert variant="warning" className="mb-4">
+                  <AlertTriangle className="h-4 w-4 text-warning" />
+                  <AlertDescription>
+                    <p>
+                      {(singleResult.unreadableCount ?? 0).toLocaleString()} file
+                      {singleResult.unreadableCount === 1 ? "" : "s"} could not
+                      be read in full, so whether{" "}
+                      {singleResult.unreadableCount === 1 ? "it is" : "they are"}{" "}
+                      shared outside is not known. Run the audit again later, or
+                      check {singleResult.unreadableCount === 1 ? "it" : "them"} in
+                      Drive.
+                    </p>
+                    <ul className="mt-1 list-disc list-inside text-xs">
+                      {(singleResult.unreadable ?? []).slice(0, 10).map((u) => (
+                        <li key={u.id}>
+                          {u.name} <span className="text-muted-foreground">({u.error})</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {(singleResult.unreadableCount ?? 0) > 10 && (
+                      <p className="text-xs">The CSV export lists them all.</p>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+              {(singleResult.unidentifiedPermissions ?? 0) > 0 && (
+                <p className="mb-3 text-xs text-muted-foreground">
+                  {(singleResult.unidentifiedPermissions ?? 0).toLocaleString()} permission
+                  {singleResult.unidentifiedPermissions === 1 ? " has" : "s have"} no
+                  address or domain Google would show (often a deleted account),
+                  so {singleResult.unidentifiedPermissions === 1 ? "it was" : "they were"} not
+                  counted as inside or outside.
+                </p>
+              )}
               {singleResult.truncated && !singleLoading && (
                 <Alert variant="warning" className="mb-4">
                   <AlertTriangle className="h-4 w-4 text-warning" />
@@ -1668,6 +1863,17 @@ function _TenantUserCard({
               <p className="text-xs text-muted-foreground">
                 scanned {p.scannedFiles} · {flagged.length} flagged
                 {p.truncated ? " · truncated" : ""}
+                {(p.unreadableCount ?? 0) > 0 && (
+                  <span className="text-warning-fg">
+                    {" "}· {p.unreadableCount} not read
+                    {p.unreadable && p.unreadable.length > 0
+                      ? ` (${p.unreadable
+                          .slice(0, 3)
+                          .map((u) => u.name)
+                          .join(", ")}${(p.unreadableCount ?? 0) > 3 ? ", …" : ""})`
+                      : ""}
+                  </span>
+                )}
               </p>
             )}
             {p.status === "error" && (
@@ -1840,9 +2046,9 @@ function _FileRow({
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {file.webViewLink && (
+              {googleLink(file.webViewLink) && (
                 <a
-                  href={file.webViewLink}
+                  href={googleLink(file.webViewLink) ?? undefined}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs flex items-center gap-1 text-primary hover:underline"

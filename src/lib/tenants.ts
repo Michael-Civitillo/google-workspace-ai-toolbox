@@ -8,6 +8,7 @@
 export {
   TENANT_COLORS,
   TENANT_COLOR_CLASSES,
+  tenantColorClasses,
   type TenantColor,
   type Tenant,
 } from "./tenant-types";

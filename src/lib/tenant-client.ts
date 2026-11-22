@@ -66,7 +66,118 @@ export function subscribeTenantId(fn: (id: string | null) => void): () => void {
  * list instead of showing stale names until a full reload.
  */
 export function notifyTenantsChanged() {
+  // A list fetched before the change is out of date: the next load starts afresh.
+  _listInflight = null;
   for (const fn of tenantsChangedListeners) fn();
+}
+
+// ---------------------------------------------------------------------------
+// The tenant list, fetched once for every part of the page that needs it
+// ---------------------------------------------------------------------------
+
+export type TenantListStatus = "loading" | "loaded" | "error";
+
+interface TenantListSnapshot {
+  tenants: Tenant[];
+  status: TenantListStatus;
+}
+
+let _list: TenantListSnapshot = { tenants: [], status: "loading" };
+let _listInflight: Promise<void> | null = null;
+const listListeners = new Set<() => void>();
+const SERVER_LIST: TenantListSnapshot = { tenants: [], status: "loading" };
+
+function setList(next: TenantListSnapshot) {
+  _list = next;
+  for (const fn of listListeners) fn();
+}
+
+/**
+ * Fetch the tenant list. Callers at the same moment share one request (the
+ * sidebar, the bootstrap and a page used to make three). When the server's
+ * answer arrives it also sets the active tenant, unless the operator switched
+ * while it was on its way: an answer from before a switch must not undo it.
+ * A failed request keeps the last good list.
+ */
+export function loadTenantList(): Promise<void> {
+  if (_listInflight) return _listInflight;
+  const request: Promise<void> = fetchTenantList(_generation).finally(() => {
+    if (_listInflight === request) _listInflight = null;
+  });
+  _listInflight = request;
+  return request;
+}
+
+async function fetchTenantList(genBefore: number): Promise<void> {
+  try {
+    const r = await fetch("/api/tenants", { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const tenants: Tenant[] = Array.isArray(data?.tenants) ? data.tenants : [];
+    const activeId: string | null =
+      typeof data?.activeTenantId === "string" ? data.activeTenantId : null;
+    setList({ tenants, status: "loaded" });
+    if (_generation === genBefore) {
+      const next = activeId ? tenants.find((t) => t.id === activeId) ?? null : null;
+      // Only when something changed (or on the first load, which is what
+      // marks the state as known): a write bumps the generation, which other
+      // flows read as "the tenant moved under me".
+      const changed =
+        _generation === 0 ||
+        activeId !== _currentTenantId ||
+        (next ? !sameTenantDetails(next, _currentTenant) : _currentTenant !== null);
+      if (changed) setCurrentTenantState(activeId, next);
+    } else if (_currentTenantId) {
+      // Keep the operator's pick, with its latest details (a rename).
+      const mine = tenants.find((t) => t.id === _currentTenantId);
+      if (mine && !sameTenantDetails(mine, _currentTenant)) setCurrentTenantState(mine.id, mine);
+    }
+  } catch {
+    // Stale beats wrong-tenant: keep what was there.
+    setList({ tenants: _list.tenants, status: _list.status === "loaded" ? "loaded" : "error" });
+  }
+}
+
+function sameTenantDetails(a: Tenant, b: Tenant | null): boolean {
+  return (
+    !!b &&
+    a.id === b.id &&
+    a.name === b.name &&
+    a.color === b.color &&
+    a.adminEmail === b.adminEmail &&
+    a.credentialsFile === b.credentialsFile
+  );
+}
+
+/** The tenant list and whether it has loaded, for components. */
+export function useTenantList(): TenantListSnapshot {
+  return useSyncExternalStore(
+    (fn) => {
+      listListeners.add(fn);
+      return () => {
+        listListeners.delete(fn);
+      };
+    },
+    () => _list,
+    () => SERVER_LIST
+  );
+}
+
+/**
+ * Why a multi-step run may not start pinned to `tenantId`, or null when it
+ * may. A null pin sends no tenant at all, and the server then uses whichever
+ * tenant is active in its own settings, which, while the list is still
+ * loading, need not be the one the page is about to show. Once the list has
+ * loaded empty, null is right: the install runs on environment credentials.
+ */
+export function tenantPinProblem(tenantId: string | null): string | null {
+  if (tenantId) return null;
+  if (_list.status !== "loaded") {
+    return "The tenant list is still loading — try again in a moment.";
+  }
+  return _list.tenants.length === 0
+    ? null
+    : "No tenant is selected — pick one in the sidebar first.";
 }
 
 export function subscribeTenantsChanged(fn: () => void): () => void {

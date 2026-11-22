@@ -309,6 +309,29 @@ describe("forwardingFindings", () => {
     );
   });
 
+  it("says when a forwarding filter also deletes or archives the original", () => {
+    const { external } = forwardingFindings(
+      OWNER,
+      { enabled: false },
+      [
+        { id: "del", action: { forward: "a@evil.net", addLabelIds: ["TRASH"] } },
+        { id: "arc", action: { forward: "b@evil.net", removeLabelIds: ["INBOX", "UNREAD"] } },
+        { id: "read", action: { forward: "c@evil.net", removeLabelIds: ["UNREAD"] } },
+        { id: "keep", action: { forward: "d@evil.net", addLabelIds: ["Label_7"] } },
+      ],
+      DOMAINS
+    );
+    const byId = Object.fromEntries(external.map((f) => [f.filterId, f]));
+    assert.equal(byId.del.hidesOriginal, true);
+    assert.match(byId.del.detail, /deletes the original/);
+    assert.equal(byId.arc.hidesOriginal, true);
+    assert.match(byId.arc.detail, /archives the original and marks it read/);
+    assert.equal(byId.read.hidesOriginal, false);
+    assert.match(byId.read.detail, /marks the original read/);
+    assert.equal(byId.keep.hidesOriginal, false);
+    assert.doesNotMatch(byId.keep.detail, /original/);
+  });
+
   it("reports the setting and the filters together", () => {
     const { external } = forwardingFindings(
       OWNER,

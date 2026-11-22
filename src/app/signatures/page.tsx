@@ -17,6 +17,7 @@ import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert, type Feedback } from "@/components/feedback-alert";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 import {
+  AlertTriangle,
   CheckCircle2,
   Circle,
   Download,
@@ -28,7 +29,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant, tenantPinProblem } from "@/lib/tenant-client";
 import { isValidEmail } from "@/lib/validate-email";
 import {
   DEFAULT_SIGNATURE_TEMPLATE,
@@ -48,7 +49,7 @@ interface Preview {
   current: string;
 }
 
-type RowStatus = "pending" | "running" | "changed" | "unchanged" | "error";
+type RowStatus = "pending" | "running" | "changed" | "unchanged" | "error" | "unknown";
 
 interface Row {
   user: string;
@@ -61,21 +62,28 @@ interface Row {
 /** The most mailboxes one run takes. A run can be cancelled part-way. */
 const MAX_RECIPIENTS = 2000;
 
+/**
+ * Mailboxes changed at once. Each is one independent request, and Gmail's
+ * limits are per mailbox; one at a time made a 2,000-mailbox run take over
+ * half an hour.
+ */
+const RUN_CONCURRENCY = 4;
+
 const JSON_POST = {
   method: "POST",
   headers: { "Content-Type": "application/json" },
 } as const;
 
 function parseRecipients(text: string): { users: string[]; bad: string[] } {
-  const users: string[] = [];
+  const users = new Set<string>();
   const bad: string[] = [];
   for (const raw of text.split(/[\n,;]+/)) {
     const line = raw.trim().toLowerCase();
     if (!line) continue;
     if (!isValidEmail(line)) bad.push(raw.trim());
-    else if (!users.includes(line)) users.push(line);
+    else users.add(line);
   }
-  return { users, bad };
+  return { users: [...users], bad };
 }
 
 function csvCell(c: string): string {
@@ -145,6 +153,15 @@ export default function Signatures() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [ran, setRan] = useState(false);
+  // Cancel asked for: no new mailbox starts, the ones in flight finish.
+  const [stopping, setStopping] = useState(false);
+  const stopRef = useRef(false);
+  /**
+   * Each person's signature from before this page first replaced it, across
+   * every run since the page opened. The only copy there is to put one back,
+   * so a second run must not drop the first run's.
+   */
+  const [originals, setOriginals] = useState<Record<string, string>>({});
 
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
@@ -164,6 +181,8 @@ export default function Signatures() {
     setRows([]);
     setRan(false);
     setRunning(false);
+    setStopping(false);
+    setOriginals({});
     setConfirmOpen(false);
     setLoadingEveryone(false);
     return () => abortRef.current?.abort();
@@ -178,12 +197,24 @@ export default function Signatures() {
         ? `${recipients.users.length.toLocaleString()} mailboxes is more than one run takes (${MAX_RECIPIENTS.toLocaleString()}). Apply in batches.`
         : null;
 
+  // A preview shows one template; once the template changes it would show
+  // something that will not be applied, so it goes (and one in flight is
+  // dropped when it lands).
+  function changeTemplate(next: string) {
+    setTemplate(next);
+    if (preview || previewing) {
+      previewSeq.current++;
+      setPreview(null);
+      setPreviewing(false);
+    }
+  }
+
   function insertField(key: string) {
     const el = templateRef.current;
     const token = `{{${key}}}`;
     const start = el?.selectionStart ?? template.length;
     const end = el?.selectionEnd ?? template.length;
-    setTemplate(template.slice(0, start) + token + template.slice(end));
+    changeTemplate(template.slice(0, start) + token + template.slice(end));
     // Put the cursor after what was inserted, once React has written it.
     requestAnimationFrame(() => {
       el?.focus();
@@ -267,76 +298,121 @@ export default function Signatures() {
   }
 
   async function run() {
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setConfirmOpen(false);
+      setRecipientsNote({ type: "error", text: pinProblem });
+      return;
+    }
+
     const pinnedTenantId = tenantId;
     const pinnedTemplate = template;
     const users = recipients.users;
     const ac = new AbortController();
     abortRef.current = ac;
+    stopRef.current = false;
+    setStopping(false);
     setConfirmOpen(false);
     setRunning(true);
     setRan(false);
     setRows(users.map((user) => ({ user, status: "pending" })));
     const set = (i: number, patch: Partial<Row>) =>
       setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+    const live = () => !ac.signal.aborted && tenantIdRef.current === pinnedTenantId;
+
+    const applyOne = async (i: number) => {
+      set(i, { status: "running" });
+      try {
+        const res = await tfetch(
+          "/api/admin/signatures",
+          {
+            ...JSON_POST,
+            body: JSON.stringify({
+              user: users[i],
+              template: pinnedTemplate,
+              confirm: users[i],
+            }),
+            signal: ac.signal,
+          },
+          pinnedTenantId
+        );
+        const result = await res.json();
+        if (tenantIdRef.current !== pinnedTenantId) return;
+        if (result.success) {
+          const previous: string = result.data.previous ?? "";
+          set(i, { status: result.data.changed ? "changed" : "unchanged", previous });
+          if (result.data.changed) {
+            // The first signature seen for this person is the one to keep.
+            setOriginals((prev) => (users[i] in prev ? prev : { ...prev, [users[i]]: previous }));
+          }
+        } else {
+          set(i, { status: "error", error: result.error || `The server answered ${res.status}` });
+        }
+      } catch {
+        // Cut off mid-request (the tenant was switched, or the page left):
+        // the server may well have finished, so this is not "not run".
+        set(i, {
+          status: ac.signal.aborted ? "unknown" : "error",
+          error: ac.signal.aborted
+            ? "Cut off while this mailbox was being changed: it may or may not have the new signature."
+            : "Could not reach the server.",
+        });
+      }
+    };
 
     try {
-      for (let i = 0; i < users.length; i++) {
-        if (ac.signal.aborted || tenantIdRef.current !== pinnedTenantId) break;
-        set(i, { status: "running" });
-        try {
-          const res = await tfetch(
-            "/api/admin/signatures",
-            {
-              ...JSON_POST,
-              body: JSON.stringify({
-                user: users[i],
-                template: pinnedTemplate,
-                confirm: users[i],
-              }),
-              signal: ac.signal,
-            },
-            pinnedTenantId
-          );
-          const result = await res.json();
-          if (tenantIdRef.current !== pinnedTenantId) return;
-          if (result.success) {
-            set(i, {
-              status: result.data.changed ? "changed" : "unchanged",
-              previous: result.data.previous ?? "",
-            });
-          } else {
-            set(i, { status: "error", error: result.error || `The server answered ${res.status}` });
-          }
-        } catch {
-          if (ac.signal.aborted) {
-            // It never ran: put it back so the count of what's left is right.
-            set(i, { status: "pending" });
-            break;
-          }
-          set(i, { status: "error", error: "Could not reach the server." });
+      let next = 0;
+      const worker = async () => {
+        while (next < users.length) {
+          // Between mailboxes only: Cancel lets the ones in flight finish, so
+          // what each row says is what happened.
+          if (stopRef.current || !live()) return;
+          await applyOne(next++);
         }
-      }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(RUN_CONCURRENCY, users.length) }, worker)
+      );
       if (tenantIdRef.current === pinnedTenantId) setRan(true);
     } finally {
       setRunning(false);
+      setStopping(false);
     }
   }
 
+  function cancelRun() {
+    stopRef.current = true;
+    setStopping(true);
+  }
+
   function exportResults() {
+    const label = (s: RowStatus) =>
+      s === "changed"
+        ? "replaced"
+        : s === "unchanged"
+          ? "already had it"
+          : s === "error"
+            ? "failed"
+            : s === "unknown"
+              ? "outcome unknown"
+              : "not run";
+    const inRun = new Set(rows.map((r) => r.user));
     downloadCsv(`signatures-${new Date().toISOString().slice(0, 10)}.csv`, [
-      ["user", "result", "error", "previous_signature_html"],
+      ["user", "result", "error", "signature_before_open_admin", "signature_before_this_run"],
       ...rows.map((r) => [
         r.user,
-        r.status === "changed"
-          ? "replaced"
-          : r.status === "unchanged"
-            ? "already had it"
-            : r.status === "error"
-              ? "failed"
-              : "not run",
+        label(r.status),
         r.error ?? "",
+        originals[r.user] ?? "",
         r.previous ?? "",
       ]),
+      // Replaced by an earlier run on this page, and not part of this one:
+      // still the only copy of what they had.
+      ...Object.entries(originals)
+        .filter(([user]) => !inRun.has(user))
+        .map(([user, original]) => [user, "replaced in an earlier run", "", original, ""]),
     ]);
   }
 
@@ -351,6 +427,8 @@ export default function Signatures() {
         return <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />;
       case "error":
         return <XCircle className="h-4 w-4 shrink-0 text-danger" />;
+      case "unknown":
+        return <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />;
       case "running":
         return <Loader2 className="h-4 w-4 shrink-0 animate-spin text-info" />;
       default:
@@ -386,7 +464,7 @@ export default function Signatures() {
                 rows={7}
                 value={template}
                 maxLength={SIGNATURE_TEMPLATE_MAX}
-                onChange={(e) => setTemplate(e.target.value)}
+                onChange={(e) => changeTemplate(e.target.value)}
                 disabled={running}
                 className="font-mono text-xs"
                 spellCheck={false}
@@ -556,12 +634,13 @@ export default function Signatures() {
                 {`Review & apply to ${n.toLocaleString()} ${n === 1 ? "mailbox" : "mailboxes"}`}
               </Button>
               {running && (
-                <Button variant="outline" onClick={() => abortRef.current?.abort()}>
+                <Button variant="outline" onClick={cancelRun} disabled={stopping}>
                   <X className="h-4 w-4" />
-                  Cancel
+                  {stopping ? "Stopping after the mailboxes in progress…" : "Cancel"}
                 </Button>
               )}
-              {rows.some((r) => r.status !== "pending") && !running && (
+              {(rows.some((r) => r.status !== "pending") || Object.keys(originals).length > 0) &&
+                !running && (
                 <Button variant="secondary" onClick={exportResults}>
                   <Download className="h-4 w-4" />
                   Export results CSV
@@ -576,15 +655,16 @@ export default function Signatures() {
                     ? `Working... ${(rows.length - count("pending") - count("running")).toLocaleString()} of ${rows.length.toLocaleString()}`
                     : ran
                       ? `${count("pending") > 0 ? "Stopped early. " : "Done. "}${count("changed")} replaced · ${count("unchanged")} already had it · ${count("error")} failed${
-                          count("pending") > 0 ? ` · ${count("pending")} not run` : ""
-                        }`
+                          count("unknown") > 0 ? ` · ${count("unknown")} outcome unknown` : ""
+                        }${count("pending") > 0 ? ` · ${count("pending")} not run` : ""}`
                       : ""}
                 </p>
-                {ran && rows.some((r) => r.status === "changed") && (
+                {Object.keys(originals).length > 0 && !running && (
                   <p className="text-xs text-muted-foreground">
-                    The export includes each signature that was replaced, in
-                    case one needs putting back. It is only kept until you leave
-                    this page.
+                    The export includes the signature each person had before
+                    this page first replaced it, from every run since the page
+                    opened, in case one needs putting back. It is only kept
+                    until you leave this page.
                   </p>
                 )}
                 <div className="space-y-1.5">
@@ -598,6 +678,7 @@ export default function Signatures() {
                       {r.status === "changed" && <Badge variant="success">Replaced</Badge>}
                       {r.status === "unchanged" && <Badge variant="secondary">Already had it</Badge>}
                       {r.status === "error" && <Badge variant="destructive">Failed</Badge>}
+                      {r.status === "unknown" && <Badge variant="warning">Outcome unknown</Badge>}
                       {r.error && (
                         <span className="basis-full pl-7 text-xs text-danger break-words">
                           {r.error}
@@ -616,7 +697,7 @@ export default function Signatures() {
         open={confirmOpen}
         onOpenChange={(open) => !running && setConfirmOpen(open)}
         title="Replace these signatures"
-        summary={`Set the signature of ${n.toLocaleString()} ${n === 1 ? "mailbox" : "mailboxes"} from the template. They are done one at a time and can be cancelled part-way.`}
+        summary={`Set the signature of ${n.toLocaleString()} ${n === 1 ? "mailbox" : "mailboxes"} from the template, a few at a time. Cancel stops it after the mailboxes in progress.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="high"
         confirmPhrase={`APPLY ${n}`}

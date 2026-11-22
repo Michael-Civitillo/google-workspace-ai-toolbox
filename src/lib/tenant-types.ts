@@ -87,3 +87,16 @@ export const TENANT_COLOR_CLASSES: Record<
     dot: "bg-slate-500",
   },
 };
+
+/**
+ * The classes for a tenant's colour, falling back to slate for a colour this
+ * build doesn't know (a hand-edited tenants.json, a newer version's colour),
+ * so one odd value can't break every page that draws the sidebar.
+ */
+export function tenantColorClasses(color: unknown): (typeof TENANT_COLOR_CLASSES)[TenantColor] {
+  return (
+    (typeof color === "string" && Object.prototype.hasOwnProperty.call(TENANT_COLOR_CLASSES, color)
+      ? TENANT_COLOR_CLASSES[color as TenantColor]
+      : undefined) ?? TENANT_COLOR_CLASSES.slate
+  );
+}

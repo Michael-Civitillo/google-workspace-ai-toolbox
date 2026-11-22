@@ -28,11 +28,21 @@ export function useTheme() {
 
 function readInitialTheme(): Theme {
   if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem("theme");
+  // Reading storage throws when the browser blocks it (some privacy
+  // settings, some embedded views). That must cost the remembered theme,
+  // not every page.
+  let stored: string | null = null;
+  try {
+    stored = window.localStorage.getItem("theme");
+  } catch {
+    stored = null;
+  }
   if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "light";
+  }
 }
 
 // Hydration-safe "has the client mounted?" flag. Returns false during SSR and
@@ -66,7 +76,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     // updaters more than once (Strict Mode double-invokes them in
     // development), and an updater is meant to be pure.
     const next: Theme = theme === "light" ? "dark" : "light";
-    localStorage.setItem("theme", next);
+    try {
+      localStorage.setItem("theme", next);
+    } catch {
+      // Not remembered across visits, but still switched now.
+    }
     document.documentElement.classList.toggle("dark", next === "dark");
     setTheme(next);
   }

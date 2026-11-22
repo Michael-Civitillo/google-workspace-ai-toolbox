@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
 import { FeedbackAlert } from "@/components/feedback-alert";
 import { AiSummary } from "@/components/ai-summary";
+import { CoverageNote, readCoverage, type Coverage } from "@/components/coverage-note";
 import { Search, Loader2, Shield, FileText } from "lucide-react";
 import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
 
@@ -26,6 +27,8 @@ export default function Audit() {
   // render the live input — typing the NEXT audit's address would relabel the
   // still-displayed findings as someone else's.
   const [summaryUser, setSummaryUser] = useState("");
+  // What the report could not cover, from the server, not from the model.
+  const [gaps, setGaps] = useState<Coverage | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -40,6 +43,7 @@ export default function Audit() {
   useEffect(() => {
     setSummary("");
     setSummaryUser("");
+    setGaps(null);
     setMessage(null);
   }, [tenantId]);
 
@@ -47,6 +51,7 @@ export default function Audit() {
     if (!user.trim()) return;
     setLoading(true);
     setSummary("");
+    setGaps(null);
     setMessage(null);
     const pinnedTenantId = tenantId;
 
@@ -66,6 +71,7 @@ export default function Audit() {
       if (result.success) {
         setSummary(result.data.summary);
         setSummaryUser(result.data.user || user.trim());
+        setGaps(readCoverage(result.data));
       } else {
         setMessage({
           type: "error",
@@ -157,7 +163,8 @@ export default function Audit() {
                 Audit Report — {summaryUser}
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-4">
+              <CoverageNote gaps={gaps} />
               {/* AiSummary carries the "advisory, verify it" callout itself. */}
               <AiSummary text={summary} />
             </CardContent>

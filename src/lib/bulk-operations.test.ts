@@ -193,6 +193,13 @@ describe("duplicateRows", () => {
 });
 
 describe("parseCsv", () => {
+  it("ignores spaces between a closing quote and the comma", () => {
+    assert.deepEqual(parseCsv('"a@example.com" , b@example.com\n"c@x.com"\t,"d"  '), [
+      ["a@example.com", "b@example.com"],
+      ["c@x.com", "d"],
+    ]);
+  });
+
   it("reads quoted cells, doubled quotes, commas in quotes and every line ending", () => {
     assert.deepEqual(parseCsv('a,b\r\n"c,1","d ""x"""\rE , f\n\n'), [
       ["a", "b"],

@@ -32,8 +32,9 @@ import {
   CheckCircle2,
   XCircle,
   Circle,
+  AlertTriangle,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import { tfetch, useCurrentTenant, tenantPinProblem } from "@/lib/tenant-client";
 import { ConfirmActionDialog } from "@/components/confirm-action-dialog";
 import {
   confirmPhraseFor,
@@ -52,7 +53,7 @@ const OPERATION_LABELS = Object.fromEntries(
 const MAX_ROWS = 500;
 const MAX_FILE_BYTES = 1024 * 1024;
 
-type RowStatus = "invalid" | "pending" | "running" | "success" | "error";
+type RowStatus = "invalid" | "pending" | "running" | "success" | "error" | "unknown";
 
 interface BulkRow {
   index: number;
@@ -90,6 +91,8 @@ export default function BulkOperations() {
   const [parseError, setParseError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [ran, setRan] = useState(false);
+  // Cancel asked for: the row in flight finishes, no new row starts.
+  const [stopping, setStopping] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
@@ -213,10 +216,22 @@ export default function BulkOperations() {
   const invalidCount = rows.filter((r) => r.status === "invalid").length;
   const successCount = rows.filter((r) => r.status === "success").length;
   const errorCount = rows.filter((r) => r.status === "error").length;
+  const unknownCount = rows.filter((r) => r.status === "unknown").length;
+  const notRunCount = rows.filter((r) => r.status === "pending").length;
 
   const run = async () => {
+    // Not before the tenant list has loaded: a run with no tenant pinned
+    // goes to whichever tenant the server has active.
+    const pinProblem = tenantPinProblem(tenantId);
+    if (pinProblem) {
+      setConfirmOpen(false);
+      setMessage({ type: "error", text: pinProblem });
+      return;
+    }
+
     setConfirmOpen(false);
     setRunning(true);
+    setStopping(false);
     setMessage(null);
     cancelRef.current = false;
     const ac = new AbortController();
@@ -257,31 +272,36 @@ export default function BulkOperations() {
           }
         } catch {
           if (ac.signal.aborted) {
-            // Roll the row back to pending — it never ran.
-            setRows((prev) =>
-              prev.map((r, idx) =>
-                idx === i ? { ...r, status: "pending" } : r
-              )
-            );
-            break;
+            // Cut off mid-request (the tenant was switched, or the page
+            // left): the server may well have finished it, so it is not
+            // "pending" — it may have run.
+            status = "unknown";
+            error =
+              "Cut off while this row was running: it may or may not have been done. Check before running it again.";
+          } else {
+            error = "Failed to connect to the API";
           }
-          error = "Failed to connect to the API";
         }
         setRows((prev) =>
           prev.map((r, idx) =>
             idx === i ? { ...r, status, ...(error ? { error } : {}) } : r
           )
         );
+        if (ac.signal.aborted) break;
       }
       setRan(true);
     } finally {
       setRunning(false);
+      setStopping(false);
     }
   };
 
+  // Stop after the row in flight. Aborting its request would not stop the
+  // server — an account being suspended still gets suspended — and the row
+  // would then claim it never ran.
   const cancelRun = () => {
     cancelRef.current = true;
-    abortRef.current?.abort();
+    setStopping(true);
   };
 
   const exportResults = () => {
@@ -304,6 +324,8 @@ export default function BulkOperations() {
       case "error":
       case "invalid":
         return <XCircle className="h-4 w-4 text-danger shrink-0" />;
+      case "unknown":
+        return <AlertTriangle className="h-4 w-4 text-warning shrink-0" />;
       case "running":
         return (
           <Loader2 className="h-4 w-4 animate-spin text-info shrink-0" />
@@ -422,7 +444,9 @@ export default function BulkOperations() {
               <CardTitle>Preview & Run</CardTitle>
               <CardDescription>
                 {ran || running
-                  ? `${successCount} succeeded · ${errorCount} failed · ${invalidCount} skipped (invalid)`
+                  ? `${ran && notRunCount > 0 ? "Stopped early. " : ""}${successCount} succeeded · ${errorCount} failed${
+                      unknownCount > 0 ? ` · ${unknownCount} outcome unknown` : ""
+                    }${notRunCount > 0 && ran ? ` · ${notRunCount} not run` : ""} · ${invalidCount} skipped (invalid)`
                   : `${validCount} row${validCount === 1 ? "" : "s"} ready to run · ${invalidCount} invalid (will be skipped)`}
               </CardDescription>
             </CardHeader>
@@ -443,9 +467,9 @@ export default function BulkOperations() {
                   Run {validCount} row{validCount === 1 ? "" : "s"}
                 </Button>
                 {running && (
-                  <Button variant="outline" onClick={cancelRun}>
+                  <Button variant="outline" onClick={cancelRun} disabled={stopping}>
                     <X className="h-4 w-4" />
-                    Cancel
+                    {stopping ? "Stopping after this row…" : "Cancel"}
                   </Button>
                 )}
                 {(ran || errorCount > 0) && (
@@ -495,7 +519,7 @@ export default function BulkOperations() {
         open={confirmOpen}
         onOpenChange={(o) => !running && setConfirmOpen(o)}
         title="Run bulk operation"
-        summary={`Run "${op.label}" across ${validCount} row${validCount === 1 ? "" : "s"}. Rows execute one at a time and can be cancelled mid-run.`}
+        summary={`Run "${op.label}" across ${validCount} row${validCount === 1 ? "" : "s"}. Rows run one at a time; Cancel stops after the row in progress.`}
         tenant={
           tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null
         }

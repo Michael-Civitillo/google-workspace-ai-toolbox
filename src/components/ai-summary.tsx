@@ -4,16 +4,28 @@ import type { ReactNode } from "react";
 import { Bot } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
-/** Inline markdown subset: `**bold**`. */
+/** Inline markdown subset: `**bold**`, `*italic*`, and `code`. */
 function renderInline(line: string): ReactNode[] {
-  return line.split(/(\*\*[^*]+\*\*)/g).map((part, j) =>
-    part.startsWith("**") && part.endsWith("**") ? (
-      <strong key={j}>{part.slice(2, -2)}</strong>
-    ) : (
-      part
-    )
-  );
+  return line.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*)/g).map((part, j) => {
+    if (part.length > 4 && part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={j}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code key={j} className="rounded bg-muted px-1 font-mono text-[0.85em]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.length > 2 && part.startsWith("*") && part.endsWith("*")) {
+      return <em key={j}>{part.slice(1, -1)}</em>;
+    }
+    return part;
+  });
 }
+
+const BULLET = /^\s*[-*•]\s+/;
+const NUMBERED = /^\s*\d+[.)]\s+/;
 
 /**
  * Renders the markdown-ish subset the AI report prompts ask for: headers,
@@ -32,37 +44,55 @@ function renderInline(line: string): ReactNode[] {
 export function AiSummary({ text }: { text: string }) {
   const blocks: ReactNode[] = [];
   let bullets: ReactNode[] = [];
+  let listKind: "ul" | "ol" = "ul";
   const flushBullets = (key: string) => {
     if (bullets.length === 0) return;
     blocks.push(
-      <ul key={key} className="my-1 ml-4 list-disc space-y-0.5">
-        {bullets}
-      </ul>
+      listKind === "ol" ? (
+        <ol key={key} className="my-1 ml-5 list-decimal space-y-0.5">
+          {bullets}
+        </ol>
+      ) : (
+        <ul key={key} className="my-1 ml-4 list-disc space-y-0.5">
+          {bullets}
+        </ul>
+      )
     );
     bullets = [];
   };
 
   text.split("\n").forEach((line, i) => {
-    if (line.startsWith("- ") || line.startsWith("* ")) {
+    // Bullets (indented ones too, flattened) and numbered steps: the model
+    // writes both, and either used to come out as raw "- " or "1." text.
+    const kind = BULLET.test(line) ? "ul" : NUMBERED.test(line) ? "ol" : null;
+    if (kind) {
+      if (bullets.length > 0 && kind !== listKind) flushBullets(`list-${i}-switch`);
+      listKind = kind;
       bullets.push(
         <li key={i} className="text-sm">
-          {renderInline(line.slice(2))}
+          {renderInline(line.replace(kind === "ul" ? BULLET : NUMBERED, ""))}
         </li>
       );
       return;
     }
     flushBullets(`list-${i}`);
 
-    if (line.startsWith("## ")) {
+    if (/^#{3,6} /.test(line)) {
+      blocks.push(
+        <h4 key={i} className="text-sm font-semibold mt-3 mb-1">
+          {renderInline(line.replace(/^#{3,6} /, ""))}
+        </h4>
+      );
+    } else if (line.startsWith("## ")) {
       blocks.push(
         <h3 key={i} className="text-base font-semibold mt-4 mb-2">
-          {line.replace("## ", "")}
+          {renderInline(line.replace("## ", ""))}
         </h3>
       );
     } else if (line.startsWith("# ")) {
       blocks.push(
         <h2 key={i} className="text-lg font-semibold mt-4 mb-2">
-          {line.replace("# ", "")}
+          {renderInline(line.replace("# ", ""))}
         </h2>
       );
     } else if (line.trim() === "") {
