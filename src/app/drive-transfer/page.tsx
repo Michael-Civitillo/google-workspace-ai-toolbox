@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -28,7 +28,11 @@ import {
   XCircle,
   StopCircle,
 } from "lucide-react";
-import { tfetch, useCurrentTenant } from "@/lib/tenant-client";
+import {
+  tenantStateGeneration,
+  tfetch,
+  useCurrentTenant,
+} from "@/lib/tenant-client";
 import {
   ConfirmActionDialog,
   type DiffRow,
@@ -77,10 +81,55 @@ interface ProgressTotals {
   done: boolean;
 }
 
+/** One line of the folder tree as drawn: a folder, or a note under one. */
+type TreeRow =
+  | { kind: "folder"; key: string; node: FolderNode; depth: number }
+  | { kind: "empty"; key: string; depth: number }
+  | { kind: "more"; key: string; node: FolderNode; depth: number };
+
 // Server hard-caps the initial folder selection (TRANSFER_FOLDER_SELECTION_CAP).
 // Mirror it client-side so a too-large selection is caught before the confirm
 // dialog instead of aborting the first chunk after it.
 const FOLDER_SELECTION_CAP = 100;
+
+/**
+ * Why a run may not start with this tenant id, or null when it may. Every
+ * request of a run is pinned to the id it started with, but a null pin sends
+ * no tenant at all, and the server then uses whichever tenant is active in
+ * its own settings. While the tenant list is still loading that is not
+ * necessarily the tenant the page is about to show. Once the list has loaded
+ * empty, null is right: the install runs on environment-variable credentials.
+ */
+async function tenantPinProblem(tenantId: string | null): Promise<string | null> {
+  if (tenantId) return null;
+  if (tenantStateGeneration() === 0) {
+    return "The tenant list is still loading — try again in a moment.";
+  }
+  try {
+    const r = await fetch("/api/tenants");
+    if (r.ok) {
+      const d = await r.json();
+      if (Array.isArray(d?.tenants) && d.tenants.length === 0) return null;
+    }
+  } catch {
+    // Fall through: unknown is not "no tenants".
+  }
+  return "No tenant is selected — pick one in the sidebar first.";
+}
+
+const newNode = (
+  f: { id: string; name: string },
+  parentId: string | null
+): FolderNode => ({
+  id: f.id,
+  name: f.name,
+  parentId,
+  childrenIds: [],
+  childrenLoaded: false,
+  loadingChildren: false,
+  nextPageToken: null,
+  expanded: false,
+});
 
 export default function DriveTransfer() {
   const { tenant, id: tenantId } = useCurrentTenant();
@@ -92,25 +141,40 @@ export default function DriveTransfer() {
   const [rootIds, setRootIds] = useState<string[] | null>(null);
   const [rootLoading, setRootLoading] = useState(false);
   const [rootNextToken, setRootNextToken] = useState<string | null>(null);
+  // The user (and tenant) the tree was loaded for. Editing the "Current
+  // owner" box no longer throws the tree away on every keystroke; instead a
+  // tree for someone else is marked stale and can't be transferred from.
+  const [treeUser, setTreeUser] = useState<string | null>(null);
 
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
 
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  // The tenant and users a run is pinned to, for its panel.
+  const [runInfo, setRunInfo] = useState<{
+    from: string;
+    to: string;
+    tenantName: string | null;
+  } | null>(null);
   const cancelRef = useRef(false);
-  // Bumped on every tree reset (new root load or a change of "from" user).
-  // Async folder loads capture the value at dispatch and discard their results
-  // if it changed meanwhile, so a slow load for the previous user can't
-  // repopulate the tree after the user switched.
+  // Bumped on every tree reset (new root load or a tenant switch). Async
+  // folder loads capture the value at dispatch and discard their results if
+  // it changed meanwhile, so a slow load for the previous tree can't
+  // repopulate the new one.
   const loadSeq = useRef(0);
   // Abort the in-flight transfer chunk on cancel or unmount: cancelRef only
   // stops the loop BETWEEN chunks, and one chunk (500 items, 6-way
   // concurrency) can run for tens of seconds — long after the operator has
   // clicked Cancel or navigated away.
   const transferAbortRef = useRef<AbortController | null>(null);
+  const alive = useRef(true);
   useEffect(() => {
+    alive.current = true;
     return () => {
+      alive.current = false;
       cancelRef.current = true;
       transferAbortRef.current?.abort();
     };
@@ -121,7 +185,16 @@ export default function DriveTransfer() {
     | null
   >(null);
 
-  function resetTree() {
+  // Live values for callbacks that must keep a stable identity (so the
+  // memoised rows below don't all re-render) and for staleness checks.
+  const tenantIdRef = useRef(tenantId);
+  tenantIdRef.current = tenantId;
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  const treeUserRef = useRef(treeUser);
+  treeUserRef.current = treeUser;
+
+  const resetTree = useCallback(() => {
     // Invalidate any in-flight folder loads so their results are discarded.
     loadSeq.current++;
     // Those superseded loads no longer touch the spinner either (see loadRoot),
@@ -130,28 +203,50 @@ export default function DriveTransfer() {
     setNodes({});
     setRootIds(null);
     setRootNextToken(null);
+    setTreeUser(null);
     setSelected(new Set());
-    setProgress(null);
-    setCompletion(null);
-  }
+  }, []);
+
+  // A tree loaded under tenant A must never be picked from under tenant B,
+  // and a load still in flight for A must not land under B. A running
+  // transfer keeps its panel: its chunks are pinned to its tenant, and the
+  // panel says which one.
+  useEffect(() => {
+    resetTree();
+    setConfirmOpen(false);
+    setDialogError(null);
+    if (!busyRef.current) {
+      setProgress(null);
+      setCompletion(null);
+      setRunInfo(null);
+      setError(null);
+    }
+  }, [tenantId, resetTree]);
 
   async function loadRoot() {
-    if (!fromUser.trim()) return;
+    const user = fromUser.trim();
+    if (!user) return;
     // resetTree() bumps the sequence (and clears any stale spinner); capture
-    // the new value and bail if it changes (a new load / user switch) before
+    // the new value and bail if it changes (a new load / tenant switch) before
     // our results come back.
     resetTree();
+    setProgress(null);
+    setCompletion(null);
+    setRunInfo(null);
     const seq = loadSeq.current;
+    const pinnedTenantId = tenantId;
+    const isCurrent = () =>
+      seq === loadSeq.current && tenantIdRef.current === pinnedTenantId;
     setError(null);
     setRootLoading(true);
     try {
       const res = await tfetch(
-        `/api/admin/drive-transfer/folders?user=${encodeURIComponent(fromUser)}`,
+        `/api/admin/drive-transfer/folders?user=${encodeURIComponent(user)}`,
         {},
-        tenantId
+        pinnedTenantId
       );
       const data = await res.json();
-      if (seq !== loadSeq.current) return;
+      if (!isCurrent()) return;
       if (!data.success) {
         setError(data.error || "Failed to load Drive folders");
         return;
@@ -160,24 +255,15 @@ export default function DriveTransfer() {
       const newNodes: Record<string, FolderNode> = {};
       const ids: string[] = [];
       for (const f of payload.folders) {
-        newNodes[f.id] = {
-          id: f.id,
-          name: f.name,
-          parentId: null,
-          childrenIds: [],
-          childrenLoaded: false,
-          loadingChildren: false,
-          nextPageToken: null,
-          expanded: false,
-        };
+        newNodes[f.id] = newNode(f, null);
         ids.push(f.id);
       }
-      if (seq !== loadSeq.current) return;
       setNodes(newNodes);
       setRootIds(ids);
       setRootNextToken(payload.nextPageToken);
+      setTreeUser(user);
     } catch {
-      if (seq !== loadSeq.current) return;
+      if (!isCurrent()) return;
       setError("Failed to connect to the API");
     } finally {
       // Only the latest load owns the spinner: a superseded load must not
@@ -187,21 +273,25 @@ export default function DriveTransfer() {
   }
 
   async function loadMoreRoot() {
-    if (!fromUser.trim() || !rootNextToken) return;
+    const user = treeUser;
+    if (!user || !rootNextToken) return;
     setError(null);
     setRootLoading(true);
     // Same staleness pin as loadRoot/loadChildren: if the tree was reset (new
-    // root load / user switch) while this page was in flight, discard it —
-    // otherwise the previous user's folders repopulate the emptied tree.
+    // root load / tenant switch) while this page was in flight, discard it —
+    // otherwise the previous tree's folders repopulate the emptied one.
     const seq = loadSeq.current;
+    const pinnedTenantId = tenantId;
+    const isCurrent = () =>
+      seq === loadSeq.current && tenantIdRef.current === pinnedTenantId;
     try {
       const res = await tfetch(
-        `/api/admin/drive-transfer/folders?user=${encodeURIComponent(fromUser)}&pageToken=${encodeURIComponent(rootNextToken)}`,
+        `/api/admin/drive-transfer/folders?user=${encodeURIComponent(user)}&pageToken=${encodeURIComponent(rootNextToken)}`,
         {},
-        tenantId
+        pinnedTenantId
       );
       const data = await res.json();
-      if (seq !== loadSeq.current) return;
+      if (!isCurrent()) return;
       if (!data.success) {
         setError(data.error || "Failed to load Drive folders");
         return;
@@ -210,17 +300,7 @@ export default function DriveTransfer() {
       setNodes((prev) => {
         const next = { ...prev };
         for (const f of payload.folders) {
-          if (next[f.id]) continue;
-          next[f.id] = {
-            id: f.id,
-            name: f.name,
-            parentId: null,
-            childrenIds: [],
-            childrenLoaded: false,
-            loadingChildren: false,
-            nextPageToken: null,
-            expanded: false,
-          };
+          if (!next[f.id]) next[f.id] = newNode(f, null);
         }
         return next;
       });
@@ -234,98 +314,101 @@ export default function DriveTransfer() {
       });
       setRootNextToken(payload.nextPageToken);
     } catch {
-      if (seq !== loadSeq.current) return;
+      if (!isCurrent()) return;
       setError("Failed to connect to the API");
     } finally {
       if (seq === loadSeq.current) setRootLoading(false);
     }
   }
 
-  async function loadChildren(folderId: string, pageToken?: string) {
-    // Pin the tree generation this load belongs to; if the tree is reset (new
-    // root load / user switch) before results arrive, discard them so we don't
-    // graft the old user's subfolders onto the new tree.
-    const seq = loadSeq.current;
-    setNodes((prev) => ({
-      ...prev,
-      [folderId]: { ...prev[folderId], loadingChildren: true },
-    }));
-    setError(null);
-    try {
-      const url =
-        `/api/admin/drive-transfer/folders?user=${encodeURIComponent(fromUser)}&parent=${encodeURIComponent(folderId)}` +
-        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
-      const res = await tfetch(url, {}, tenantId);
-      const data = await res.json();
-      if (seq !== loadSeq.current) return;
-      if (!data.success) {
-        setError(data.error || "Failed to load subfolders");
-        setNodes((prev) => ({
-          ...prev,
-          [folderId]: { ...prev[folderId], loadingChildren: false },
-        }));
-        return;
-      }
-      const payload = data.data as FolderListResponse;
-      setNodes((prev) => {
-        const next = { ...prev };
-        const parent = { ...next[folderId] };
-        const newChildIds: string[] = pageToken ? [...parent.childrenIds] : [];
-        const existing = new Set(newChildIds);
-        for (const f of payload.folders) {
-          if (!existing.has(f.id)) {
-            newChildIds.push(f.id);
-          }
-          if (!next[f.id]) {
-            next[f.id] = {
-              id: f.id,
-              name: f.name,
-              parentId: folderId,
-              childrenIds: [],
-              childrenLoaded: false,
-              loadingChildren: false,
-              nextPageToken: null,
-              expanded: false,
-            };
-          }
+  // Stable across renders (reads live values through refs), so a row only
+  // re-renders when its own props change.
+  const loadChildren = useCallback(
+    async (folderId: string, pageToken?: string) => {
+      // Pin the tree this load belongs to; if the tree is reset (new root
+      // load / tenant switch) before results arrive, discard them so we
+      // don't graft the old tree's subfolders onto the new one.
+      const seq = loadSeq.current;
+      const pinnedTenantId = tenantIdRef.current;
+      const user = treeUserRef.current;
+      if (!user) return;
+      const isCurrent = () =>
+        seq === loadSeq.current && tenantIdRef.current === pinnedTenantId;
+      setNodes((prev) =>
+        prev[folderId]
+          ? { ...prev, [folderId]: { ...prev[folderId], loadingChildren: true } }
+          : prev
+      );
+      setError(null);
+      const stopLoading = () =>
+        setNodes((prev) =>
+          prev[folderId]
+            ? { ...prev, [folderId]: { ...prev[folderId], loadingChildren: false } }
+            : prev
+        );
+      try {
+        const url =
+          `/api/admin/drive-transfer/folders?user=${encodeURIComponent(user)}&parent=${encodeURIComponent(folderId)}` +
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+        const res = await tfetch(url, {}, pinnedTenantId);
+        const data = await res.json();
+        if (!isCurrent()) return;
+        if (!data.success) {
+          setError(data.error || "Failed to load subfolders");
+          stopLoading();
+          return;
         }
-        parent.childrenIds = newChildIds;
-        parent.childrenLoaded = true;
-        parent.loadingChildren = false;
-        parent.nextPageToken = payload.nextPageToken;
-        next[folderId] = parent;
-        return next;
-      });
-    } catch {
-      if (seq !== loadSeq.current) return;
-      setError("Failed to connect to the API");
-      setNodes((prev) => ({
-        ...prev,
-        [folderId]: { ...prev[folderId], loadingChildren: false },
-      }));
-    }
-  }
-
-  async function toggleExpand(folderId: string) {
-    const node = nodes[folderId];
-    if (!node) return;
-    if (!node.expanded && !node.childrenLoaded) {
-      await loadChildren(folderId);
-    }
-    // The tree may have been reset while the children were loading (user
-    // switch mid-expand) — the guarded updater keeps this from dereferencing a
-    // node that no longer exists and crashing the render.
-    setNodes((prev) =>
-      prev[folderId]
-        ? {
-            ...prev,
-            [folderId]: { ...prev[folderId], expanded: !prev[folderId].expanded },
+        const payload = data.data as FolderListResponse;
+        setNodes((prev) => {
+          if (!prev[folderId]) return prev;
+          const next = { ...prev };
+          const parent = { ...next[folderId] };
+          const newChildIds: string[] = pageToken ? [...parent.childrenIds] : [];
+          const existing = new Set(newChildIds);
+          for (const f of payload.folders) {
+            if (!existing.has(f.id)) newChildIds.push(f.id);
+            if (!next[f.id]) next[f.id] = newNode(f, folderId);
           }
-        : prev
-    );
-  }
+          parent.childrenIds = newChildIds;
+          parent.childrenLoaded = true;
+          parent.loadingChildren = false;
+          parent.nextPageToken = payload.nextPageToken;
+          next[folderId] = parent;
+          return next;
+        });
+      } catch {
+        if (!isCurrent()) return;
+        setError("Failed to connect to the API");
+        stopLoading();
+      }
+    },
+    []
+  );
 
-  function toggleSelected(folderId: string) {
+  const toggleExpand = useCallback(
+    async (folderId: string) => {
+      const node = nodesRef.current[folderId];
+      if (!node) return;
+      if (!node.expanded && !node.childrenLoaded) {
+        await loadChildren(folderId);
+      }
+      // The tree may have been reset while the children were loading (tenant
+      // switch mid-expand) — the guarded updater keeps this from dereferencing
+      // a node that no longer exists and crashing the render.
+      setNodes((prev) =>
+        prev[folderId]
+          ? {
+              ...prev,
+              [folderId]: { ...prev[folderId], expanded: !prev[folderId].expanded },
+            }
+          : prev
+      );
+    },
+    [loadChildren]
+  );
+
+  const toggleSelected = useCallback((folderId: string) => {
+    const all = nodesRef.current;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(folderId)) {
@@ -337,19 +420,63 @@ export default function DriveTransfer() {
       // would walk their subtrees twice, and their checkboxes would be stuck
       // checked-but-disabled under the selected ancestor.
       for (const id of next) {
-        let cur = nodes[id]?.parentId ?? null;
+        let cur = all[id]?.parentId ?? null;
         while (cur) {
           if (cur === folderId) {
             next.delete(id);
             break;
           }
-          cur = nodes[cur]?.parentId ?? null;
+          cur = all[cur]?.parentId ?? null;
         }
       }
       next.add(folderId);
       return next;
     });
-  }
+  }, []);
+
+  // Everything under a selected folder, computed once per change instead of
+  // every row walking its ancestors on every render.
+  const covered = useMemo(() => {
+    const out = new Set<string>();
+    const stack: string[] = [];
+    for (const id of selected) stack.push(...(nodes[id]?.childrenIds ?? []));
+    while (stack.length > 0) {
+      const id = stack.pop() as string;
+      if (out.has(id)) continue;
+      out.add(id);
+      stack.push(...(nodes[id]?.childrenIds ?? []));
+    }
+    return out;
+  }, [nodes, selected]);
+
+  // The tree as the list of lines it draws. Keys are paths: Drive lets a
+  // folder sit in more than one parent, so an id alone may repeat.
+  const treeRows = useMemo(() => {
+    const rows: TreeRow[] = [];
+    const walk = (ids: string[], depth: number, path: string) => {
+      for (const id of ids) {
+        const node = nodes[id];
+        if (!node) continue;
+        const key = `${path}/${id}`;
+        rows.push({ kind: "folder", key, node, depth });
+        if (node.expanded && node.childrenLoaded) {
+          if (node.childrenIds.length === 0) {
+            rows.push({ kind: "empty", key: `${key}#empty`, depth: depth + 1 });
+          }
+          // A folder can't be its own ancestor; stop rather than loop forever
+          // if Drive ever reports a cycle.
+          if (!path.split("/").includes(id)) {
+            walk(node.childrenIds, depth + 1, key);
+          }
+          if (node.nextPageToken) {
+            rows.push({ kind: "more", key: `${key}#more`, node, depth: depth + 1 });
+          }
+        }
+      }
+    };
+    walk(rootIds ?? [], 0, "");
+    return rows;
+  }, [nodes, rootIds]);
 
   const selectedNames = useMemo(() => {
     return Array.from(selected)
@@ -357,23 +484,40 @@ export default function DriveTransfer() {
       .filter(Boolean) as string[];
   }, [selected, nodes]);
 
+  // The tree on screen is someone else's Drive than the one in the box.
+  const treeIsStale =
+    treeUser !== null && treeUser.toLowerCase() !== fromUser.trim().toLowerCase();
   const overSelectionCap = selected.size > FOLDER_SELECTION_CAP;
   const canConfirm =
-    !!fromUser.trim() &&
+    !!treeUser &&
+    !treeIsStale &&
     !!toUser.trim() &&
-    fromUser.trim().toLowerCase() !== toUser.trim().toLowerCase() &&
+    treeUser.toLowerCase() !== toUser.trim().toLowerCase() &&
     selected.size > 0 &&
     !overSelectionCap &&
     !busy;
 
   async function runTransfer() {
-    if (selected.size === 0) return;
+    if (selected.size === 0 || !treeUser || busyRef.current) return;
+    const pinnedTenantId = tenantId;
+    const problem = await tenantPinProblem(pinnedTenantId);
+    if (problem) {
+      setDialogError(problem);
+      return;
+    }
+    if (!alive.current) return;
+    if (tenantIdRef.current !== pinnedTenantId) {
+      setDialogError("The tenant changed — load the Drive again.");
+      return;
+    }
+    busyRef.current = true;
     setBusy(true);
     // Close the modal immediately: the transfer runs in chunks that can take
     // minutes, and while the dialog is up it covers the live progress card
     // and the Cancel button — the operator would be locked out of both for
     // the whole run.
     setConfirmOpen(false);
+    setDialogError(null);
     cancelRef.current = false;
     const ac = new AbortController();
     transferAbortRef.current = ac;
@@ -389,12 +533,16 @@ export default function DriveTransfer() {
     });
 
     // Snapshot the selection so a click after we kick off can't change what
-    // we're actually transferring mid-flight. Trim the addresses once here —
-    // a pasted trailing space would otherwise fail the server's strict email
-    // validation after the operator already confirmed the dialog.
+    // we're actually transferring mid-flight. The source is the user the tree
+    // was loaded for, which Review only allows when it matches the box.
+    // Trim the target once here — a pasted trailing space would otherwise
+    // fail the server's strict email validation after the operator already
+    // confirmed the dialog.
     const initialFolderIds = Array.from(selected);
-    const from = fromUser.trim();
+    const from = treeUser;
     const to = toUser.trim();
+    const pinnedTenantName = tenant?.name ?? null;
+    setRunInfo({ from, to, tenantName: pinnedTenantName });
 
     let cursor: TransferCursor | null = null;
     let chunkIndex = 0;
@@ -429,7 +577,7 @@ export default function DriveTransfer() {
               body: JSON.stringify(body),
               signal: ac.signal,
             },
-            tenantId
+            pinnedTenantId
           );
         } catch {
           // An abort is the operator cancelling (or leaving the page), not a
@@ -451,6 +599,7 @@ export default function DriveTransfer() {
         }
         const p = data.data as TransferProgress;
         totalErrors = totalErrors.concat(p.errors);
+        if (!alive.current) break;
         setProgress((prev) => ({
           transferred: (prev?.transferred ?? 0) + p.transferred,
           alreadyOwned: (prev?.alreadyOwned ?? 0) + p.alreadyOwned,
@@ -469,14 +618,16 @@ export default function DriveTransfer() {
         cursor = p.nextCursor;
       }
     } finally {
-      setBusy(false);
-      setConfirmOpen(false);
+      busyRef.current = false;
+      if (alive.current) setBusy(false);
     }
+    if (!alive.current) return;
 
+    const where = pinnedTenantName ? ` (in ${pinnedTenantName})` : "";
     if (aborted) {
       setCompletion({
         tone: "error",
-        message: `Transfer halted: ${aborted}. Some items may already have been transferred — re-select and re-run to continue.`,
+        message: `Transfer halted${where}: ${aborted}. Some items may already have been transferred — re-select and re-run to continue.`,
       });
       return;
     }
@@ -485,19 +636,19 @@ export default function DriveTransfer() {
     setCompletion({
       tone: hadErrors ? "error" : "success",
       message: hadErrors
-        ? `Done with ${totalErrors.length} per-item error${totalErrors.length === 1 ? "" : "s"}. See the list below for details.`
-        : "Ownership transfer complete across the selected folders.",
+        ? `Done${where} with ${totalErrors.length} per-item error${totalErrors.length === 1 ? "" : "s"}. See the list below for details.`
+        : `Ownership transfer complete across the selected folders${where}.`,
     });
   }
 
   const changes: DiffRow[] = [
     {
       label: "Source user",
-      after: fromUser,
+      after: treeUser ?? "",
     },
     {
       label: "Target user (new owner)",
-      after: toUser,
+      after: toUser.trim(),
       emphasis: true,
     },
     {
@@ -563,10 +714,7 @@ export default function DriveTransfer() {
                   id="fromUser"
                   placeholder="departing@yourdomain.com"
                   value={fromUser}
-                  onChange={(e) => {
-                    setFromUser(e.target.value);
-                    resetTree();
-                  }}
+                  onChange={(e) => setFromUser(e.target.value)}
                   disabled={busy}
                 />
               </div>
@@ -595,7 +743,7 @@ export default function DriveTransfer() {
                 ) : (
                   <RefreshCw className="h-4 w-4 mr-1.5" />
                 )}
-                {rootIds === null ? "Load Drive" : "Reload Drive"}
+                {rootIds === null || treeIsStale ? "Load Drive" : "Reload Drive"}
               </Button>
               {selected.size > 0 && (
                 <Badge variant="outline" className="text-xs">
@@ -615,14 +763,23 @@ export default function DriveTransfer() {
               <CardDescription>
                 Click <ChevronRight className="inline h-3 w-3" /> to expand a
                 folder. Check a folder to include it AND everything inside it.
-                Only folders owned by {fromUser || "the source user"} are shown.
+                Only folders owned by {treeUser ?? "the source user"} are shown.
               </CardDescription>
             </CardHeader>
             <CardContent>
+              {treeIsStale && (
+                <Alert variant="warning" className="mb-4">
+                  <AlertTriangle className="h-4 w-4 text-warning" />
+                  <AlertDescription>
+                    This is {treeUser}&apos;s Drive. Load the Drive again to
+                    pick folders from {fromUser.trim() || "the new owner"}.
+                  </AlertDescription>
+                </Alert>
+              )}
               {rootIds.length === 0 ? (
                 <div className="text-center py-8 text-sm text-muted-foreground">
                   No owned folders found at the root of My Drive for{" "}
-                  {fromUser}.
+                  {treeUser}.
                 </div>
               ) : (
                 <div className="rounded-md border bg-muted/20">
@@ -631,19 +788,50 @@ export default function DriveTransfer() {
                     My Drive
                   </div>
                   <div className="p-2">
-                    {rootIds.map((id) => (
-                      <FolderRow
-                        key={id}
-                        nodeId={id}
-                        nodes={nodes}
-                        selected={selected}
-                        depth={0}
-                        onToggleExpand={toggleExpand}
-                        onToggleSelected={toggleSelected}
-                        onLoadMoreChildren={loadChildren}
-                        disabled={busy}
-                      />
-                    ))}
+                    {treeRows.map((row) =>
+                      row.kind === "folder" ? (
+                        <FolderRow
+                          key={row.key}
+                          node={row.node}
+                          depth={row.depth}
+                          isSelected={selected.has(row.node.id)}
+                          covered={covered.has(row.node.id)}
+                          onToggleExpand={toggleExpand}
+                          onToggleSelected={toggleSelected}
+                          disabled={busy || treeIsStale}
+                        />
+                      ) : row.kind === "empty" ? (
+                        <div
+                          key={row.key}
+                          className="text-xs text-muted-foreground py-1"
+                          style={{ paddingLeft: `${row.depth * 14 + 24}px` }}
+                        >
+                          (no owned subfolders)
+                        </div>
+                      ) : (
+                        <div
+                          key={row.key}
+                          style={{ paddingLeft: `${row.depth * 14 + 24}px` }}
+                        >
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={busy || treeIsStale || row.node.loadingChildren}
+                            onClick={() =>
+                              void loadChildren(
+                                row.node.id,
+                                row.node.nextPageToken ?? undefined
+                              )
+                            }
+                          >
+                            {row.node.loadingChildren ? (
+                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            ) : null}
+                            Load more
+                          </Button>
+                        </div>
+                      )
+                    )}
                   </div>
                   {rootNextToken && (
                     <div className="border-t p-2">
@@ -651,7 +839,7 @@ export default function DriveTransfer() {
                         size="sm"
                         variant="outline"
                         onClick={() => void loadMoreRoot()}
-                        disabled={rootLoading || busy}
+                        disabled={rootLoading || busy || treeIsStale}
                       >
                         {rootLoading ? (
                           <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
@@ -691,6 +879,7 @@ export default function DriveTransfer() {
                   onClick={() => {
                     setError(null);
                     setCompletion(null);
+                    setDialogError(null);
                     setConfirmOpen(true);
                   }}
                   disabled={!canConfirm}
@@ -741,9 +930,18 @@ export default function DriveTransfer() {
                 )}
               </CardTitle>
               <CardDescription>
+                {runInfo && (
+                  <>
+                    {runInfo.from} → {runInfo.to}
+                    {runInfo.tenantName ? ` in ${runInfo.tenantName}` : ""} ·{" "}
+                  </>
+                )}
                 {progress.chunks} chunk{progress.chunks === 1 ? "" : "s"}{" "}
                 processed
                 {progress.done ? " · done" : busy ? " · running…" : " · paused"}
+                {runInfo?.tenantName && tenant && tenant.name !== runInfo.tenantName
+                  ? ` · you have since switched to ${tenant.name}; this transfer ${busy ? "carries on against" : "ran against"} ${runInfo.tenantName}`
+                  : ""}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -785,9 +983,13 @@ export default function DriveTransfer() {
 
       <ConfirmActionDialog
         open={confirmOpen}
-        onOpenChange={(o) => !busy && setConfirmOpen(o)}
+        onOpenChange={(o) => {
+          if (busy) return;
+          if (!o) setDialogError(null);
+          setConfirmOpen(o);
+        }}
         title="Transfer Drive folder ownership"
-        summary={`Transfer ${selected.size} folder${selected.size === 1 ? "" : "s"} (and everything inside) from ${fromUser} to ${toUser}.`}
+        summary={`Transfer ${selected.size} folder${selected.size === 1 ? "" : "s"} (and everything inside) from ${treeUser ?? ""} to ${toUser.trim()}.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="high"
         confirmPhrase={toUser.trim()}
@@ -803,6 +1005,7 @@ export default function DriveTransfer() {
             for ownership transfers).
           </span>
         }
+        error={dialogError}
         onConfirm={runTransfer}
       />
     </>
@@ -832,122 +1035,65 @@ function StatTile({
   );
 }
 
-function FolderRow({
-  nodeId,
-  nodes,
-  selected,
+/**
+ * One folder line. Memoised on its own props — the node object (replaced
+ * only when that folder changes), whether it is selected or covered by a
+ * selected parent, and stable callbacks — so ticking one box re-renders the
+ * lines whose state changed, not the whole tree.
+ */
+const FolderRow = memo(function FolderRow({
+  node,
   depth,
+  isSelected,
+  covered,
   onToggleExpand,
   onToggleSelected,
-  onLoadMoreChildren,
   disabled,
 }: {
-  nodeId: string;
-  nodes: Record<string, FolderNode>;
-  selected: Set<string>;
+  node: FolderNode;
   depth: number;
+  isSelected: boolean;
+  /** An ancestor is selected: this folder is already included. */
+  covered: boolean;
   onToggleExpand: (id: string) => void;
   onToggleSelected: (id: string) => void;
-  onLoadMoreChildren: (id: string, pageToken?: string) => void;
   disabled: boolean;
 }) {
-  const node = nodes[nodeId];
-  if (!node) return null;
-  const isSelected = selected.has(nodeId);
-  // Visual cue when an ancestor is already selected — the user doesn't
-  // need to (and shouldn't) double-select a child that's already covered.
-  const ancestorSelected = (() => {
-    let cur = node.parentId;
-    while (cur) {
-      if (selected.has(cur)) return true;
-      const parent = nodes[cur];
-      if (!parent) break;
-      cur = parent.parentId;
-    }
-    return false;
-  })();
   return (
-    <div>
-      <div
-        className="flex items-center gap-1 py-1 rounded hover:bg-muted/40"
-        style={{ paddingLeft: `${depth * 14}px` }}
+    <div
+      className="flex items-center gap-1 py-1 rounded hover:bg-muted/40"
+      style={{ paddingLeft: `${depth * 14}px` }}
+    >
+      <button
+        type="button"
+        onClick={() => onToggleExpand(node.id)}
+        className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-muted disabled:opacity-30"
+        aria-label={node.expanded ? "Collapse" : "Expand"}
+        disabled={disabled}
       >
-        <button
-          type="button"
-          onClick={() => onToggleExpand(nodeId)}
-          className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-muted disabled:opacity-30"
-          aria-label={node.expanded ? "Collapse" : "Expand"}
-          disabled={disabled}
-        >
-          {node.loadingChildren ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : node.expanded ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
-          )}
-        </button>
-        <input
-          type="checkbox"
-          checked={isSelected}
-          onChange={() => onToggleSelected(nodeId)}
-          disabled={disabled || ancestorSelected}
-          aria-label={`Select ${node.name}`}
-          className="shrink-0"
-        />
-        <Folder className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-        <span
-          className={`text-sm truncate ${
-            ancestorSelected ? "text-muted-foreground italic" : ""
-          }`}
-          title={ancestorSelected ? "Already covered by a selected parent" : node.name}
-        >
-          {node.name}
-        </span>
-      </div>
-      {node.expanded && node.childrenLoaded && (
-        <div>
-          {node.childrenIds.length === 0 && (
-            <div
-              className="text-xs text-muted-foreground py-1"
-              style={{ paddingLeft: `${(depth + 1) * 14 + 24}px` }}
-            >
-              (no owned subfolders)
-            </div>
-          )}
-          {node.childrenIds.map((childId) => (
-            <FolderRow
-              key={childId}
-              nodeId={childId}
-              nodes={nodes}
-              selected={selected}
-              depth={depth + 1}
-              onToggleExpand={onToggleExpand}
-              onToggleSelected={onToggleSelected}
-              onLoadMoreChildren={onLoadMoreChildren}
-              disabled={disabled}
-            />
-          ))}
-          {node.nextPageToken && (
-            <div style={{ paddingLeft: `${(depth + 1) * 14 + 24}px` }}>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={disabled || node.loadingChildren}
-                onClick={() =>
-                  onLoadMoreChildren(nodeId, node.nextPageToken ?? undefined)
-                }
-              >
-                {node.loadingChildren ? (
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                ) : null}
-                Load more
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
+        {node.loadingChildren ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : node.expanded ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+      </button>
+      <input
+        type="checkbox"
+        checked={isSelected}
+        onChange={() => onToggleSelected(node.id)}
+        disabled={disabled || covered}
+        aria-label={`Select ${node.name}`}
+        className="shrink-0"
+      />
+      <Folder className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+      <span
+        className={`text-sm truncate ${covered ? "text-muted-foreground italic" : ""}`}
+        title={covered ? "Already covered by a selected parent" : node.name}
+      >
+        {node.name}
+      </span>
     </div>
   );
-}
-
+});
