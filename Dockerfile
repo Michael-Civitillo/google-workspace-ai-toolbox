@@ -51,12 +51,12 @@ RUN mkdir -p /data && chown node:node /data
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
-COPY deploy/docker/healthcheck.cjs /usr/local/lib/open-admin/healthcheck.cjs
+COPY deploy/docker/healthcheck.mjs /usr/local/lib/open-admin/healthcheck.mjs
 USER node
 VOLUME ["/data"]
 EXPOSE 3000
 # Healthy means: answering on $PORT, APP_PASSWORD set (without it every API
-# call is refused), and /data writable by this user. See healthcheck.cjs.
+# call is refused), and /data writable by this user. See healthcheck.mjs.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["node", "/usr/local/lib/open-admin/healthcheck.cjs"]
+  CMD ["node", "/usr/local/lib/open-admin/healthcheck.mjs"]
 CMD ["node", "server.js"]

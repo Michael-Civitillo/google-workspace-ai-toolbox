@@ -240,7 +240,7 @@ jobs:
           echo "code writable by the server: $code_writable (expect no)"
           [ "$code_writable" = no ]
           docker exec oa test -w /data
-          docker exec oa node /usr/local/lib/open-admin/healthcheck.cjs
+          docker exec oa node /usr/local/lib/open-admin/healthcheck.mjs
       - name: Check the health check follows PORT and reports a misconfigured container
         run: |
           set -euo pipefail
@@ -250,9 +250,9 @@ jobs:
             curl -sf -o /dev/null http://localhost:3002/login && curl -s -o /dev/null http://localhost:3001/login && break
             sleep 1
           done
-          docker exec oa-port node /usr/local/lib/open-admin/healthcheck.cjs
+          docker exec oa-port node /usr/local/lib/open-admin/healthcheck.mjs
           # No APP_PASSWORD: the app refuses to serve, so it must not count as healthy.
-          if docker exec oa-bad node /usr/local/lib/open-admin/healthcheck.cjs; then
+          if docker exec oa-bad node /usr/local/lib/open-admin/healthcheck.mjs; then
             echo "::error::the health check passed for a container without APP_PASSWORD"
             exit 1
           fi

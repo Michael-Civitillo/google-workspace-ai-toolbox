@@ -6,10 +6,9 @@
 // is writable by the user the server runs as - a volume mounted from the host
 // with the wrong owner is the usual way that breaks). It needs no session: an
 // API call without one answers 401 once the request gate is up and configured.
-"use strict";
 
-const fs = require("node:fs");
-const http = require("node:http");
+import fs from "node:fs";
+import http from "node:http";
 
 function unhealthy(reason) {
   console.error(`open-admin: unhealthy: ${reason}`);
