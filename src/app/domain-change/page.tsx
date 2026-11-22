@@ -68,8 +68,13 @@ export default function DomainChange() {
   const [newUsername, setNewUsername] = useState("");
   const [lookingUp, setLookingUp] = useState(false);
   const [loadingDomains, setLoadingDomains] = useState(true);
+  // Why this tenant's domains couldn't be listed, when they couldn't.
+  const [domainsError, setDomainsError] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // A failed change, shown inside the dialog where the operator is looking
+  // rather than on the page behind its overlay.
+  const [changeError, setChangeError] = useState<string | null>(null);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -79,10 +84,23 @@ export default function DomainChange() {
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
   const lookupSeqRef = useRef(0);
+  // Bumped by every change request and by a tenant switch: only the latest
+  // request for the current tenant may write its outcome to the page.
+  const changeSeqRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     setLoadingDomains(true);
+    // The previous tenant's domains must not be offered under this one —
+    // least of all when this tenant's list fails to load.
+    setDomains([]);
+    setDomainsError(null);
+    // A change confirmed (or about to be) under the previous tenant does not
+    // belong to this page any more.
+    changeSeqRef.current++;
+    setChanging(false);
+    setConfirmOpen(false);
+    setChangeError(null);
     // The looked-up user and picked domain are tenant-scoped: keeping them
     // across a sidebar tenant switch pairs the new tenant's confirm dialog
     // with the old tenant's user (and possibly a domain the new tenant
@@ -97,11 +115,15 @@ export default function DomainChange() {
       .then((res) => res.json())
       .then((result) => {
         if (cancelled) return;
-        if (result.success && result.data) {
+        if (result.success && Array.isArray(result.data)) {
           setDomains(result.data);
+        } else {
+          setDomainsError(result.error || "Failed to list domains");
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setDomainsError("Failed to connect to the API");
+      })
       .finally(() => {
         if (!cancelled) setLoadingDomains(false);
       });
@@ -153,13 +175,19 @@ export default function DomainChange() {
 
   const changeDomain = async () => {
     if (!user || !selectedDomain) return;
+    const seq = ++changeSeqRef.current;
+    // Pin tenantId to whatever was active when the dialog was confirmed.
+    // If the user (or another tab) switches tenants between confirm and
+    // request-completion, we still target the tenant they saw in the dialog
+    // — and the answer is not written into the other tenant's page.
+    const pinnedTenantId = tenantId;
+    const isCurrent = () =>
+      changeSeqRef.current === seq && tenantIdRef.current === pinnedTenantId;
     setChanging(true);
     setMessage(null);
+    setChangeError(null);
 
     try {
-      // Pin tenantId to whatever was active when the dialog was confirmed.
-      // If the user (or another tab) switches tenants between confirm and
-      // request-completion, we still target the tenant they saw in the dialog.
       const res = await tfetch(
         "/api/admin/change-domain",
         {
@@ -173,9 +201,10 @@ export default function DomainChange() {
             confirm: user.primaryEmail,
           }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      if (!isCurrent()) return;
 
       if (result.success) {
         const verified = result.data?.verifiedNewPrimary;
@@ -190,15 +219,13 @@ export default function DomainChange() {
         setEmail(verified || result.data?.newEmail || user.primaryEmail);
         setConfirmOpen(false);
       } else {
-        setMessage({
-          type: "error",
-          text: result.error || "Failed to change domain",
-        });
+        setChangeError(result.error || "Failed to change domain");
       }
     } catch {
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      if (!isCurrent()) return;
+      setChangeError("Failed to connect to the API");
     } finally {
-      setChanging(false);
+      if (isCurrent()) setChanging(false);
     }
   };
 
@@ -329,6 +356,11 @@ export default function DomainChange() {
                         <Loader2 className="h-4 w-4 animate-spin" />
                         Loading domains...
                       </div>
+                    ) : domainsError ? (
+                      <p className="text-sm text-danger-fg">
+                        Couldn&apos;t load this tenant&apos;s domains:{" "}
+                        {domainsError}
+                      </p>
                     ) : availableDomains.length === 0 ? (
                       <p className="text-sm text-muted-foreground">
                         No other verified domains found in your tenant.
@@ -400,6 +432,7 @@ export default function DomainChange() {
                     size="lg"
                     onClick={() => {
                       setMessage(null);
+                      setChangeError(null);
                       setConfirmOpen(true);
                     }}
                     disabled={!selectedDomain}
@@ -419,13 +452,19 @@ export default function DomainChange() {
             <CardDescription>
               {loadingDomains
                 ? "Loading..."
-                : `${domains.length} domain${domains.length !== 1 ? "s" : ""} in your tenant`}
+                : domainsError
+                  ? "Couldn't load the domains"
+                  : `${domains.length} domain${domains.length !== 1 ? "s" : ""} in your tenant`}
             </CardDescription>
           </CardHeader>
           <CardContent>
             {loadingDomains ? (
               <div className="flex justify-center py-8">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : domainsError ? (
+              <div className="text-center py-8 text-danger-fg text-sm">
+                {domainsError}
               </div>
             ) : domains.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground text-sm">
@@ -484,13 +523,17 @@ export default function DomainChange() {
       {user && selectedDomain && (
         <ConfirmActionDialog
           open={confirmOpen}
-          onOpenChange={(o) => !changing && setConfirmOpen(o)}
+          onOpenChange={(o) => {
+            if (changing) return;
+            if (!o) setChangeError(null);
+            setConfirmOpen(o);
+          }}
           title="Change primary email"
           summary="This will swap the user's primary email to the new domain. The old address becomes an alias."
           tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
           severity="high"
           confirmPhrase={user.primaryEmail}
-          confirmLabel="Change primary email"
+          confirmLabel={changeError ? "Try again" : "Change primary email"}
           busy={changing}
           changes={[
             {
@@ -516,6 +559,7 @@ export default function DomainChange() {
               impersonating.
             </>
           }
+          error={changeError}
           onConfirm={changeDomain}
         />
       )}
