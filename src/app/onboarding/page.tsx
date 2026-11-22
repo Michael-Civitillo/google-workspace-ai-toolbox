@@ -118,15 +118,20 @@ export default function OnboardingPage() {
   const [statusLoading, setStatusLoading] = useState(true);
   const [tenantForm, setTenantForm] = useState<TenantForm>(defaultTenantForm());
   const [createdTenantId, setCreatedTenantId] = useState<string | null>(null);
+  const [createdTenantName, setCreatedTenantName] = useState<string | null>(null);
+  // A Gemini key went in with the tenant; the field itself is blanked once
+  // saved, so this is what says so.
+  const [geminiSaved, setGeminiSaved] = useState(false);
   const [savingTenant, setSavingTenant] = useState(false);
   const [tenantError, setTenantError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<
-    | { ok: true; version: string }
-    | { ok: false; message: string }
-    | null
-  >(null);
   const [tenantCount, setTenantCount] = useState<number>(0);
+  // The server's active tenant, for an operator re-visiting the wizard with
+  // tenants already configured: the Verify step checks that one.
+  const [activeTenant, setActiveTenant] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [scopePreflight, setScopePreflight] = useState<PreflightState | null>(
     null
   );
@@ -147,11 +152,29 @@ export default function OnboardingPage() {
           .catch(() => ({ installed: false, authenticated: false } as GwsStatus)),
         fetch("/api/tenants")
           .then((r) => r.json())
-          .then((d) => (Array.isArray(d?.tenants) ? d.tenants.length : 0))
-          .catch(() => 0),
+          .then((d) => {
+            const tenants: Array<{ id?: unknown; name?: unknown }> = Array.isArray(
+              d?.tenants
+            )
+              ? d.tenants
+              : [];
+            const active = tenants.find((x) => x.id === d?.activeTenantId);
+            return {
+              count: tenants.length,
+              active:
+                active && typeof active.id === "string"
+                  ? {
+                      id: active.id,
+                      name: typeof active.name === "string" ? active.name : active.id,
+                    }
+                  : null,
+            };
+          })
+          .catch(() => ({ count: 0, active: null })),
       ]);
       setStatus(s);
-      setTenantCount(t);
+      setTenantCount(t.count);
+      setActiveTenant(t.active);
     } finally {
       setStatusLoading(false);
     }
@@ -210,6 +233,16 @@ export default function OnboardingPage() {
     if (!isFirst) go(STEPS[stepIndex - 1].id);
   }
 
+  // A tenant exists, made here or before: the steps after "tenant" need one.
+  const hasTenant = !!createdTenantId || tenantCount > 0;
+  // The tenant the Verify step checks: the one just added, else the active one.
+  const verifyTenant = createdTenantId
+    ? { id: createdTenantId, name: createdTenantName ?? tenantForm.name }
+    : activeTenant;
+  const connectionOk =
+    scopePreflight?.kind === "ok" &&
+    scopePreflight.data.results.every((r) => r.authorized);
+
   // Step-level "can the user move on?" gate.
   const canContinue = useMemo(() => {
     // A tenant added in this session OR one that already exists both satisfy
@@ -255,6 +288,16 @@ export default function OnboardingPage() {
           () => null
         );
         setCreatedTenantId(newId);
+        setCreatedTenantName(
+          typeof data?.tenant?.name === "string"
+            ? data.tenant.name
+            : tenantForm.name.trim()
+        );
+        // The key is saved with the tenant: don't keep it in page state.
+        setGeminiSaved(!!tenantForm.geminiApiKey.trim());
+        setTenantForm((f) => ({ ...f, geminiApiKey: "" }));
+        // A check of another tenant says nothing about this one.
+        setScopePreflight(null);
         // Tell the persistent sidebar switcher to refetch so it shows the new
         // tenant instead of the "Add a tenant" placeholder until a full reload.
         notifyTenantsChanged();
@@ -267,45 +310,18 @@ export default function OnboardingPage() {
     }
   }
 
-  async function handleVerify() {
-    setVerifying(true);
-    setVerifyResult(null);
-    try {
-      // An explicit connection check must not answer from the status cache.
-      const r = await fetch("/api/gws/status?fresh=1");
-      const data = (await r.json()) as GwsStatus;
-      setStatus(data);
-      if (data.installed) {
-        setVerifyResult({ ok: true, version: data.version ?? "unknown" });
-      } else {
-        setVerifyResult({
-          ok: false,
-          message:
-            data.error ??
-            "gws CLI didn't respond. Make sure it's installed and on your PATH.",
-        });
-      }
-    } catch (e) {
-      setVerifyResult({
-        ok: false,
-        message: e instanceof Error ? e.message : "Connection check failed",
-      });
-    } finally {
-      setVerifying(false);
-    }
-  }
-
   // `fresh` skips the server's short per-tenant cache: a re-check means the
   // operator just fixed something in Admin Console and needs the real answer.
   async function handleScopeCheck(fresh = false) {
-    if (!createdTenantId) return;
+    const target = verifyTenant;
+    if (!target) return;
     setScopePreflight({ kind: "loading" });
     try {
       const res = await fetch(
         `/api/admin/preflight-scopes?tenantId=${encodeURIComponent(
-          createdTenantId
+          target.id
         )}${fresh ? "&fresh=1" : ""}`,
-        { headers: { "x-tenant-id": createdTenantId } }
+        { headers: { "x-tenant-id": target.id } }
       );
       const json = await res.json();
       if (!res.ok || !json.success) {
@@ -327,6 +343,30 @@ export default function OnboardingPage() {
     }
   }
 
+  /**
+   * "Can Open Admin talk to the tenant?" is answered by asking Google for a
+   * token for every scope the tenant's service account is meant to have —
+   * the same check as the Tenants page. Whether the gws CLI answers is a
+   * separate, optional fact, refreshed alongside.
+   */
+  async function handleConnectionCheck() {
+    if (!verifyTenant) return;
+    setVerifying(true);
+    try {
+      await Promise.all([
+        handleScopeCheck(true),
+        status?.packaged
+          ? Promise.resolve()
+          : fetch("/api/gws/status?fresh=1")
+              .then((r) => r.json())
+              .then((d: GwsStatus) => setStatus(d))
+              .catch(() => {}),
+      ]);
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -343,11 +383,21 @@ export default function OnboardingPage() {
           completed={{
             welcome: true,
             install: !!status?.installed,
-            "service-account": !!createdTenantId || tenantCount > 0,
-            tenant: !!createdTenantId || tenantCount > 0,
+            "service-account": hasTenant,
+            tenant: hasTenant,
             sso: !!ssoConfig?.enabled,
-            verify: !!verifyResult && verifyResult.ok,
+            verify: connectionOk,
           }}
+          // Like Continue, the stepper doesn't go past "tenant" without one:
+          // there is nothing to sign in to or verify yet.
+          locked={
+            hasTenant
+              ? {}
+              : {
+                  sso: "Add a tenant first",
+                  verify: "Add a tenant first",
+                }
+          }
         />
 
         {activeStep === "welcome" && (
@@ -376,6 +426,7 @@ export default function OnboardingPage() {
             saving={savingTenant}
             error={tenantError}
             createdTenantId={createdTenantId}
+            geminiSaved={geminiSaved}
           />
         )}
 
@@ -387,15 +438,14 @@ export default function OnboardingPage() {
           <VerifyStep
             status={status}
             loading={statusLoading}
-            verifying={verifying}
-            result={verifyResult}
-            onVerify={handleVerify}
+            tenant={verifyTenant}
+            checking={verifying}
+            onCheck={handleConnectionCheck}
+            onAddTenant={() => go("tenant")}
             onFinish={finishOnboarding}
             finishing={finishing}
-            tenantName={tenantForm.name || "your tenant"}
-            tenantId={createdTenantId}
             scopePreflight={scopePreflight}
-            onScopeCheck={handleScopeCheck}
+            onScopeRetry={() => void handleScopeCheck(true)}
           />
         )}
 
@@ -444,11 +494,14 @@ function Stepper({
   activeStep,
   onSelect,
   completed,
+  locked,
 }: {
   steps: StepDef[];
   activeStep: StepId;
   onSelect: (id: StepId) => void;
   completed: Record<StepId, boolean>;
+  /** Steps that can't be opened yet, with the reason. */
+  locked: Partial<Record<StepId, string>>;
 }) {
   const activeIdx = steps.findIndex((s) => s.id === activeStep);
   return (
@@ -466,8 +519,10 @@ function Stepper({
               <button
                 type="button"
                 onClick={() => onSelect(step.id)}
+                disabled={!!locked[step.id] && !isActive}
+                title={locked[step.id]}
                 className={cn(
-                  "flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors min-w-0 flex-1",
+                  "flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors min-w-0 flex-1 disabled:opacity-50 disabled:pointer-events-none",
                   isActive
                     ? "bg-primary/10 text-foreground"
                     : "hover:bg-muted text-muted-foreground"
@@ -1070,6 +1125,7 @@ function TenantStep({
   saving,
   error,
   createdTenantId,
+  geminiSaved,
 }: {
   form: TenantForm;
   onChange: (f: TenantForm) => void;
@@ -1077,6 +1133,7 @@ function TenantStep({
   saving: boolean;
   error: string | null;
   createdTenantId: string | null;
+  geminiSaved: boolean;
 }) {
   const isCreated = !!createdTenantId;
   return (
@@ -1205,11 +1262,22 @@ function TenantStep({
           </Label>
           <Input
             id="ob-gemini"
+            // A secret: masked on screen, kept out of the browser's form
+            // history, and blanked from the page once saved.
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
             value={form.geminiApiKey}
             onChange={(e) =>
               onChange({ ...form, geminiApiKey: e.target.value })
             }
-            placeholder="AIza... — only needed for AI Command and User Audit"
+            placeholder={
+              isCreated
+                ? geminiSaved
+                  ? "Saved with the tenant"
+                  : "None saved"
+                : "AIza... — only needed for AI Command and User Audit"
+            }
             disabled={isCreated}
           />
           <p className="text-xs text-muted-foreground">
@@ -1258,32 +1326,40 @@ function TenantStep({
 function VerifyStep({
   status,
   loading,
-  verifying,
-  result,
-  onVerify,
+  tenant,
+  checking,
+  onCheck,
+  onAddTenant,
   onFinish,
   finishing,
-  tenantName,
-  tenantId,
   scopePreflight,
-  onScopeCheck,
+  onScopeRetry,
 }: {
   status: GwsStatus | null;
   loading: boolean;
-  verifying: boolean;
-  result:
-    | { ok: true; version: string }
-    | { ok: false; message: string }
-    | null;
-  onVerify: () => void;
+  /** The tenant to check: the one added in this wizard, else the active one. */
+  tenant: { id: string; name: string } | null;
+  checking: boolean;
+  onCheck: () => void;
+  onAddTenant: () => void;
   onFinish: () => void;
   finishing: boolean;
-  tenantName: string;
-  tenantId: string | null;
   scopePreflight: PreflightState | null;
-  onScopeCheck: (fresh?: boolean) => void;
+  onScopeRetry: () => void;
 }) {
   const packaged = !!status?.packaged;
+  const missing =
+    scopePreflight?.kind === "ok"
+      ? scopePreflight.data.results.filter((r) => !r.authorized).length
+      : 0;
+  const connection =
+    scopePreflight?.kind === "ok"
+      ? missing === 0
+        ? { ok: true, detail: "All scopes authorized" }
+        : { ok: false, detail: `${missing} scope${missing === 1 ? "" : "s"} missing` }
+      : scopePreflight?.kind === "error"
+        ? { ok: false, detail: "Check failed" }
+        : null;
   return (
     <Card>
       <CardHeader>
@@ -1292,21 +1368,34 @@ function VerifyStep({
           Verify and finish
         </CardTitle>
         <CardDescription>
-          {packaged ? (
+          {tenant ? (
             <>
               One last sanity check that Open Admin can talk to{" "}
-              <strong>{tenantName}</strong> with the service account you
+              <strong>{tenant.name}</strong> with the service account you
               configured.
             </>
           ) : (
-            <>
-              One last sanity check that Open Admin can talk to{" "}
-              <strong>{tenantName}</strong> via the gws CLI.
-            </>
+            <>There is no tenant to check yet.</>
           )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
+        {!tenant && !loading && (
+          <Alert variant="warning">
+            <AlertCircle className="h-4 w-4 text-warning" />
+            <AlertDescription>
+              Add a tenant first — Open Admin has nothing to connect to yet.{" "}
+              <button
+                type="button"
+                className="underline font-medium"
+                onClick={onAddTenant}
+              >
+                Go to the tenant step
+              </button>
+            </AlertDescription>
+          </Alert>
+        )}
+
         <div className="rounded-lg border p-4 space-y-3">
           <StatusRow
             label={packaged ? "gws CLI (optional)" : "gws CLI installed"}
@@ -1323,67 +1412,58 @@ function VerifyStep({
           />
           <StatusRow
             label="Tenant configured"
-            ok
-            loading={false}
-            detail={tenantName}
+            ok={!!tenant}
+            loading={loading}
+            detail={tenant ? tenant.name : "None yet"}
+          />
+          <StatusRow
+            label="Connection to the tenant"
+            ok={!!connection?.ok}
+            optional={!connection}
+            loading={scopePreflight?.kind === "loading"}
+            detail={connection ? connection.detail : "Not checked yet"}
           />
         </div>
 
-        {!packaged && (
-          <div className="flex items-center gap-3">
-            <Button onClick={onVerify} disabled={verifying} variant="outline">
-              {verifying ? (
-                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-              ) : null}
-              {verifying ? "Running check..." : "Run connection check"}
-            </Button>
-            {result?.ok && (
-              <span className="text-sm text-success inline-flex items-center gap-1.5">
-                <CheckCircle2 className="h-4 w-4" />
-                CLI responded — gws v{result.version}
-              </span>
-            )}
-            {result && !result.ok && (
-              <span className="text-sm text-danger inline-flex items-center gap-1.5">
-                <XCircle className="h-4 w-4" />
-                {result.message}
-              </span>
-            )}
-          </div>
-        )}
-
-        {tenantId && (
+        {tenant && (
           <div className="rounded-lg border p-4 space-y-3">
             <div>
-              <p className="text-sm font-medium">
-                Verify Domain-Wide Delegation scopes
-              </p>
+              <p className="text-sm font-medium">Run the connection check</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Checks every OAuth scope Open Admin impersonates against
-                Google&apos;s auth server, so missing scopes surface here
-                instead of silently breaking a future operation.
+                Asks Google for a token for every OAuth scope Open Admin uses,
+                acting as {tenant.name}&apos;s admin through its service
+                account. It passes only if Domain-Wide Delegation authorizes
+                them all, so a missing scope shows up here instead of breaking
+                a later operation.
               </p>
             </div>
             <div className="flex items-center gap-3">
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => onScopeCheck()}
-                disabled={scopePreflight?.kind === "loading"}
+                onClick={onCheck}
+                disabled={checking || scopePreflight?.kind === "loading"}
               >
-                {scopePreflight?.kind === "loading" ? (
+                {checking ? (
                   <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
                 ) : null}
-                {scopePreflight?.kind === "loading"
-                  ? "Checking scopes..."
-                  : "Check DWD scopes"}
+                {checking ? "Running check..." : "Run connection check"}
               </Button>
+              {connection?.ok && (
+                <span className="text-sm text-success inline-flex items-center gap-1.5">
+                  <CheckCircle2 className="h-4 w-4" />
+                  Open Admin can reach {tenant.name}
+                </span>
+              )}
+              {connection && !connection.ok && (
+                <span className="text-sm text-danger inline-flex items-center gap-1.5">
+                  <XCircle className="h-4 w-4" />
+                  {connection.detail}
+                </span>
+              )}
             </div>
             {scopePreflight && (
-              <ScopePreflightPanel
-                state={scopePreflight}
-                onRetry={() => onScopeCheck(true)}
-              />
+              <ScopePreflightPanel state={scopePreflight} onRetry={onScopeRetry} />
             )}
           </div>
         )}
@@ -1394,21 +1474,29 @@ function VerifyStep({
             Save a configuration backup
           </p>
           <p className="text-xs text-muted-foreground">
-            Download everything you just configured — tenants, single sign-on,
-            and the service-account key files themselves — as one JSON bundle.
-            Import it on another server from{" "}
-            <strong>App Settings → Configuration backup</strong> and the whole
-            setup comes back, keys included. It contains live secrets, so
-            store it like a password.
+            To keep a copy of this setup, or move it to another server, export
+            it from <strong>App Settings → Configuration backup</strong>. That
+            export holds tenants, single sign-on and the service-account key
+            files themselves, so the whole setup comes back from one file —
+            and because it carries live secrets, it asks you to type a phrase
+            first. Store it like a password.
           </p>
-          <a
-            href="/api/config/export"
-            download
-            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-1")}
-          >
-            <Download className="h-3.5 w-3.5 mr-1.5" />
-            Download config bundle
-          </a>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <Link
+              href="/settings"
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+            >
+              <Download className="h-3.5 w-3.5 mr-1.5" />
+              Open Configuration backup
+            </Link>
+            <a
+              href="/api/config/export"
+              download
+              className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+            >
+              Download without keys or secrets
+            </a>
+          </div>
         </div>
 
         <div className="rounded-lg border bg-muted/40 p-4 text-sm space-y-2">

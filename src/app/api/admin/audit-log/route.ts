@@ -1,9 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readAuditLogPage, type AuditLogFilters } from "@/lib/audit-reader";
+import {
+  decodeAuditCursor,
+  encodeAuditCursor,
+  readAuditLogPage,
+  type AuditCursor,
+  type AuditLogFilters,
+} from "@/lib/audit-reader";
 import { ValidationError } from "@/lib/validate";
+import { errorResponse } from "@/lib/api-errors";
 
 /**
- * Read-only, paginated access to the append-only audit log.
+ * Read-only, paginated access to the append-only audit log: the live file and
+ * its rotated archives, newest first.
+ *
+ * GET /api/admin/audit-log?[cursor=...][&limit=200][&action=...][&outcome=...]
+ *       [&tenantId=...][&from=ISO][&to=ISO]
+ *
+ * `cursor` is the opaque `nextCursor` of the previous page. It names the file
+ * it points into, so a rotation between two calls cannot mix files up; when
+ * that file is gone the answer starts again from the newest entry and says
+ * `restarted: true`.
  *
  * Deliberately does NOT resolve a tenant: the log is a cross-tenant record
  * and no Google API is touched. Session auth is enforced by the middleware
@@ -37,13 +53,14 @@ export async function GET(request: NextRequest) {
     const params = request.nextUrl.searchParams;
 
     const cursorRaw = params.get("cursor");
-    let cursor: number | null = null;
+    let cursor: AuditCursor | null = null;
     if (cursorRaw !== null && cursorRaw !== "") {
-      const n = Number(cursorRaw);
-      if (!Number.isInteger(n) || n < 0) {
-        throw new ValidationError("cursor must be a non-negative integer");
+      cursor = decodeAuditCursor(cursorRaw);
+      if (!cursor) {
+        throw new ValidationError(
+          "cursor is malformed — start the search again"
+        );
       }
-      cursor = n;
     }
 
     const limit = intParam(params.get("limit"), "limit", {
@@ -82,19 +99,16 @@ export async function GET(request: NextRequest) {
       success: true,
       data: {
         entries: page.entries,
-        nextCursor: page.nextCursor,
+        nextCursor: page.nextCursor ? encodeAuditCursor(page.nextCursor) : null,
         scannedBytes: page.scannedBytes,
         skippedLines: page.skippedLines,
         done: page.done,
+        reachedFromBound: page.reachedFromBound,
+        oldestScannedTs: page.oldestScannedTs,
+        restarted: page.restarted,
       },
     });
   } catch (e) {
-    return errorResponse(e);
+    return errorResponse(e, "Failed to read the audit log");
   }
-}
-
-function errorResponse(e: unknown) {
-  const message = e instanceof Error ? e.message : "Unexpected error";
-  const status = e instanceof ValidationError ? 400 : 500;
-  return NextResponse.json({ success: false, error: message }, { status });
 }

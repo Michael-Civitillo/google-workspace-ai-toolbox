@@ -49,6 +49,12 @@ function dialogErrorFrom(result: {
   };
 }
 
+/** An add or a removal as it stood when its dialog opened. */
+interface PendingChange {
+  owner: string;
+  delegate: string;
+}
+
 export default function EmailDelegation() {
   const { tenant, id: tenantId } = useCurrentTenant();
   const [user, setUser] = useState("");
@@ -61,8 +67,10 @@ export default function EmailDelegation() {
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const [confirmAddOpen, setConfirmAddOpen] = useState(false);
-  const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<string | null>(null);
+  // What each dialog acts on, pinned when it opens: a lookup that finishes
+  // while a dialog is open must not change the mailbox its Confirm targets.
+  const [pendingAdd, setPendingAdd] = useState<PendingChange | null>(null);
+  const [pendingRemove, setPendingRemove] = useState<PendingChange | null>(null);
   const [addError, setAddError] = useState<DialogError | null>(null);
   const [removeError, setRemoveError] = useState<DialogError | null>(null);
   // Which suspended account the re-enable dialog is for, and what to retry
@@ -79,18 +87,24 @@ export default function EmailDelegation() {
   // Live tenant id for staleness checks inside async closures.
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
+  // Only the latest list request may fill the panel: a slow lookup of one
+  // mailbox must not land after a newer one, or after a tenant switch.
+  const listSeq = useRef(0);
 
   const listDelegates = async (ownerOverride?: string) => {
-    // ownerOverride lets refresh-after-removal re-list the owner the panel is
-    // showing (listedOwner) — the live input may have been retyped since.
+    // ownerOverride lets refresh-after-change re-list the owner the change
+    // ran against — the live input may have been retyped since.
     const owner = (ownerOverride ?? user).trim();
     if (!owner) return;
+    const seq = ++listSeq.current;
     setLoading(true);
     setMessage(null);
     // Pin the tenant this list belongs to, and discard the response if the
     // tenant changed while it was in flight — otherwise a stale tenant-A list
     // repopulates the UI under tenant B and defeats the listedOwner guard.
     const pinnedTenantId = tenantId;
+    const isLatest = () =>
+      listSeq.current === seq && tenantIdRef.current === pinnedTenantId;
 
     try {
       const res = await tfetch(
@@ -99,7 +113,7 @@ export default function EmailDelegation() {
         pinnedTenantId
       );
       const result = await res.json();
-      if (tenantIdRef.current !== pinnedTenantId) return;
+      if (!isLatest()) return;
 
       if (result.success && result.data?.delegates) {
         setDelegates(result.data.delegates);
@@ -112,17 +126,26 @@ export default function EmailDelegation() {
         setMessage({ type: "error", text: result.error || "Failed to list delegates" });
       }
     } catch {
+      if (!isLatest()) return;
       setMessage({ type: "error", text: "Failed to connect to the API" });
     } finally {
-      setLoading(false);
+      if (listSeq.current === seq) setLoading(false);
     }
   };
 
   // Clear a stale list when the tenant changes — a list fetched for tenant A
-  // must never drive removals against tenant B.
+  // must never drive removals against tenant B — and close the dialogs: one
+  // opened under tenant A must not confirm a change under tenant B.
   useEffect(() => {
+    listSeq.current++;
+    setLoading(false);
     setDelegates([]);
     setListedOwner("");
+    setPendingAdd(null);
+    setPendingRemove(null);
+    setAddError(null);
+    setRemoveError(null);
+    setReactivate(null);
   }, [tenantId]);
 
   /**
@@ -131,11 +154,11 @@ export default function EmailDelegation() {
    * `reactivated` names an account that was just re-enabled for this add,
    * so the success message can say so.
    */
-  const addDelegate = async (reactivated?: string) => {
-    if (!user || !delegate) return;
+  const addDelegate = async (p: PendingChange, reactivated?: string) => {
     setAdding(true);
     setMessage(null);
     setAddError(null);
+    const pinnedTenantId = tenantId;
 
     try {
       const res = await tfetch(
@@ -143,41 +166,44 @@ export default function EmailDelegation() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user, delegate }),
+          body: JSON.stringify({ user: p.owner, delegate: p.delegate }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success) {
-        const added = delegate;
         setDelegate("");
-        setConfirmAddOpen(false);
+        setPendingAdd(null);
         // Refresh first, then set the message: listDelegates clears messages in
         // its synchronous prologue, so setting it earlier batches a set+clear
-        // into one render and the success feedback is never painted.
-        await listDelegates();
+        // into one render and the success feedback is never painted. The
+        // mailbox the delegate was added to, not whatever the field says now.
+        await listDelegates(p.owner);
+        if (tenantIdRef.current !== pinnedTenantId) return;
         setMessage({
           type: "success",
           text: reactivated
-            ? `Re-enabled ${reactivated} and added ${added} as a delegate for ${user}`
-            : `Successfully added ${added} as a delegate for ${user}`,
+            ? `Re-enabled ${reactivated} and added ${p.delegate} as a delegate for ${p.owner}`
+            : `Successfully added ${p.delegate} as a delegate for ${p.owner}`,
         });
       } else {
         setAddError(dialogErrorFrom(result, "Failed to add delegate"));
       }
     } catch {
+      if (tenantIdRef.current !== pinnedTenantId) return;
       setAddError({ message: "Failed to connect to the API" });
     } finally {
       setAdding(false);
     }
   };
 
-  const removeDelegate = async (delegateEmail: string, reactivated?: string) => {
-    if (!listedOwner) return;
-    setRemoving(delegateEmail);
+  const removeDelegate = async (p: PendingChange, reactivated?: string) => {
+    setRemoving(p.delegate);
     setMessage(null);
     setRemoveError(null);
+    const pinnedTenantId = tenantId;
 
     try {
       const res = await tfetch(
@@ -185,30 +211,33 @@ export default function EmailDelegation() {
         {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
-          // Target the owner the list was fetched for, not the live input.
-          body: JSON.stringify({ user: listedOwner, delegate: delegateEmail }),
+          // The owner and delegate the dialog was opened for — never the
+          // live input or a list that loaded since.
+          body: JSON.stringify({ user: p.owner, delegate: p.delegate }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success) {
-        setConfirmRemoveTarget(null);
-        // Refresh the owner the removal actually ran against — the live input
-        // may point at someone else by now. Refresh before messaging —
-        // listDelegates' prologue clears messages, which would erase this
-        // success text in the same batched render.
-        await listDelegates(listedOwner);
+        setPendingRemove(null);
+        // Refresh the owner the removal actually ran against. Refresh before
+        // messaging — listDelegates' prologue clears messages, which would
+        // erase this success text in the same batched render.
+        await listDelegates(p.owner);
+        if (tenantIdRef.current !== pinnedTenantId) return;
         setMessage({
           type: "success",
           text: reactivated
-            ? `Re-enabled ${reactivated} and removed ${delegateEmail} as a delegate from ${listedOwner}`
-            : `Successfully removed ${delegateEmail} as a delegate from ${listedOwner}`,
+            ? `Re-enabled ${reactivated} and removed ${p.delegate} as a delegate from ${p.owner}`
+            : `Successfully removed ${p.delegate} as a delegate from ${p.owner}`,
         });
       } else {
         setRemoveError(dialogErrorFrom(result, "Failed to remove delegate"));
       }
     } catch {
+      if (tenantIdRef.current !== pinnedTenantId) return;
       setRemoveError({ message: "Failed to connect to the API" });
     } finally {
       setRemoving(null);
@@ -286,11 +315,14 @@ export default function EmailDelegation() {
                 />
                 <Button
                   onClick={() => {
+                    const owner = user.trim();
+                    const added = delegate.trim();
+                    if (!owner || !added) return;
                     setMessage(null);
                     setAddError(null);
-                    setConfirmAddOpen(true);
+                    setPendingAdd({ owner, delegate: added });
                   }}
-                  disabled={!user || !delegate || adding}
+                  disabled={!user.trim() || !delegate.trim() || adding}
                 >
                   {adding ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -350,9 +382,13 @@ export default function EmailDelegation() {
                       variant="ghost"
                       size="sm"
                       onClick={() => {
+                        if (!listedOwner) return;
                         setMessage(null);
                         setRemoveError(null);
-                        setConfirmRemoveTarget(d.delegateEmail);
+                        setPendingRemove({
+                          owner: listedOwner,
+                          delegate: d.delegateEmail,
+                        });
                       }}
                       disabled={removing === d.delegateEmail}
                     >
@@ -371,56 +407,56 @@ export default function EmailDelegation() {
       </div>
 
       <ConfirmActionDialog
-        open={confirmAddOpen}
+        open={!!pendingAdd}
         onOpenChange={(o) => {
-          if (adding) return;
-          if (!o) setAddError(null);
-          setConfirmAddOpen(o);
+          if (adding || o) return;
+          setAddError(null);
+          setPendingAdd(null);
         }}
         title="Add mailbox delegate"
-        summary={`Grant ${delegate || "—"} delegate access to ${user || "—"}'s mailbox.`}
+        summary={`Grant ${pendingAdd?.delegate ?? "—"} delegate access to ${pendingAdd?.owner ?? "—"}'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="medium"
         confirmLabel={addError ? "Try again" : "Add delegate"}
         busy={adding}
         changes={[
-          { label: "Mailbox owner", after: user },
-          { label: "New delegate", after: delegate },
+          { label: "Mailbox owner", after: pendingAdd?.owner ?? "" },
+          { label: "New delegate", after: pendingAdd?.delegate ?? "" },
           {
             label: "Delegate can",
             after: "Read, send, and delete messages on behalf of the owner",
             emphasis: true,
           },
           {
-            label: "Verification",
-            after: "Delegate must accept an email invitation before access activates",
+            label: "When access starts",
+            after: "Usually right away, or within a few minutes",
           },
         ]}
         error={addError?.message}
         errorActions={reenableButton(addError, "add")}
-        onConfirm={() => addDelegate()}
+        onConfirm={() => {
+          if (pendingAdd) void addDelegate(pendingAdd);
+        }}
       />
 
       <ConfirmActionDialog
-        open={!!confirmRemoveTarget}
+        open={!!pendingRemove}
         onOpenChange={(o) => {
-          if (removing) return;
-          if (!o) {
-            setRemoveError(null);
-            setConfirmRemoveTarget(null);
-          }
+          if (removing || o) return;
+          setRemoveError(null);
+          setPendingRemove(null);
         }}
         title="Remove mailbox delegate"
-        summary={`${confirmRemoveTarget ?? ""} will lose access to ${listedOwner}'s mailbox.`}
+        summary={`${pendingRemove?.delegate ?? ""} will lose access to ${pendingRemove?.owner ?? ""}'s mailbox.`}
         tenant={tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null}
         severity="medium"
         confirmLabel={removeError ? "Try again" : "Remove delegate"}
         busy={!!removing}
         changes={[
-          { label: "Mailbox owner", after: listedOwner },
+          { label: "Mailbox owner", after: pendingRemove?.owner ?? "" },
           {
             label: "Delegate to remove",
-            before: confirmRemoveTarget ?? "",
+            before: pendingRemove?.delegate ?? "",
             after: "no longer has access",
             emphasis: true,
           },
@@ -428,7 +464,7 @@ export default function EmailDelegation() {
         error={removeError?.message}
         errorActions={reenableButton(removeError, "remove")}
         onConfirm={() => {
-          if (confirmRemoveTarget) void removeDelegate(confirmRemoveTarget);
+          if (pendingRemove) void removeDelegate(pendingRemove);
         }}
       />
 
@@ -439,16 +475,16 @@ export default function EmailDelegation() {
         }}
         thenLabel={
           reactivate?.then === "remove"
-            ? `Remove ${confirmRemoveTarget ?? ""} as a delegate from ${listedOwner}`
-            : `Add ${delegate} as a delegate for ${user}`
+            ? `Remove ${pendingRemove?.delegate ?? ""} as a delegate from ${pendingRemove?.owner ?? ""}`
+            : `Add ${pendingAdd?.delegate ?? ""} as a delegate for ${pendingAdd?.owner ?? ""}`
         }
         onReactivated={async (reactivated) => {
           const then = reactivate?.then;
           setReactivate(null);
           if (then === "remove") {
-            if (confirmRemoveTarget) await removeDelegate(confirmRemoveTarget, reactivated);
-          } else {
-            await addDelegate(reactivated);
+            if (pendingRemove) await removeDelegate(pendingRemove, reactivated);
+          } else if (pendingAdd) {
+            await addDelegate(pendingAdd, reactivated);
           }
         }}
       />
