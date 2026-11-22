@@ -19,15 +19,53 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(here, "..", "..");
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Where `npm run package:bin` (or `package:exe`) leaves the app on this platform. */
+/** Where `npm run package:bin` (or `package:exe`) leaves the app on this machine. */
 export function defaultBinary() {
+  // Named the way packaging/build-bin.sh names it: by system and processor.
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
   const name =
     process.platform === "win32"
       ? "OpenAdmin-win-x64.exe"
       : process.platform === "darwin"
-        ? "open-admin-macos-arm64"
-        : "open-admin-linux-x64";
+        ? `open-admin-macos-${arch}`
+        : `open-admin-linux-${arch}`;
   return path.join(repoRoot, "packaging", "dist", name);
+}
+
+// Every process started here, so none outlives the script: not when a step
+// throws, not when the app never comes up, not on Ctrl+C.
+const children = new Set();
+function track(child) {
+  children.add(child);
+  child.on("exit", () => children.delete(child));
+  return child;
+}
+export function stopAll() {
+  for (const child of children) {
+    try {
+      child.kill();
+    } catch {
+      // Already gone.
+    }
+  }
+}
+process.on("exit", stopAll);
+
+/**
+ * Stop everything this script started when it is interrupted, then exit.
+ * `cleanup` runs first, for the caller's own tidying.
+ */
+export function stopOnInterrupt(cleanup = () => {}) {
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => {
+      try {
+        cleanup();
+      } finally {
+        stopAll();
+        process.exit(130);
+      }
+    });
+  }
 }
 
 /**
@@ -111,13 +149,16 @@ export function claimWorkDir(named) {
  * "Google" answers and to read back what the app asked it.
  */
 export async function startStandIn({ dir, port }) {
-  const child = spawn(
-    process.execPath,
-    [path.join(here, "fake-google.mjs"), dir, String(port)],
-    { stdio: ["ignore", "pipe", "inherit"] }
+  const child = track(
+    spawn(process.execPath, [path.join(here, "fake-google.mjs"), dir, String(port)], {
+      stdio: ["ignore", "pipe", "inherit"],
+    })
   );
+  let exitCode = null;
+  child.on("exit", (code) => (exitCode = code ?? -1));
   await new Promise((resolve, reject) => {
     child.stdout.on("data", (chunk) => chunk.toString().includes("listening") && resolve());
+    child.on("error", (e) => reject(new Error(`The stand-in for Google could not be started: ${e.message}`)));
     child.on("exit", (code) =>
       reject(
         new Error(
@@ -127,10 +168,17 @@ export async function startStandIn({ dir, port }) {
       )
     );
   });
+  // A run must not carry on against a stand-in that has died: every answer
+  // after that would be a connection error, read as the app's fault.
+  const alive = () => exitCode === null;
   return {
     port,
     caFile: path.join(dir, "ca.pem"),
-    control: async (request) => (await fetch(`http://127.0.0.1:${port}${request}`)).json(),
+    alive,
+    control: async (request) => {
+      if (!alive()) throw new Error(`The stand-in for Google has stopped (exit ${exitCode}).`);
+      return (await fetch(`http://127.0.0.1:${port}${request}`)).json();
+    },
     stop: () => child.kill(),
   };
 }
@@ -171,17 +219,26 @@ export async function startApp({ binary, root, port, password, standIn }) {
   env.OPEN_ADMIN_DNS_SERVERS = `127.0.0.1:${standIn.port + 1}`;
   env.OPEN_ADMIN_UPDATE_URL = `http://127.0.0.1:${standIn.port}/__release`;
 
-  const child = spawn(
-    binary,
-    ["--no-browser", "--port", String(port), "--password", password, "--root", root],
-    { env, stdio: ["ignore", "pipe", "pipe"] }
+  const child = track(
+    spawn(
+      binary,
+      ["--no-browser", "--port", String(port), "--password", password, "--root", root],
+      { env, stdio: ["ignore", "pipe", "pipe"] }
+    )
   );
   let output = "";
+  let spawnError = null;
+  child.on("error", (e) => (spawnError = e));
   child.stdout.on("data", (chunk) => (output += chunk));
   child.stderr.on("data", (chunk) => (output += chunk));
 
   const base = `http://localhost:${port}`;
   for (let attempt = 0; ; attempt++) {
+    if (spawnError) throw new Error(`The app could not be started: ${spawnError.message}`);
+    if (standIn.alive && !standIn.alive()) {
+      child.kill();
+      throw new Error("The stand-in for Google stopped while the app was starting.");
+    }
     try {
       if ((await fetch(`${base}/login`)).status === 200) break;
     } catch {

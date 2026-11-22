@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ADMIN, BACKUP_CLIENT_ID, buildLicenses, buildTenant, expected, NOW, OWN_CLIENT_ID, SCHEDULER_CLIENT_ID, SKUS } from "./dataset.mjs";
-import { claimWorkDir, defaultBinary, launchBrowser, parseArgs, repoRoot, requireBinary, signIn, sleep, startApp, startStandIn, writeServiceAccountKey } from "./harness.mjs";
+import { claimWorkDir, defaultBinary, launchBrowser, parseArgs, repoRoot, requireBinary, signIn, sleep, startApp, startStandIn, stopOnInterrupt, writeServiceAccountKey } from "./harness.mjs";
 
 const USAGE = `Usage: node scripts/e2e/run.mjs [options]
 
@@ -55,6 +55,14 @@ fs.mkdirSync(shotsDir, { recursive: true });
 let standIn;
 let app;
 let browser;
+// Ctrl+C mid-run stops the app, the stand-in and the browser, not only this.
+stopOnInterrupt(() => {
+  console.log(`\nInterrupted after ${checks} checks. The app's data is in ${workDir}`);
+  void browser?.close();
+});
+// Set when the run threw part-way: the checks after that point never ran, so
+// the count is of the checks that did, not of the run.
+let stoppedEarly = false;
 try {
   // --- the stand-in for Google, then the app exactly as shipped --------------
   standIn = await startStandIn({ dir: path.join(workDir, "tls"), port: FAKE_PORT });
@@ -357,9 +365,12 @@ try {
   wlog = await control("/__log?clear=true");
   eq("exactly one token was deleted", wlog.map((x) => [x.method, decodeURIComponent(x.path)]), [["DELETE", "/admin/directory/v1/users/user004@example.com/tokens/1004-backup.apps.googleusercontent.com"]]);
   await page.getByRole("button", { name: /Mail Merge Pro/ }).click();
-  await page.getByRole("button", { name: "Revoke for all 13…" }).click();
-  check("revoking for everyone needs the word REVOKE", (await dialog().innerText()).includes("REVOKE") && (await dialog().getByRole("button", { name: "Revoke for everyone" }).isDisabled()));
-  await confirmWith("REVOKE", "Revoke for everyone");
+  // One account's apps couldn't be read in this scan, so the page must not
+  // promise "everyone": it revokes for the accounts it found, and says so.
+  await page.getByRole("button", { name: "Revoke for the 13 found…" }).click();
+  check("revoking for every account found needs the word REVOKE", (await dialog().innerText()).includes("REVOKE") && (await dialog().getByRole("button", { name: "Revoke for these accounts" }).isDisabled()));
+  check("and says the scan did not read every account", (await dialog().innerText()).includes("did not read every account"), await dialog().innerText());
+  await confirmWith("REVOKE", "Revoke for these accounts");
   await dialog().waitFor({ state: "hidden" });
   check("the app is gone from the list", !(await panelText()).includes("Mail Merge Pro"));
   check("and the success message counts the accounts", (await page.locator("[role=alert]").first().innerText()).includes("for 13 accounts"));
@@ -519,7 +530,10 @@ try {
   await driveCsv.saveAs(driveCsvPath);
   const driveCsvRows = fs.readFileSync(driveCsvPath, "utf-8").split("\n");
   const driveCsvData = driveCsvRows.slice(1);
-  eq("the export has one row per outside member and per outside share", [driveCsvData.length, driveCsvData.filter((l) => l.includes('"drive member"')).length, driveCsvData.filter((l) => l.includes(',"file",')).length], [3, 1, 2]);
+  eq("the export has one row per outside member and per outside share", [driveCsvData.filter((l) => l.includes('"drive member"')).length, driveCsvData.filter((l) => l.includes(',"file",')).length], [1, 2]);
+  // One drive couldn't be read in full: the file says so at the top, and
+  // names the drive, so it can't pass for a complete picture.
+  eq("and says it is incomplete, naming the drive it couldn't read", [driveCsvData.length, driveCsvData[0].startsWith('"INCOMPLETE"'), driveCsvData.filter((l) => l.includes('"drive not fully read"')).length], [5, true, 1]);
 
   // ------------------------------------------------------------------ New User
   console.log("\nNew User: create an account");
@@ -766,6 +780,33 @@ try {
   const tally = (action, outcome) => bulkAudit.filter((a) => a.action === action && a.outcome === outcome).length;
   eq("every row is in the audit log on its own", [tally("groups.member_add", "success"), tally("groups.member_add", "error"), tally("calendar_delegation.add", "success"), tally("offboarding.suspend", "success"), tally("offboarding.suspend", "error"), tally("user.unsuspend", "success"), tally("groups.member_remove", "success")], [3, 1, 2, 2, 1, 2, 2]);
 
+  // ------------------------------------------- what the server insists on itself
+  console.log("\nConfirmations the server insists on, whatever the page sends");
+  await control("/__changes?clear=true");
+  await control("/__log?clear=true");
+  const api = async (method, route, body) => {
+    const res = await fetch(`${BASE}${route}`, {
+      method,
+      headers: { "content-type": "application/json", origin: BASE, cookie },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  let refused = await api("POST", "/api/admin/groups/members", { group: "sales@example.com", member: b3, role: "OWNER" });
+  eq("making someone a group owner without typing their address", refused.status, 400);
+  refused = await api("POST", "/api/admin/groups/members", { group: "sales@example.com", member: "partner@outside.example" });
+  check("adding someone outside the organisation without confirming the outside address", refused.status === 400 && /outside/.test(refused.body?.error ?? ""), JSON.stringify(refused));
+  refused = await api("POST", "/api/gws/calendar-delegation", { calendarId: b1, delegateEmail: b2, role: "owner" });
+  eq("making someone a calendar owner without typing their address", refused.status, 400);
+  refused = await api("POST", "/api/admin/mailbox-import/labels", { user: b1, labels: [{ id: "Label_1", name: "Projects", type: "user" }] });
+  eq("creating import labels without typing the mailbox's address", refused.status, 400);
+  refused = await api("GET", "/api/admin/preflight-scopes");
+  eq("a scope check that doesn't say which tenant", refused.status, 400);
+  check("none of those reached Google with a change", (await control("/__log?clear=true")).every((x) => x.method === "GET"));
+  const owner = await api("POST", "/api/admin/groups/members", { group: "sales@example.com", member: b3, role: "OWNER", confirm: b3 });
+  state = await control("/__changes?clear=true");
+  eq("with the address typed, the owner is added", [owner.status, state.groups["sales@example.com"][b3]], [200, "OWNER"]);
+
   // ------------------------------------------------------------------ Licences
   console.log("\nLicences");
   await control("/__tenant");
@@ -955,8 +996,9 @@ try {
   await sigStatus.filter({ hasText: /^Done\./ }).waitFor({ timeout: 60_000 });
   eq("replaces the signatures it can and reports the rest", (await sigStatus.innerText()).trim(), "Done. 3 replaced · 0 already had it · 2 failed");
   ch = (await control("/__changes?clear=true")).changes;
-  eq("each mailbox is opened as its owner, with the basic settings permission, on its own address", ch.map((c) => [c.kind, c.subject, c.address, c.scopes]), ["user001", "user002", "user003"].map((u) => ["signature", `${u}@example.com`, `${u}@example.com`, [BASIC]]));
-  eq("and is given exactly what the preview showed", ch[1].signature, '<div dir="ltr"><b>User 2</b><br>Role 2, Operations<br>Tel: +44 20 7946 0002<br><a href="mailto:user002@example.com">user002@example.com</a><br>Example Corp · <a href="https://example.com">https://example.com</a></div>');
+  // Mailboxes are done a few at a time, so they finish in no fixed order.
+  eq("each mailbox is opened as its owner, with the basic settings permission, on its own address", ch.map((c) => [c.kind, c.subject, c.address, c.scopes]).sort((a, b) => a[1].localeCompare(b[1])), ["user001", "user002", "user003"].map((u) => ["signature", `${u}@example.com`, `${u}@example.com`, [BASIC]]));
+  eq("and is given exactly what the preview showed", ch.find((c) => c.address === "user002@example.com")?.signature, '<div dir="ltr"><b>User 2</b><br>Role 2, Operations<br>Tel: +44 20 7946 0002<br><a href="mailto:user002@example.com">user002@example.com</a><br>Example Corp · <a href="https://example.com">https://example.com</a></div>');
   const sigResults = page.getByTestId("signature-results");
   check("says why the suspended account was skipped", (await sigResults.locator("div.rounded-lg", { hasText: "user010@example.com" }).innerText()).includes("is suspended"));
   check("and that the other address reaches no account, in plain words", (await sigResults.locator("div.rounded-lg", { hasText: "nobody@example.com" }).innerText()).includes("There is no account with the address nobody@example.com."));
@@ -1046,7 +1088,7 @@ try {
   console.log("\nBrowser console");
   eq("no errors logged by the page", consoleErrors.filter((e) => !/502|499|Failed to load resource/.test(e)), []);
 } catch (e) {
-  failures++;
+  stoppedEarly = true;
   console.log(`\nFAIL the run threw: ${e.stack ?? e}`);
   console.log(`--- the last of what the app printed ---\n${(app?.output() ?? "").split("\n").slice(-30).join("\n")}`);
 } finally {
@@ -1054,12 +1096,16 @@ try {
   app?.stop();
   standIn?.stop();
 }
-console.log(`\ne2e: ${checks - failures}/${checks} checks passed`);
-if (work.temporary && failures === 0 && !args.keep) {
+console.log(
+  `\ne2e: ${checks - failures}/${checks} checks passed` +
+    (stoppedEarly ? " — the run stopped early, so the checks after that point never ran" : "")
+);
+const passed = failures === 0 && !stoppedEarly;
+if (work.temporary && passed && !args.keep) {
   // Give the app a moment to let go of its files before they are removed.
   await sleep(500);
   fs.rmSync(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 } else {
   console.log(`The app's data, its audit log and the screenshots from this run are in ${workDir}`);
 }
-process.exit(failures === 0 ? 0 : 1);
+process.exit(passed ? 0 : 1);

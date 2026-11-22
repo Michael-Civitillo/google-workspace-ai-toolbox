@@ -284,6 +284,13 @@ async function handle(req, res) {
     res.writeHead(204); return res.end();
   }
   if (host.startsWith("gmail.googleapis.com")) {
+    // Refuse a token without a scope the method accepts, the way Google does.
+    // The stand-in used to accept any Gmail token for anything, which is how
+    // a "turn off forwarding" that Google would refuse passed every run.
+    const accepted = gmailScopesFor(req.method, p);
+    if (accepted && !grant.scopes.some((s) => accepted.includes(s))) {
+      return googleError(res, 403, "Request had insufficient authentication scopes.", "insufficientPermissions");
+    }
     const entry = tenant.find((e) => e.user.primaryEmail === grant.subject);
     if (!entry) return googleError(res, 404, "Not Found", "notFound");
     if (p === "/gmail/v1/users/me/settings/autoForwarding" && req.method === "PUT") {
@@ -321,6 +328,25 @@ async function handle(req, res) {
     if (p === "/gmail/v1/users/me/settings/filters") return send(res, 200, { filter: entry.box.filters });
   }
   return googleError(res, 404, `fake Google has no ${req.method} ${host}${p}`, "notFound");
+}
+
+// The scopes Gmail accepts for each settings method, as its API reference
+// lists them (the googleapis package's own documentation of each method).
+const AUTH = "https://www.googleapis.com/auth/";
+const GMAIL_READ = ["https://mail.google.com/", `${AUTH}gmail.modify`, `${AUTH}gmail.readonly`, `${AUTH}gmail.settings.basic`];
+const GMAIL_BASIC = [`${AUTH}gmail.settings.basic`];
+const GMAIL_SHARING = [`${AUTH}gmail.settings.sharing`];
+function gmailScopesFor(method, p) {
+  const read = method === "GET";
+  if (p.endsWith("/settings/autoForwarding")) return read ? GMAIL_READ : GMAIL_SHARING;
+  if (p.endsWith("/settings/vacation")) return read ? GMAIL_READ : GMAIL_BASIC;
+  if (/\/settings\/filters(\/[^/]+)?$/.test(p)) return read ? GMAIL_READ : GMAIL_BASIC;
+  if (/\/settings\/sendAs(\/[^/]+)?$/.test(p)) {
+    if (read) return GMAIL_READ;
+    return method === "PATCH" || method === "PUT" ? [...GMAIL_BASIC, ...GMAIL_SHARING] : GMAIL_SHARING;
+  }
+  if (/\/settings\/(forwardingAddresses|delegates)(\/[^/]+)?$/.test(p)) return read ? GMAIL_READ : GMAIL_SHARING;
+  return null;
 }
 
 const inner = http.createServer((req, res) => {
@@ -395,7 +421,19 @@ proxy.on("connect", (req, socket) => {
   secure.on("error", () => secure.destroy());
   inner.emit("connection", secure);
 });
-proxy.listen(port, "127.0.0.1", () => console.log(`fake google listening on ${port}, ca at ${ca.crt}`));
+proxy.on("error", (e) => {
+  console.error(`fake google: could not use port ${port}: ${e.message}`);
+  process.exit(1);
+});
+// "listening" is announced once the DNS port is bound as well, so a run
+// never starts against a stand-in whose DNS half is missing.
+let proxyUp = false;
+let dnsUp = false;
+const announce = () => proxyUp && dnsUp && console.log(`fake google listening on ${port}, ca at ${ca.crt}`);
+proxy.listen(port, "127.0.0.1", () => {
+  proxyUp = true;
+  announce();
+});
 
 // --- a DNS server for the email authentication check ----------------------------
 // Answers TXT queries from DNS_TXT; any other name gets an empty answer, which is
@@ -443,4 +481,11 @@ dns.on("message", (msg, rinfo) => {
     console.error("fake dns:", e);
   }
 });
-dns.bind(port + 1, "127.0.0.1");
+dns.on("error", (e) => {
+  console.error(`fake dns: could not use port ${port + 1}: ${e.message}`);
+  process.exit(1);
+});
+dns.bind(port + 1, "127.0.0.1", () => {
+  dnsUp = true;
+  announce();
+});
