@@ -15,6 +15,7 @@ import { prepareDataDir } from "./datadir.ts";
 import { resolveSettings, type PasswordSource } from "./settings.ts";
 import {
   discardDir,
+  DISCARD_RETRY_MS,
   ensureExtracted,
   isExtracted,
   payloadHash,
@@ -219,7 +220,7 @@ function prepareAppDir(appDir: string, appRoot: string, reset: boolean, mode: Ch
       `The unpacked application in ${appDir} is damaged or has been changed ` +
         `(${problem}). Unpacking a fresh copy ...`
     );
-    if (!discardDir(appDir)) {
+    if (!discardDir(appDir, DISCARD_RETRY_MS)) {
       throw new Error(`the damaged copy in ${appDir} could not be removed`);
     }
   } else {
@@ -408,7 +409,7 @@ async function startUnderLock(
       // Windows will not move a folder that is a process's working directory.
       process.chdir(paths.appRoot);
       appDir = await withAppLock(paths.appRoot, () => {
-        if (!discardDir(wantedAppDir)) {
+        if (!discardDir(wantedAppDir, DISCARD_RETRY_MS)) {
           throw new Error(`the damaged copy in ${wantedAppDir} could not be removed`);
         }
         return unpackFresh(wantedAppDir);

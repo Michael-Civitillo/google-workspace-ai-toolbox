@@ -39,6 +39,11 @@ const DEL_DIR_RE = new RegExp(`^${VERSION_DIR}\\.del-\\d+-[0-9a-f]+$`);
 
 /** How long the final rename may wait out Windows antivirus or indexing. */
 export const FINAL_RENAME_RETRY_MS = 30_000;
+/**
+ * How long a folder that must go (a damaged copy, --reset-app-cache) may wait
+ * to be moved aside. Routine clean-up just tries again on the next start.
+ */
+export const DISCARD_RETRY_MS = 10_000;
 
 export type OwnName =
   | { kind: "version" }
@@ -229,10 +234,10 @@ function deletable(appRoot: string, keepDir: string | null, deps: PruneDeps): st
   return out.sort();
 }
 
-function remove(appRoot: string, name: string): boolean {
+function remove(appRoot: string, name: string, renameRetryMs?: number): boolean {
   const full = path.join(appRoot, name);
   const own = classifyName(name);
-  if (own?.kind === "version") return discardDir(full);
+  if (own?.kind === "version") return discardDir(full, renameRetryMs);
   try {
     fs.rmSync(full, { recursive: true, force: true, maxRetries: 3 });
     return true;
@@ -251,5 +256,5 @@ export function pruneOtherVersions(appRoot: string, keepDir: string, deps: Prune
  * current version's included, and nothing else in the folder.
  */
 export function resetAppCache(appRoot: string, deps: PruneDeps = {}): string[] {
-  return deletable(appRoot, null, deps).filter((name) => remove(appRoot, name));
+  return deletable(appRoot, null, deps).filter((name) => remove(appRoot, name, DISCARD_RETRY_MS));
 }
