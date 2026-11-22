@@ -10,6 +10,7 @@ import {
   fsyncSync,
   closeSync,
   mkdirSync,
+  statSync,
 } from "fs";
 import path from "path";
 
@@ -113,11 +114,27 @@ export async function writeTextFileAtomic(
   const fd = openSync(tmpPath, "wx", 0o600);
   try {
     fchmodSync(fd, 0o600);
-    writeSync(fd, text);
+    // Every byte, or nothing: writeSync may write less than asked (a nearly
+    // full disk), and renaming a cut-off file over a good one would replace
+    // the store with something that no longer parses.
+    const data = Buffer.from(text, "utf-8");
+    let written = 0;
+    while (written < data.length) {
+      const n = writeSync(fd, data, written, data.length - written);
+      if (n <= 0) throw new Error(`Could not write ${storePath}: the disk took no more data`);
+      written += n;
+    }
     fsyncSync(fd);
-  } finally {
+  } catch (e) {
     closeSync(fd);
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best effort: the good file is untouched either way.
+    }
+    throw e;
   }
+  closeSync(fd);
 
   // On Windows the rename can transiently fail with EPERM/EBUSY if
   // antivirus / Windows Search Indexer briefly holds the destination
@@ -164,7 +181,58 @@ export async function writeJsonFileAtomic(
   storePath: string,
   data: unknown
 ): Promise<void> {
-  await writeTextFileAtomic(storePath, JSON.stringify(data, null, 2));
+  parsedCache.delete(storePath);
+  try {
+    await writeTextFileAtomic(storePath, JSON.stringify(data, null, 2));
+  } finally {
+    parsedCache.delete(storePath);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parsed stores, kept between requests
+// ---------------------------------------------------------------------------
+
+/**
+ * tenants.json and sso.json used to be read and parsed on every API call.
+ * The parsed object is now kept while the file on disk looks unchanged (same
+ * size, modification time and inode), and for a few seconds at most, so an
+ * edit that keeps both still shows up promptly. Writes through this module
+ * drop the entry. Every caller gets its own copy, so changing what it was
+ * handed can't change what the next request sees.
+ */
+const PARSED_CACHE_MAX_AGE_MS = 5_000;
+const parsedCache = new Map<
+  string,
+  { at: number; mtimeMs: number; size: number; ino: number; value: Record<string, unknown> | null }
+>();
+
+export function readJsonObjectFileCached(storePath: string): Record<string, unknown> | null {
+  let stat: { mtimeMs: number; size: number; ino: number } | null = null;
+  try {
+    const st = statSync(storePath);
+    stat = { mtimeMs: st.mtimeMs, size: st.size, ino: st.ino };
+  } catch {
+    stat = null;
+  }
+  const hit = parsedCache.get(storePath);
+  if (
+    stat &&
+    hit &&
+    Date.now() - hit.at < PARSED_CACHE_MAX_AGE_MS &&
+    hit.mtimeMs === stat.mtimeMs &&
+    hit.size === stat.size &&
+    hit.ino === stat.ino
+  ) {
+    return hit.value === null ? null : structuredClone(hit.value);
+  }
+  const value = readJsonObjectFile(storePath);
+  if (stat) {
+    parsedCache.set(storePath, { at: Date.now(), ...stat, value });
+  } else {
+    parsedCache.delete(storePath);
+  }
+  return value === null ? null : structuredClone(value);
 }
 
 /**

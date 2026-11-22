@@ -71,6 +71,7 @@ export class ValidationError extends Error {
   }
 }
 
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -100,6 +101,14 @@ export function validateCredentialsFilePath(p: unknown): string {
       "credentialsFile must be an absolute path"
     );
   }
+  // A network path (\\server\share\key.json, or a \\?\ device path): on
+  // Windows, opening one makes the machine connect out to that server and
+  // offer it the signed-in user's credentials. A key belongs on this disk.
+  if (/^[\\/]{2}/.test(raw)) {
+    throw new ValidationError(
+      "credentialsFile must be on this computer's own disk, not a network path"
+    );
+  }
   // Reject `..` segments using either separator.
   if (raw.split(/[\\/]/).some((seg) => seg === "..")) {
     throw new ValidationError(
@@ -117,10 +126,23 @@ export function validateCredentialsFilePath(p: unknown): string {
   const allowedDir = process.env.GWS_CREDENTIALS_DIR;
   if (allowedDir) {
     const allowedResolved = path.resolve(allowedDir);
-    const rel = path.relative(allowedResolved, resolved);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    const outside = (dir: string, file: string) => {
+      const rel = path.relative(dir, file);
+      return rel.startsWith("..") || path.isAbsolute(rel);
+    };
+    if (outside(allowedResolved, resolved)) {
       throw new ValidationError(
         `credentialsFile must live under ${allowedDir} (set by GWS_CREDENTIALS_DIR)`
+      );
+    }
+    // And where it really is: a link inside the folder can point anywhere.
+    // For a file that doesn't exist yet (a restore writes it), its folder.
+    const real = (p: string) => (existsSync(p) ? realpathSync(p) : null);
+    const realDir = real(allowedResolved) ?? allowedResolved;
+    const target = real(resolved) ?? (real(path.dirname(resolved)) ? path.join(real(path.dirname(resolved))!, path.basename(resolved)) : null);
+    if (target !== null && outside(realDir, target)) {
+      throw new ValidationError(
+        `credentialsFile must live under ${allowedDir} (set by GWS_CREDENTIALS_DIR); it is a link to somewhere else`
       );
     }
   }

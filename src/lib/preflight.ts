@@ -306,7 +306,10 @@ export async function preflightTenantScopesCached(
   tenant: Tenant,
   opts: { fresh?: boolean } = {}
 ): Promise<CachedPreflight> {
-  const key = tenant.id;
+  // Keyed by what the check depends on, not only by tenant: pointing a
+  // tenant at another key file or admin used to show the old key's result
+  // until the cache ran out.
+  const key = `${tenant.id}|${tenant.credentialsFile}|${tenant.adminEmail.toLowerCase()}`;
   if (!opts.fresh) {
     const hit = preflightCache.get(key);
     if (hit && Date.now() - hit.at < PREFLIGHT_CACHE_TTL_MS) {

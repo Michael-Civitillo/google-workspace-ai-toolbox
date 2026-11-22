@@ -157,6 +157,9 @@ const ACCESS: Record<
   low: { label: "Sign-in only", variant: "outline" },
 };
 
+/** Baseline entries naming an account a check couldn't read in that scan. */
+const UNREAD_KEY = { forwarding: "unread|forwarding|", apps: "unread|apps|" } as const;
+
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n.toLocaleString()} ${n === 1 ? one : many}`;
 }
@@ -861,11 +864,16 @@ export default function SecurityCheck() {
     });
     if (keys.length > SNAPSHOT_MAX_KEYS) return;
     const covered: CheckName[] = ["twoStep", "inactive"];
-    // A check with accounts it couldn't read has no baseline for them: what
-    // it finds there next time, it may have missed this time, so it must not
-    // be marked "new".
-    if ((totals?.mailboxErrors ?? 0) === 0) covered.push("forwarding");
-    if ((totals?.appErrors ?? 0) === 0) covered.push("apps");
+    // An account that couldn't be read has no baseline: what is found there
+    // next time may have been there all along, so it must not be marked
+    // "new". The accounts are remembered with the scan; when there were more
+    // than the page keeps by name, the whole check goes without a baseline.
+    if ((totals?.mailboxErrors ?? 0) <= mailboxErrors.length) covered.push("forwarding");
+    if ((totals?.appErrors ?? 0) <= appErrors.length) covered.push("apps");
+    keys.push(
+      ...mailboxErrors.map((e) => `${UNREAD_KEY.forwarding}${e.user}`),
+      ...appErrors.map((e) => `${UNREAD_KEY.apps}${e.user}`)
+    );
     if (delegation) covered.push("delegation");
     // Only a run where every lookup was answered is a baseline: a record
     // that could not be looked up then must not look new when it can be.
@@ -896,6 +904,8 @@ export default function SecurityCheck() {
     forwarding,
     apps,
     totals,
+    mailboxErrors,
+    appErrors,
     tenantId,
   ]);
 
@@ -905,9 +915,13 @@ export default function SecurityCheck() {
   const newTwoStep = (f: TwoStepFinding) => isNew("twoStep", findingKey.twoStep(f));
   const newInactive = (f: InactiveFinding) =>
     isNew("inactive", findingKey.inactive(f, threshold));
+  // Not new where the previous scan couldn't look.
+  const unreadBefore = (check: "forwarding" | "apps", user: string) =>
+    baseline !== null && baseline.keys.has(`${UNREAD_KEY[check]}${user}`);
   const newForwarding = (f: ForwardingFinding) =>
-    isNew("forwarding", findingKey.forwarding(f));
-  const newApp = (app: AppGrant) => isNew("apps", findingKey.app(app));
+    isNew("forwarding", findingKey.forwarding(f)) && !unreadBefore("forwarding", f.user);
+  const newApp = (app: AppGrant) =>
+    isNew("apps", findingKey.app(app)) && app.users.some((u) => !unreadBefore("apps", u));
   const newClient = (client: DelegatedClient) =>
     isNew("delegation", findingKey.delegation(client));
   const newDomain = (d: DomainEmailAuth) =>

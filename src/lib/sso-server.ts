@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { chmodSync, existsSync, statSync, unlinkSync } from "fs";
 import path from "path";
 import {
-  readJsonObjectFile,
+  readJsonObjectFileCached,
   writeJsonFileAtomic,
   withFileLock,
 } from "./json-store";
@@ -123,7 +123,7 @@ export function readSsoConfig(): SsoConfig | null {
   // (the unusable ones quarantined first); transient read errors (EBUSY,
   // EMFILE, antivirus locks) throw so a read-modify-write under the lock
   // aborts instead of persisting an empty store over the real config.
-  const parsed = readJsonObjectFile(SSO_CONFIG_PATH);
+  const parsed = readJsonObjectFileCached(SSO_CONFIG_PATH);
   if (parsed === null) return null;
 
   const cfg = normalizeStored(parsed);

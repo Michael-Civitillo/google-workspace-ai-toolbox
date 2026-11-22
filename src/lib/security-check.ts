@@ -358,8 +358,16 @@ const LOW_EXACT: Record<string, string> = {
   [`${AUTH}gmail.labels`]: "Gmail labels",
 };
 
+/** Feed-era scope addresses that reach all of one's documents or mail. */
+const LEGACY_HIGH_PREFIX: Array<[string, string]> = [
+  ["https://docs.google.com/feeds", "Drive"],
+  ["https://mail.google.com/mail/feed/atom", "Gmail"],
+];
+
 /** Broad access to one product, short of mail and the whole of Drive. */
 const MEDIUM_PREFIX: Array<[string, string]> = [
+  ["https://spreadsheets.google.com/feeds", "Docs, Sheets, Slides"],
+  ["https://www.google.com/calendar/feeds", "Calendar"],
   [`${AUTH}gmail.send`, "Send mail"],
   [`${AUTH}calendar`, "Calendar"],
   [`${AUTH}contacts`, "Contacts"],
@@ -396,6 +404,11 @@ export function classifyScope(scope: string): ScopeInfo {
   if (s.startsWith(`${AUTH}admin.`)) return { level: "high", area: "Admin console" };
   if (s.startsWith("https://apps-apis.google.com/")) {
     return { level: "high", area: "Admin console" };
+  }
+  // Older-style addresses for the same reach, which long-lived grants can
+  // still carry: every document, or the inbox.
+  for (const [prefix, area] of LEGACY_HIGH_PREFIX) {
+    if (s === prefix || s.startsWith(`${prefix}/`)) return { level: "high", area };
   }
 
   const low = LOW_EXACT[s];

@@ -347,6 +347,13 @@ describe("forwardingFindings", () => {
 });
 
 describe("classifyScope", () => {
+  it("knows the older feed-style addresses for the same reach", () => {
+    assert.deepEqual(classifyScope("https://docs.google.com/feeds/"), { level: "high", area: "Drive" });
+    assert.deepEqual(classifyScope("https://mail.google.com/mail/feed/atom"), { level: "high", area: "Gmail" });
+    assert.equal(classifyScope("https://spreadsheets.google.com/feeds").level, "medium");
+    assert.equal(classifyScope("https://www.google.com/calendar/feeds").area, "Calendar");
+  });
+
   it("ranks full mail and full Drive access highest", () => {
     assert.deepEqual(classifyScope("https://mail.google.com/"), { level: "high", area: "Gmail" });
     assert.deepEqual(classifyScope("https://www.googleapis.com/auth/gmail.readonly"), {
