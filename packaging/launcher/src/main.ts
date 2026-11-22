@@ -404,6 +404,9 @@ async function startUnderLock(
     // every start.
     warn(`The application could not be loaded (${describe(first)}). Unpacking it again ...`);
     try {
+      // server.js makes its own folder the working directory first thing, and
+      // Windows will not move a folder that is a process's working directory.
+      process.chdir(paths.appRoot);
       appDir = await withAppLock(paths.appRoot, () => {
         if (!discardDir(wantedAppDir)) {
           throw new Error(`the damaged copy in ${wantedAppDir} could not be removed`);
