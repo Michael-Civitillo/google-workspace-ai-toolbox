@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from "react";
 import {
   setCurrentTenantState,
   notifyTenantsChanged,
+  tenantStateGeneration,
+  useCurrentTenant,
 } from "@/lib/tenant-client";
 import {
   Card,
@@ -84,8 +86,17 @@ export default function TenantsPage() {
     Record<string, PreflightState>
   >({});
 
+  // The tenant the rest of the app is on right now. The sidebar can switch
+  // it without this page knowing, so the "Active" badge follows it.
+  const { id: currentTenantId } = useCurrentTenant();
+
   const load = useCallback(() => {
     setLoading(true);
+    // Snapshot the tenant-state generation before the round trip: if a switch
+    // lands while this list is in flight (the sidebar, another tab's
+    // re-sync, a Switch button here), the answer describes the tenant that
+    // was active BEFORE it, and applying it would silently undo the switch.
+    const genBefore = tenantStateGeneration();
     return fetch("/api/tenants")
       .then(async (r) => {
         // An error response must not be read as an empty tenant list: that
@@ -98,6 +109,7 @@ export default function TenantsPage() {
         const tenants: Tenant[] = data.tenants ?? [];
         const activeId: string | null = data.activeTenantId ?? null;
         setState({ tenants, activeTenantId: activeId });
+        if (tenantStateGeneration() !== genBefore) return;
         // Keep the module-scoped current tenant (used by tfetch's x-tenant-id
         // header and confirm dialogs) in sync with the server's active tenant.
         // After a delete this also adopts the server's newly-promoted active
@@ -180,6 +192,8 @@ export default function TenantsPage() {
       const data = await res.json();
       if (!res.ok) return setError(data.error ?? "Failed to update tenant");
       setEditingId(null);
+      // Don't keep a saved key in page state.
+      setEditForm(defaultForm());
       load();
       notifyTenantsChanged();
     } catch {
@@ -215,6 +229,7 @@ export default function TenantsPage() {
   }
 
   async function handleActivate(id: string) {
+    if (switching !== null) return;
     setSwitching(id);
     // Clear a stale banner (matching handleAdd/handleUpdate) so a message from
     // an earlier failed attempt can't outlive a retry that succeeds.
@@ -383,7 +398,8 @@ export default function TenantsPage() {
             ) : (
               state.tenants.map((tenant, idx) => {
                 const tc = TENANT_COLOR_CLASSES[tenant.color as TenantColor];
-                const isActive = tenant.id === state.activeTenantId;
+                const isActive =
+                  tenant.id === (currentTenantId ?? state.activeTenantId);
                 const isEditing = editingId === tenant.id;
 
                 return (
@@ -398,6 +414,7 @@ export default function TenantsPage() {
                         onSave={() => handleUpdate(tenant.id)}
                         onCancel={() => {
                           setEditingId(null);
+                          setEditForm(defaultForm());
                           setError(null);
                         }}
                         saving={saving}
@@ -443,7 +460,10 @@ export default function TenantsPage() {
                               variant="outline"
                               size="sm"
                               onClick={() => handleActivate(tenant.id)}
-                              disabled={switching === tenant.id}
+                              // One switch at a time: two in flight can land
+                              // in either order and leave the app on the one
+                              // clicked first.
+                              disabled={switching !== null}
                               className="h-8 text-xs"
                             >
                               <ArrowRightLeft className="h-3.5 w-3.5 mr-1" />
@@ -677,6 +697,11 @@ function TenantFormFields({
         </Label>
         <Input
           id="t-gemini"
+          // A secret: masked on screen, and kept out of the browser's form
+          // history. It is cleared from the page once saved.
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
           value={form.geminiApiKey}
           onChange={(e) => onChange("geminiApiKey", e.target.value)}
           placeholder="Leave blank to keep current / use GOOGLE_GENERATIVE_AI_API_KEY env var"
