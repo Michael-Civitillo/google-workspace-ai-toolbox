@@ -104,6 +104,11 @@ export function installShutdown(onShutdown: () => void): void {
   };
   process.on("SIGINT", () => handle("SIGINT"));
   process.on("SIGTERM", () => handle("SIGTERM"));
+  // Closing the console window on Windows arrives as SIGHUP, a few seconds
+  // before Windows ends the process regardless: enough to remove the lock
+  // file. Elsewhere SIGHUP is left alone, so a run started with nohup keeps
+  // running when its terminal closes.
+  if (process.platform === "win32") process.on("SIGHUP", () => handle("SIGHUP"));
   // Backstop for every other way out, including Next's own process.exit().
   process.on("exit", () => onShutdown());
 }

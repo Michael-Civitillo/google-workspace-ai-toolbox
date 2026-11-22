@@ -14,10 +14,12 @@ import {
   type LauncherConfig,
 } from "./config.ts";
 import {
+  discardDir,
   ensureExtracted,
   isExtracted,
   payloadHash,
   pruneOtherVersions,
+  resetAppCache,
   type ExtractResult,
 } from "./extract.ts";
 import {
@@ -28,8 +30,10 @@ import {
   PORT_FALLBACK_SPAN,
   removeOwnLock,
   writeLock,
+  type RunningInstance,
 } from "./instance.ts";
-import { appDirFor, resolvePathsForProcess } from "./paths.ts";
+import { acquireLock, LockTimeoutError, type HeldLock, type LockOptions } from "./lock.ts";
+import { appDirFor, resolvePathsForProcess, type ResolvedPaths } from "./paths.ts";
 import { isSea, loadPayload } from "./payload.ts";
 import { openBrowser } from "./browser.ts";
 import {
@@ -69,11 +73,19 @@ const APP_TITLE = "Google Workspace Open Admin";
 const DEFAULT_HOST = "127.0.0.1";
 const READY_TIMEOUT_MS = 60_000;
 
+/** One start at a time per data folder (see run). */
+const STARTUP_LOCK = "startup.lock";
+/** One unpack or clean-up at a time per application folder. */
+const APP_LOCK = "open-admin.lock";
+const STARTUP_WAIT_MS = 3 * 60_000;
+const APP_LOCK_WAIT_MS = 5 * 60_000;
+
 const EXIT_OK = 0;
 const EXIT_USAGE = 2;
 const EXIT_PORT_BUSY = 3;
 const EXIT_EXTRACT_FAILED = 4;
 const EXIT_NOT_READY = 5;
+const EXIT_STARTING_ELSEWHERE = 6;
 
 /**
  * A loopback URL must be spelled `localhost`, not `127.0.0.1`.
@@ -194,50 +206,98 @@ async function resolveSettings(
   return { config, dirty };
 }
 
-async function run(userArgs: string[]): Promise<number | null> {
-  const parsed = parseArgs(userArgs);
-  if (parsed.error || !parsed.args) {
-    console.error(`Error: ${parsed.error}`);
-    console.error("");
-    console.error(usage(path.basename(process.execPath)));
-    return EXIT_USAGE;
+/**
+ * Hold the application folder's lock while `work` runs: unpacking, repairing
+ * and clean-up never overlap with another launch doing the same.
+ */
+async function withAppLock<T>(
+  appRoot: string,
+  work: () => T,
+  options: LockOptions = {}
+): Promise<T> {
+  fs.mkdirSync(appRoot, { recursive: true });
+  const lock = await acquireLock(path.join(appRoot, APP_LOCK), {
+    waitMs: APP_LOCK_WAIT_MS,
+    onWait: (owner) =>
+      info(
+        `Another copy of Open Admin${owner ? ` (process ${owner.pid})` : ""} is ` +
+          `unpacking the application; waiting for it to finish ...`
+      ),
+    ...options,
+  });
+  try {
+    return work();
+  } finally {
+    lock.release();
   }
-  const args = parsed.args;
+}
 
-  if (args.help) {
-    plain(usage(path.basename(process.execPath)));
-    return EXIT_OK;
-  }
-  if (args.version) {
-    printVersion();
-    return EXIT_OK;
-  }
+/**
+ * Why the unpacked copy in `appDir` can't be used as it is, or null when it
+ * can. A missing server.js is what antivirus quarantine or a half-finished
+ * clean-up leaves behind, and it used to stop every start with "Fatal".
+ */
+function appDirProblem(appDir: string): string | null {
+  return fs.existsSync(path.join(appDir, "server.js")) ? null : "server.js is missing";
+}
 
-  const paths = resolvePathsForProcess(args.root, args.dataDir);
-  fs.mkdirSync(paths.dataDir, { recursive: true });
-  initLogFile(path.join(paths.dataDir, "logs"));
-
-  plain("");
-  plain(`${APP_TITLE} ${__APP_VERSION__}  (Node ${process.version})`);
-  info(`Data folder: ${paths.dataDir}${paths.portable ? "  (portable mode)" : ""}`);
-
-  const applied = applyEnvFile(path.join(paths.dataDir, "launcher.env"));
-  if (applied.length > 0) info(`Loaded from launcher.env: ${applied.join(", ")}`);
-
-  const host = args.host ?? DEFAULT_HOST;
-  // Signing the browser in automatically is for the person at this machine.
-  // Bound to anything else, the app is being served to other people, and they
-  // sign in like anyone else.
-  const autoSignIn = !args.noAutoSignIn && isLoopbackHost(host);
-  if (host !== DEFAULT_HOST) {
-    warn(
-      `Binding ${host} instead of loopback. Anyone who can reach this machine on ` +
-        `the network can reach the app, over plain HTTP. Add the URL people will ` +
-        `type to APP_ALLOWED_ORIGINS in launcher.env, or every sign-in is refused ` +
-        `as cross-origin.`
+/** Unpack a fresh copy into `appDir` and say so. */
+function unpackFresh(appDir: string): string {
+  const result = extractVerifiedPayload(appDir);
+  if (result.extracted) {
+    info(
+      `Unpacked ${result.fileCount.toLocaleString("en-US")} application files ` +
+        `in ${(result.elapsedMs / 1000).toFixed(1)}s.`
     );
   }
+  return result.appDir;
+}
 
+/**
+ * Make sure a usable copy of this version is unpacked, repairing a damaged
+ * one. The app directory is keyed by the payload hash baked in at build time,
+ * so a launch that finds it already extracted never touches the embedded
+ * archive: no copy out of the executable, no hashing, nothing resident
+ * afterwards. Called with the application folder's lock held.
+ */
+function prepareAppDir(appDir: string, appRoot: string, reset: boolean): string {
+  if (reset) {
+    info("Clearing extracted application files (--reset-app-cache).");
+    resetAppCache(appRoot);
+  }
+  if (isExtracted(appDir)) {
+    const problem = appDirProblem(appDir);
+    if (!problem) return appDir;
+    warn(`The unpacked application in ${appDir} is damaged (${problem}). Unpacking a fresh copy ...`);
+    if (!discardDir(appDir)) {
+      throw new Error(`the damaged copy in ${appDir} could not be removed`);
+    }
+  } else {
+    // Said before the work, so a slow unpack isn't taken for a hang.
+    info("Unpacking the application. This takes a moment the first time ...");
+  }
+  return unpackFresh(appDir);
+}
+
+interface StartedServer {
+  host: string;
+  port: number;
+  config: LauncherConfig;
+  appDir: string;
+  running: RunningInstance;
+}
+
+/**
+ * Everything from "is it already running?" to "the server is up and the lock
+ * file says so", which must not interleave with another launch using the same
+ * data folder. Returns an exit code when this run is over.
+ */
+async function startUnderLock(
+  args: ParsedArgs,
+  paths: ResolvedPaths,
+  host: string,
+  autoSignIn: boolean
+): Promise<StartedServer | number> {
   const configFile = path.join(paths.dataDir, "launcher.json");
   const lockFile = path.join(paths.dataDir, "launcher.lock");
   const stored = readConfigFile(configFile);
@@ -319,29 +379,22 @@ async function run(userArgs: string[]): Promise<number | null> {
     }
   }
 
-  // Unpack the bundled application. The app directory is keyed by the payload
-  // hash baked in at build time, so a launch that finds it already extracted
-  // never touches the embedded archive: no copy out of the executable, no
-  // hashing, nothing resident afterwards.
-  const appDir = appDirFor(paths.appRoot, __APP_VERSION__, __PAYLOAD_SHA256__);
-  if (args.resetAppCache) {
-    info("Clearing extracted application files (--reset-app-cache).");
-    fs.rmSync(paths.appRoot, { recursive: true, force: true });
-  }
-  let extractedAppDir: string;
+  const wantedAppDir = appDirFor(paths.appRoot, __APP_VERSION__, __PAYLOAD_SHA256__);
+  let appDir: string;
   try {
-    const result: ExtractResult = isExtracted(appDir)
-      ? { appDir, extracted: false, fileCount: 0, elapsedMs: 0 }
-      : extractVerifiedPayload(appDir);
-    extractedAppDir = result.appDir;
-    if (result.extracted) {
-      info(
-        `Unpacked ${result.fileCount.toLocaleString("en-US")} application files ` +
-          `in ${(result.elapsedMs / 1000).toFixed(1)}s.`
-      );
-    }
+    appDir = await withAppLock(paths.appRoot, () =>
+      prepareAppDir(wantedAppDir, paths.appRoot, args.resetAppCache)
+    );
   } catch (e) {
-    error(`Could not unpack the application into ${appDir}: ${describe(e)}`);
+    if (e instanceof LockTimeoutError) {
+      error(
+        `Another copy of Open Admin${e.owner ? ` (process ${e.owner.pid})` : ""} has been ` +
+          `unpacking the application for more than ${APP_LOCK_WAIT_MS / 60_000} minutes. ` +
+          `Wait for it, or close it, then try again.`
+      );
+      return EXIT_EXTRACT_FAILED;
+    }
+    error(`Could not unpack the application into ${wantedAppDir}: ${describe(e)}`);
     error(
       "Check that the folder is writable and that antivirus software isn't " +
         "blocking it, then try again."
@@ -357,7 +410,7 @@ async function run(userArgs: string[]): Promise<number | null> {
   installShutdown(() => removeOwnLock(lockFile, instanceToken));
 
   applyServerEnv({
-    appDir: extractedAppDir,
+    appDir,
     dataDir: paths.dataDir,
     host,
     port,
@@ -368,7 +421,30 @@ async function run(userArgs: string[]): Promise<number | null> {
 
   const url = browsableUrl(host, port);
   info(`Starting the server on ${url} ...`);
-  startEmbeddedServer(extractedAppDir);
+  try {
+    startEmbeddedServer(appDir);
+  } catch (first) {
+    // The server's code failed to load: a file damaged or removed since it was
+    // unpacked. Unpack it again, once, rather than failing the same way on
+    // every start.
+    warn(`The application could not be loaded (${describe(first)}). Unpacking it again ...`);
+    try {
+      appDir = await withAppLock(paths.appRoot, () => {
+        if (!discardDir(wantedAppDir)) {
+          throw new Error(`the damaged copy in ${wantedAppDir} could not be removed`);
+        }
+        return unpackFresh(wantedAppDir);
+      });
+      startEmbeddedServer(appDir);
+    } catch (second) {
+      error(`The server could not be started: ${describe(second)}`);
+      error(
+        "If this keeps happening, antivirus software may be removing the " +
+          `application's files: allow ${paths.appRoot} and try again.`
+      );
+      return EXIT_NOT_READY;
+    }
+  }
 
   try {
     await waitUntilReady(host, port, READY_TIMEOUT_MS);
@@ -385,13 +461,85 @@ async function run(userArgs: string[]): Promise<number | null> {
     token: instanceToken,
   });
 
-  // A copy that could not prove itself may be an older version still running
-  // from its own application folder; leave the old folders until next time.
-  if (running.kind !== "unverified") {
-    const pruned = pruneOtherVersions(paths.appRoot, extractedAppDir);
-    if (pruned.length > 0) info(`Removed ${pruned.length} older application copies.`);
+  return { host, port, config, appDir, running };
+}
+
+async function run(userArgs: string[]): Promise<number | null> {
+  const parsed = parseArgs(userArgs);
+  if (parsed.error || !parsed.args) {
+    console.error(`Error: ${parsed.error}`);
+    console.error("");
+    console.error(usage(path.basename(process.execPath)));
+    return EXIT_USAGE;
+  }
+  const args = parsed.args;
+
+  if (args.help) {
+    plain(usage(path.basename(process.execPath)));
+    return EXIT_OK;
+  }
+  if (args.version) {
+    printVersion();
+    return EXIT_OK;
   }
 
+  const paths = resolvePathsForProcess(args.root, args.dataDir);
+  fs.mkdirSync(paths.dataDir, { recursive: true });
+  initLogFile(path.join(paths.dataDir, "logs"));
+
+  plain("");
+  plain(`${APP_TITLE} ${__APP_VERSION__}  (Node ${process.version})`);
+  info(`Data folder: ${paths.dataDir}${paths.portable ? "  (portable mode)" : ""}`);
+
+  const applied = applyEnvFile(path.join(paths.dataDir, "launcher.env"));
+  if (applied.length > 0) info(`Loaded from launcher.env: ${applied.join(", ")}`);
+
+  const host = args.host ?? DEFAULT_HOST;
+  // Signing the browser in automatically is for the person at this machine.
+  // Bound to anything else, the app is being served to other people, and they
+  // sign in like anyone else.
+  const autoSignIn = !args.noAutoSignIn && isLoopbackHost(host);
+  if (host !== DEFAULT_HOST) {
+    warn(
+      `Binding ${host} instead of loopback. Anyone who can reach this machine on ` +
+        `the network can reach the app, over plain HTTP. Add the URL people will ` +
+        `type to APP_ALLOWED_ORIGINS in launcher.env, or every sign-in is refused ` +
+        `as cross-origin.`
+    );
+  }
+
+  // One start at a time per data folder. Two double-clicks a moment apart used
+  // to unpack into, and delete, the same folder at once; now the second waits
+  // for the first to finish starting, and then finds it running.
+  let startup: HeldLock;
+  try {
+    startup = await acquireLock(path.join(paths.dataDir, STARTUP_LOCK), {
+      waitMs: STARTUP_WAIT_MS,
+      onWait: (owner) =>
+        info(
+          `Another copy of Open Admin${owner ? ` (process ${owner.pid})` : ""} is ` +
+            `starting; waiting for it to finish ...`
+        ),
+    });
+  } catch (e) {
+    if (!(e instanceof LockTimeoutError)) throw e;
+    error(
+      `Another copy of Open Admin${e.owner ? ` (process ${e.owner.pid})` : ""} has been ` +
+        `starting for more than ${STARTUP_WAIT_MS / 60_000} minutes. Let it finish, or ` +
+        `close it, then try again.`
+    );
+    return EXIT_STARTING_ELSEWHERE;
+  }
+  let started: StartedServer | number;
+  try {
+    started = await startUnderLock(args, paths, host, autoSignIn);
+  } finally {
+    startup.release();
+  }
+  if (typeof started === "number") return started;
+  const { port, config } = started;
+
+  const url = browsableUrl(host, port);
   plain("");
   info(`Ready: ${url}`);
   const opening = config.openBrowser && !args.noBrowser;
@@ -405,6 +553,23 @@ async function run(userArgs: string[]): Promise<number | null> {
   );
   plain("Keep this window open while you work. Closing it, or Ctrl+C, stops Open Admin.");
   plain("");
+
+  // Clean up older versions last, once the person has their window: it is
+  // the slowest part of an upgrade and nothing waits on it. Skipped when
+  // another launch is busy in the folder, and when a copy that could not
+  // prove itself may be an older version still running from its own folder.
+  if (started.running.kind !== "unverified") {
+    try {
+      const pruned = await withAppLock(
+        paths.appRoot,
+        () => pruneOtherVersions(paths.appRoot, started.appDir),
+        { waitMs: 0, onWait: () => {} }
+      );
+      if (pruned.length > 0) info(`Removed ${pruned.length} older application copies.`);
+    } catch {
+      // Next time.
+    }
+  }
 
   // Resolve with null: the server owns the process from here.
   return null;
