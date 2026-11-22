@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { urlHost } from "./address.ts";
 import { probeHttp } from "./instance.ts";
 
 /**
@@ -69,7 +70,11 @@ export function startEmbeddedServer(appDir: string): void {
   createRequire(serverJs)(serverJs);
 }
 
-/** Poll the login page until the server answers, or give up. */
+/**
+ * Poll the login page until the server answers, or give up. `host` is where
+ * this machine reaches the server (address.ts reachableHost), which for a
+ * server bound to every address is loopback, not the bind address.
+ */
 export async function waitUntilReady(
   host: string,
   port: number,
@@ -80,7 +85,7 @@ export async function waitUntilReady(
     const status = await probeHttp(host, port, "/login", 2000);
     if (status !== null) return status;
     if (Date.now() > deadline) {
-      throw new Error(`server did not answer on ${host}:${port} within ${timeoutMs} ms`);
+      throw new Error(`server did not answer on ${urlHost(host)}:${port} within ${timeoutMs} ms`);
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }

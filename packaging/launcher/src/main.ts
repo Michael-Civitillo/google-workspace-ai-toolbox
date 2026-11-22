@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { browsableUrl, normalizeHost, reachableHost } from "./address.ts";
 import { parseArgs, usage, type ParsedArgs } from "./args.ts";
 import {
   applyEnvFile,
@@ -105,21 +106,6 @@ const EXIT_NOT_READY = 5;
 const EXIT_STARTING_ELSEWHERE = 6;
 
 /**
- * A loopback URL must be spelled `localhost`, not `127.0.0.1`.
- *
- * The standalone Next.js server treats the address it bound as the canonical
- * host and normalises every loopback spelling to `localhost`; the app's CSRF
- * check compares the browser's Origin against that. The app now also accepts
- * the numeric form, but `localhost` is additionally what browsers treat as a
- * trustworthy origin, which is what lets the Secure session cookie work over
- * plain HTTP. So: bind the address, advertise the name.
- */
-function browsableUrl(host: string, port: number): string {
-  const shown = isLoopbackHost(host) ? "localhost" : host;
-  return `http://${shown}:${port}`;
-}
-
-/**
  * Open the browser, signed in when that is possible.
  *
  * With automatic sign-in the launcher trades the password it holds for a
@@ -135,7 +121,9 @@ async function openSignedIn(
   autoSignIn: boolean
 ): Promise<boolean> {
   const url = browsableUrl(host, port);
-  const ticket = autoSignIn ? await requestLaunchTicket(host, port, password, url) : null;
+  const ticket = autoSignIn
+    ? await requestLaunchTicket(reachableHost(host), port, password, url)
+    : null;
   openBrowser(signInUrl(url, ticket));
   return ticket !== null;
 }
@@ -332,7 +320,7 @@ async function startUnderLock(
   // Someone already started it: hand them the window rather than a port clash.
   // "Ours" means the server proved it knows the token in the lock file; only
   // then is the saved password sent anywhere.
-  const running = await findRunningInstance(lockFile);
+  const running = await findRunningInstance(lockFile, { reach: reachableHost });
   if (running.kind === "ours") {
     const url = browsableUrl(running.host, running.port);
     info(`Already running at ${url} - opening it.`);
@@ -486,7 +474,7 @@ async function startUnderLock(
   });
 
   try {
-    await waitUntilReady(host, port, READY_TIMEOUT_MS);
+    await waitUntilReady(reachableHost(host), port, READY_TIMEOUT_MS);
   } catch (e) {
     error(`The server didn't finish starting: ${describe(e)}`);
     return EXIT_NOT_READY;
@@ -552,12 +540,12 @@ async function run(userArgs: string[]): Promise<number | null> {
     );
   }
 
-  const host = args.host ?? DEFAULT_HOST;
+  const host = normalizeHost(args.host ?? DEFAULT_HOST);
   // Signing the browser in automatically is for the person at this machine.
   // Bound to anything else, the app is being served to other people, and they
   // sign in like anyone else.
   const autoSignIn = !args.noAutoSignIn && isLoopbackHost(host);
-  if (host !== DEFAULT_HOST) {
+  if (!isLoopbackHost(host)) {
     warn(
       `Binding ${host} instead of loopback. Anyone who can reach this machine on ` +
         `the network can reach the app, over plain HTTP. Add the URL people will ` +
