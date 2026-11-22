@@ -43,6 +43,24 @@ const PUBLIC_ORIGIN = "https://admin.example.test";
 let failures = 0;
 let checks = 0;
 
+/**
+ * A run that stops before its last line has not passed. Node ends a script
+ * with exit code 0 once nothing is left that could wake it, even half-way
+ * through an `await`: a step waiting for something that will never happen
+ * would end the run early, silently, and as a success. So the run counts as
+ * failed until finish() says otherwise.
+ */
+let finished = false;
+process.exitCode = 1;
+process.on("exit", () => {
+  if (!finished) console.error("\nsmoke: the run stopped before it finished. That counts as a failure.");
+});
+
+function finish(code) {
+  finished = true;
+  process.exit(code);
+}
+
 function check(name, condition, detail = "") {
   checks++;
   if (condition) {
@@ -58,6 +76,22 @@ function skip(name, why) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The promise's value, or "timeout"; no timer is left running either way. */
+function orTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Whether a child process has ended. One ended by a signal has no exit code,
+ * only the signal's name, and that is every child this script stops on
+ * Windows, where kill() ends the process outright.
+ */
+const hasExited = (child) => child.exitCode !== null || child.signalCode !== null;
 
 async function get(pathname, init = {}) {
   return fetch(`${BASE}${pathname}`, { redirect: "manual", ...init });
@@ -75,7 +109,9 @@ async function postJson(pathname, body, headers = {}) {
 async function waitForReady(child, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`process exited early (${child.exitCode})`);
+    if (hasExited(child)) {
+      throw new Error(`process exited early (${child.exitCode ?? child.signalCode})`);
+    }
     try {
       const res = await get("/login");
       if (res.status === 200) return Date.now();
@@ -112,11 +148,9 @@ function launch(args) {
 
 /** Resolves with the exit code, or "timeout". */
 function exitOf(handle, timeoutMs) {
-  if (handle.child.exitCode !== null) return Promise.resolve(handle.child.exitCode);
-  return Promise.race([
-    new Promise((resolve) => handle.child.once("exit", (code) => resolve(code))),
-    sleep(timeoutMs).then(() => "timeout"),
-  ]);
+  const { child } = handle;
+  if (hasExited(child)) return Promise.resolve(child.exitCode);
+  return orTimeout(new Promise((resolve) => child.once("exit", (code) => resolve(code))), timeoutMs);
 }
 
 const lastLine = (handle) => handle.output().trim().split("\n").pop();
@@ -171,25 +205,42 @@ async function waitForReadyUrl(handle, timeoutMs) {
   while (Date.now() < deadline) {
     const url = handle.output().match(/Ready: (http:\/\/localhost:\d+)/)?.[1];
     if (url) return url;
-    if (handle.child.exitCode !== null) return null;
+    if (hasExited(handle.child)) return null;
     await sleep(250);
   }
   return null;
 }
 
+/**
+ * Stop a launcher and give its exit code (null when a signal ended it), or
+ * "timeout" when it had to be killed. Safe to call again for one already
+ * stopped, which the clean-up at the end does for every launcher started.
+ */
 async function stop(child, timeoutMs = 10_000) {
-  if (child.exitCode !== null) return child.exitCode;
+  if (hasExited(child)) return child.exitCode;
   const exited = new Promise((resolve) => child.once("exit", (code) => resolve(code)));
   // Windows has no signal delivery between processes: kill() terminates the
   // process outright, so exit handlers never run there.
   child.kill(process.platform === "win32" ? undefined : "SIGINT");
-  const result = await Promise.race([exited, sleep(timeoutMs).then(() => "timeout")]);
-  if (result === "timeout") {
-    child.kill("SIGKILL");
-    await exited;
-    return "timeout";
+  const result = await orTimeout(exited, timeoutMs);
+  if (result !== "timeout") return result;
+  child.kill("SIGKILL");
+  // Bounded too: a process that can't be killed must not hold the run.
+  await orTimeout(exited, 5000);
+  return "timeout";
+}
+
+/**
+ * Delete the run's folder. Not a check: on Windows a file a process has just
+ * let go of can stay locked for a moment (a virus scanner reading it), and a
+ * folder left in the temporary directory says nothing about the build.
+ */
+function removeDataRoot(root) {
+  try {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (e) {
+    console.log(`\nsmoke: could not remove ${root} (${e instanceof Error ? e.message : e})`);
   }
-  return result;
 }
 
 function findFiles(dir, name, found = []) {
@@ -210,7 +261,7 @@ function findFiles(dir, name, found = []) {
 async function main() {
   if (!fs.existsSync(binary)) {
     console.error(`smoke: no binary at ${binary}`);
-    process.exit(1);
+    finish(1);
   }
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "open-admin-smoke-"));
@@ -514,7 +565,7 @@ async function main() {
     );
     check(
       "the first is still serving afterwards",
-      one.child.exitCode === null && (await statusOf(`http://127.0.0.1:${freshPort}/login`)) === 200
+      !hasExited(one.child) && (await statusOf(`http://127.0.0.1:${freshPort}/login`)) === 200
     );
     const freshEntries = fs.existsSync(path.join(fresh, "app")) ? fs.readdirSync(path.join(fresh, "app")) : [];
     check(
@@ -772,14 +823,14 @@ async function main() {
     if (secondHandle) await stop(secondHandle.child, 5000);
     await stop(first.child, 5000);
     for (const handle of started) await stop(handle.child, 5000);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeDataRoot(root);
   }
 
   console.log(`\nsmoke: ${checks - failures}/${checks} checks passed`);
-  process.exit(failures === 0 ? 0 : 1);
+  finish(failures === 0 ? 0 : 1);
 }
 
 main().catch((e) => {
   console.error(`smoke: ${e instanceof Error ? e.stack : e}`);
-  process.exit(1);
+  finish(1);
 });
