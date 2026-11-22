@@ -52,6 +52,15 @@ interface GroupMember {
 
 const ROLES = ["MEMBER", "MANAGER", "OWNER"] as const;
 
+/** An add as it stood when its confirmation opened. */
+interface PendingAdd {
+  group: string;
+  member: string;
+  role: string;
+  /** Outside the tenant's verified domains (or the domains are unknown). */
+  external: boolean;
+}
+
 export default function Groups() {
   const { tenant, id: tenantId } = useCurrentTenant();
 
@@ -71,11 +80,19 @@ export default function Groups() {
   const [newRole, setNewRole] = useState("MEMBER");
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
-  const [confirmAddOpen, setConfirmAddOpen] = useState(false);
+  // The group, member and role the add dialog acts on, pinned when it opens:
+  // a member list that finishes loading for another group while the dialog
+  // is open must not change where Confirm adds the member.
+  const [pendingAdd, setPendingAdd] = useState<PendingAdd | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
   const [confirmRemoveTarget, setConfirmRemoveTarget] = useState<{
     group: string;
     member: string;
   } | null>(null);
+  // Tenant's verified domains (aliases included), for flagging an outside
+  // member. null = not loaded / lookup failed → treated as outside, the same
+  // fail-safe the server's gate uses.
+  const [verifiedDomains, setVerifiedDomains] = useState<string[] | null>(null);
 
   // Memberships tab
   const [memberUser, setMemberUser] = useState("");
@@ -94,6 +111,8 @@ export default function Groups() {
 
   const tenantIdRef = useRef(tenantId);
   tenantIdRef.current = tenantId;
+  const selectedGroupRef = useRef(selectedGroup);
+  selectedGroupRef.current = selectedGroup;
 
   // Per-list request sequence numbers. A response only applies if it is still
   // the LATEST request for that list — otherwise a slow first page can
@@ -107,8 +126,10 @@ export default function Groups() {
   // hand Google a token from a different result set.
   const [groupsQuery, setGroupsQuery] = useState("");
 
-  // Lists fetched for tenant A must never drive actions against tenant B.
+  // Lists fetched for tenant A must never drive actions against tenant B,
+  // and a dialog opened under A must not confirm a change under B.
   useEffect(() => {
+    let cancelled = false;
     setGroups([]);
     setGroupsPageToken(null);
     setGroupsSearched(false);
@@ -119,7 +140,33 @@ export default function Groups() {
     setUserGroupsPageToken(null);
     setUserGroupsSearched(false);
     setListedMemberUser("");
+    setPendingAdd(null);
+    setAddError(null);
+    setConfirmRemoveTarget(null);
+    setVerifiedDomains(null);
+    tfetch("/api/admin/domains", {}, tenantId)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        if (d?.success && Array.isArray(d.data)) {
+          setVerifiedDomains(
+            d.data
+              .filter((x: { verified?: boolean }) => x.verified)
+              .map((x: { domainName: string }) => x.domainName.toLowerCase())
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [tenantId]);
+
+  const isExternal = (address: string) => {
+    const at = address.lastIndexOf("@");
+    const domain = at === -1 ? "" : address.slice(at + 1).trim().toLowerCase();
+    return !!domain && (verifiedDomains === null || !verifiedDomains.includes(domain));
+  };
 
   const loadGroups = async (append: boolean) => {
     setGroupsLoading(true);
@@ -202,11 +249,24 @@ export default function Groups() {
     }
   };
 
-  const addMember = async () => {
+  const openAdd = () => {
     const member = newMember.trim();
     if (!selectedGroup || !member) return;
+    setMessage(null);
+    setAddError(null);
+    setPendingAdd({
+      group: selectedGroup,
+      member,
+      role: newRole,
+      external: isExternal(member),
+    });
+  };
+
+  const addMember = async (p: PendingAdd) => {
     setAdding(true);
     setMessage(null);
+    setAddError(null);
+    const pinnedTenantId = tenantId;
     try {
       const res = await tfetch(
         "/api/admin/groups/members",
@@ -214,42 +274,46 @@ export default function Groups() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            group: selectedGroup,
-            member,
-            role: newRole,
+            group: p.group,
+            member: p.member,
+            role: p.role,
+            // Both are the member's address as the operator typed it in the
+            // dialog, which asks for it whenever either applies: the server
+            // wants it for an Owner, and for anyone outside the tenant.
+            confirm: p.role === "OWNER" ? p.member : undefined,
+            confirmExternal: p.external ? p.member : undefined,
           }),
         },
-        tenantId
+        pinnedTenantId
       );
       const result = await res.json();
+      if (tenantIdRef.current !== pinnedTenantId) return;
 
       if (result.success) {
-        const added = member;
         setNewMember("");
-        setConfirmAddOpen(false);
+        setPendingAdd(null);
         // Refresh first, then set the message — loadMembers clears messages in
         // its prologue, which would erase this text in the same render batch.
-        await loadMembers(selectedGroup, false);
+        // Only if that group is still the one on screen.
+        if (selectedGroupRef.current === p.group) {
+          await loadMembers(p.group, false);
+        }
+        if (tenantIdRef.current !== pinnedTenantId) return;
         setMessage({
           type: "success",
           text: result.data?.alreadyMember
             ? result.data?.roleChanged
-              ? `${added} was already a member of ${selectedGroup} — role changed from ${result.data?.previousRole ?? "?"} to ${newRole}`
-              : `${added} was already a member of ${selectedGroup}`
-            : `Added ${added} to ${selectedGroup} as ${newRole}`,
+              ? `${p.member} was already a member of ${p.group} — role changed from ${result.data?.previousRole ?? "?"} to ${p.role}`
+              : `${p.member} was already a member of ${p.group}`
+            : `Added ${p.member} to ${p.group} as ${p.role}`,
         });
       } else {
-        // Close the dialog so the page-level error banner isn't hidden
-        // behind the modal overlay.
-        setConfirmAddOpen(false);
-        setMessage({
-          type: "error",
-          text: result.error || "Failed to add group member",
-        });
+        // Stay in the dialog: that is where the operator is looking.
+        setAddError(result.error || "Failed to add group member");
       }
     } catch {
-      setConfirmAddOpen(false);
-      setMessage({ type: "error", text: "Failed to connect to the API" });
+      if (tenantIdRef.current !== pinnedTenantId) return;
+      setAddError("Failed to connect to the API");
     } finally {
       setAdding(false);
     }
@@ -345,6 +409,10 @@ export default function Groups() {
       setUserGroupsLoading(false);
     }
   };
+
+  // An outside member or a new owner is typed out in full before it is added.
+  const addNeedsTyping =
+    !!pendingAdd && (pendingAdd.external || pendingAdd.role === "OWNER");
 
   const roleBadgeClass = (role: string) =>
     role === "OWNER"
@@ -502,11 +570,8 @@ export default function Groups() {
                           </SelectContent>
                         </Select>
                         <Button
-                          onClick={() => {
-                            setMessage(null);
-                            setConfirmAddOpen(true);
-                          }}
-                          disabled={!newMember || adding}
+                          onClick={openAdd}
+                          disabled={!newMember.trim() || adding}
                         >
                           {adding ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -515,6 +580,15 @@ export default function Groups() {
                           )}
                         </Button>
                       </div>
+                      {newMember.trim() && isExternal(newMember.trim()) && (
+                        <p className="text-xs text-warning-fg">
+                          This address is outside your organisation
+                          {verifiedDomains === null
+                            ? " (or the tenant's domains couldn't be checked)"
+                            : ""}
+                          .
+                        </p>
+                      )}
                     </div>
                     <Separator />
                   </>
@@ -695,26 +769,64 @@ export default function Groups() {
       </Tabs>
 
       <ConfirmActionDialog
-        open={confirmAddOpen}
-        onOpenChange={(o) => !adding && setConfirmAddOpen(o)}
+        open={!!pendingAdd}
+        onOpenChange={(o) => {
+          if (adding || o) return;
+          setPendingAdd(null);
+          setAddError(null);
+        }}
         title="Add group member"
-        summary={`Add ${newMember || "—"} to ${selectedGroup || "—"}.`}
+        summary={`Add ${pendingAdd?.member ?? "—"} to ${pendingAdd?.group ?? "—"} as ${pendingAdd?.role ?? ""}.`}
         tenant={
           tenant ? { name: tenant.name, adminEmail: tenant.adminEmail } : null
         }
-        severity="medium"
-        confirmLabel="Add member"
+        severity={addNeedsTyping ? "high" : "medium"}
+        confirmPhrase={addNeedsTyping ? pendingAdd?.member : undefined}
+        confirmLabel={addError ? "Try again" : "Add member"}
         busy={adding}
         changes={[
-          { label: "Group", after: selectedGroup },
-          { label: "New member", after: newMember },
+          { label: "Group", after: pendingAdd?.group ?? "" },
+          {
+            label: pendingAdd?.external
+              ? "New member (outside your organisation)"
+              : "New member",
+            after: pendingAdd?.member ?? "",
+            emphasis: !!pendingAdd?.external,
+          },
           {
             label: "Role",
-            after: newRole,
-            emphasis: newRole !== "MEMBER",
+            after: pendingAdd?.role ?? "",
+            emphasis: !!pendingAdd && pendingAdd.role !== "MEMBER",
           },
         ]}
-        onConfirm={addMember}
+        warnings={
+          addNeedsTyping ? (
+            <>
+              {pendingAdd?.external && (
+                <p className={pendingAdd.role === "OWNER" ? "mb-2" : undefined}>
+                  <strong>{pendingAdd.member}</strong> is outside your
+                  organisation
+                  {verifiedDomains === null
+                    ? " (or the tenant's domains couldn't be checked)"
+                    : ""}
+                  : they will get whatever this group gives its members — its
+                  mail, and any files, calendars or sites shared with it.
+                </p>
+              )}
+              {pendingAdd?.role === "OWNER" && (
+                <p>
+                  An <strong>owner</strong> can change the group&apos;s
+                  settings, add and remove members (owners included), and
+                  delete the group.
+                </p>
+              )}
+            </>
+          ) : null
+        }
+        error={addError}
+        onConfirm={() => {
+          if (pendingAdd) void addMember(pendingAdd);
+        }}
       />
 
       <ConfirmActionDialog
